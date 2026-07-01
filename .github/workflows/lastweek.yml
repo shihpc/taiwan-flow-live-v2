@@ -1,0 +1,35 @@
+name: lastweek
+# 每週一重建 data/lastweek.json（上週各工作天成交值）。Worker 從 repo raw 抓此檔當靜態依賴。
+on:
+  schedule:
+    - cron: '0 1 * * 1'   # 每週一 01:00 UTC = 09:00 台北
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lastweek
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: build lastweek.json
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python src/build_lastweek.py
+      - name: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/lastweek.json
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "lastweek $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break || sleep 4; done
