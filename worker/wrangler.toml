@@ -1,0 +1,13 @@
+name = "taiwan-flow-v2"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# 靜態依賴（classify.json / lastweek.json）來源：預設讀 V2 repo 的 raw；
+# repo 尚未 push 前可暫時指向 V1（classify 結構相同）：
+#   https://raw.githubusercontent.com/shihpc/taiwan-flow-live/main/data
+[vars]
+DATA_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data"
+LIVE_TTL = "15"   # /live 聚合結果快取秒數
+
+# FINMIND token 用 secret（不寫進檔）：
+#   npx wrangler secret put FINMIND_TOKEN
