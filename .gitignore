@@ -4,3 +4,6 @@ __pycache__/
 venv/
 .venv/
 .DS_Store
+node_modules/
+.wrangler/
+worker/.dev.vars
