@@ -11,8 +11,9 @@ permissions:
   id-token: write
 
 concurrency:
+  # 連續 push 時取消還在跑的舊 run，避免同 run 撞見兩份 github-pages artifact 而 deploy 失敗
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
