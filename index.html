@@ -83,7 +83,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 // 部署 Worker 後把網址填入 CFG.worker（結尾不要斜線），例：
 //   const CFG={worker:"https://taiwan-flow-v2.xxxx.workers.dev", autoSec:20};
 // 留空時退化成讀靜態 data/live.json（只顯示最後一次快照，無即時）。
-const CFG={worker:"", autoSec:20};   // autoSec：自動刷新間隔（秒）
+const CFG={worker:"https://taiwan-flow-v2.shihpc.workers.dev", autoSec:20};   // autoSec：自動刷新間隔（秒）
 const isLocal=["localhost","127.0.0.1"].includes(location.hostname);
 // 即時資料來源：有 Worker 走 Worker；本機開發走 /api/refresh（server.py 即時重算）；否則靜態檔
 const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
