@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>即時資金流向</title>
+<style>
+:root{--bg:#0a0e14;--panel:#0f1620;--panel2:#141d29;--line:#1e2a38;--fg:#e6edf3;--dim:#8b98a8;
+  --up:#ff5a5a;--down:#3fd07f;--accent:#4aa8ff;--muted:#6b7888;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Noto Sans TC",system-ui,sans-serif;font-size:14px}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:8px 10px}
+.titlerow{display:flex;align-items:center;gap:8px}
+.brand{font-size:18px;font-weight:800}
+.spacer{flex:1}
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;
+  padding:5px 10px;font-size:13px;cursor:pointer;white-space:nowrap}
+.btn:active{background:#1c2836}
+.btn.on{background:#1c3146;border-color:var(--accent)}
+.tsline{font-size:11px;color:var(--dim);margin-top:3px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:8px 0}
+.mkrow{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline}
+.mkrow b{font-size:17px}
+.tabs{display:flex;gap:4px;margin-top:8px;overflow-x:auto}
+.tab{padding:6px 12px;border:1px solid var(--line);border-bottom:none;background:var(--panel);
+  color:var(--dim);border-radius:7px 7px 0 0;cursor:pointer;white-space:nowrap}
+.tab.active{background:var(--panel2);color:var(--fg);font-weight:700}
+.seg2{background:var(--panel2);border:1px solid var(--line);color:var(--dim);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer}
+.seg2.on{background:#1c3146;color:var(--fg);border-color:var(--accent)}
+main{padding:8px 10px 30px}
+.note{font-size:11px;color:var(--dim);margin:2px 0 6px}
+.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:8px;-webkit-overflow-scrolling:touch}
+.scrollbox{max-height:62vh}
+table{border-collapse:collapse;width:100%;white-space:nowrap}
+th,td{padding:6px 9px;text-align:right;border-bottom:1px solid var(--line);font-size:13px}
+th{position:sticky;top:0;background:var(--panel2);color:var(--dim);font-weight:500;font-size:11px;cursor:pointer;user-select:none}
+td.l,th.l{text-align:left;position:sticky;left:0;z-index:1;background:var(--bg);overflow:hidden;text-overflow:ellipsis}
+.clk{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+.wrap2 td.l{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.25;word-break:break-all}
+.nm{margin-left:4px}
+.wrap2 td.l a{display:block}.wrap2 td.l .nm{display:block;font-size:11px;margin-left:0}
+thead th.l{z-index:3;background:var(--panel2)}
+tbody tr:nth-child(odd) td{background:#0c121a}
+tbody tr:nth-child(odd) td.l{background:#0c121a}
+tbody tr:active td{background:#16222f}
+tbody tr.pin td{background:#16202c;font-weight:600;border-bottom:1px solid var(--accent)}
+tbody tr.pin td.l{background:#16202c}
+td.lu{background:var(--up)!important;color:#fff}
+td.ld{background:var(--down)!important;color:#fff}
+.up{color:var(--up)}.down{color:var(--down)}.mut{color:var(--muted)}
+.sl{cursor:pointer;border-bottom:1px dotted currentColor}
+.sl.sel{font-weight:700;border-bottom-style:solid}
+.crumb{font-size:12px;color:var(--dim);margin:10px 0 4px}
+.loading{color:var(--dim);padding:20px;text-align:center}
+footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
+</style>
+</head>
+<body>
+<header>
+  <div class="titlerow">
+    <span class="brand">即時資金流向</span>
+    <span class="spacer"></span>
+    <button class="btn" id="auto">⏱ 自動</button>
+    <button class="btn" id="refresh">🔄 更新</button>
+  </div>
+  <div class="tsline" id="tsline">載入中…</div>
+  <div class="tabs" id="tabs">
+    <div class="tab active" data-tab="exchange">產業別</div>
+    <div class="tab" data-tab="chain">產業鏈</div>
+    <div class="tab" data-tab="rank">成交佔比</div>
+  </div>
+</header>
+<div class="card" id="mkcard" style="margin:8px 10px"></div>
+<main id="main"><div class="loading">載入中…</div></main>
+<footer>資料 FinMind tick_snapshot（盤中即時／盤後為當日最終）· 紅漲綠跌 · 個股連 Yahoo</footer>
+
+<script>
+// ======== 設定 ========
+// V2：即時資料由 Cloudflare Worker 提供（FINMIND token 藏在 Worker，前端不碰、不需 PAT）。
+// 部署 Worker 後把網址填入 CFG.worker（結尾不要斜線），例：
+//   const CFG={worker:"https://taiwan-flow-v2.xxxx.workers.dev", autoSec:20};
+// 留空時退化成讀靜態 data/live.json（只顯示最後一次快照，無即時）。
+const CFG={worker:"", autoSec:20};   // autoSec：自動刷新間隔（秒）
+const isLocal=["localhost","127.0.0.1"].includes(location.hostname);
+// 即時資料來源：有 Worker 走 Worker；本機開發走 /api/refresh（server.py 即時重算）；否則靜態檔
+const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
+                : isLocal ? "/api/refresh"
+                : "data/live.json?t="+Date.now();
+
+const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}}};
+
+// ---- formatters ----
+const yi=v=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1})+"億";
+const num=v=>v==null?"—":Math.round(v).toLocaleString("en-US");
+const pct=v=>v==null?"—":(v>0?"+":"")+v.toFixed(2)+"%";
+const sgn=(v,t)=>`<span class="${v>0?'up':v<0?'down':'mut'}">${t}</span>`;
+const yahoo=c=>`<a href="https://tw.stock.yahoo.com/quote/${c}" target="_blank" rel="noopener" style="color:var(--accent)">${c}</a>`;
+const cleanSub=s=>(s||"").replace(/\s*[（(].*$/,"");  // 次產業顯示去掉括號內說明
+const SC=["chg","amt","close","vol","bv","sv","pts","dp","lim","lw"]; // live.stocks 陣列欄位（後備）
+const sval=(code)=>{const a=state.live.stocks[code]; if(!a)return null; const cols=(state.live&&state.live.stock_cols)||SC; const o={}; cols.forEach((k,i)=>o[k]=a[i]); return o;};
+
+// ---- sortable table ----
+const T={}; let TID=0;
+const ctext=h=>{const d=document.createElement("div");d.innerHTML=h;return d.textContent.trim();};
+const sv=t=>{if(t===""||t==="—")return null;const n=parseFloat(t.replace(/,/g,"").replace(/[^0-9.\-]/g,""));return isNaN(n)?t:n;};
+function tbl(cols,rows,pin){const id="t"+(++TID);T[id]={cols,rows:[...rows],s:{i:null,d:1},pin:pin||null};return `<div class="tablewrap scrollbox" data-t="${id}">${tinner(id)}</div>`;}
+function tinner(id){const{cols,rows,s,pin}=T[id];
+  const w=c=>c.w?`width:${c.w}px;min-width:${c.w}px;max-width:${c.w}px`:'';
+  const h=cols.map((c,i)=>`<th class="${c.cls||''}" style="${w(c)}" data-i="${i}">${c.h}${s.i===i?(s.d>0?" ▲":" ▼"):""}</th>`).join("");
+  const tr=(r,cls)=>`<tr class="${cls||''}">`+cols.map(c=>`<td class="${c.cls||''} ${c.cf?c.cf(r):''}" style="${w(c)}">${c.f(r)}</td>`).join("")+"</tr>";
+  return `<table><thead><tr>${h}</tr></thead><tbody>${pin?tr(pin,"pin"):""}${rows.map(r=>tr(r)).join("")}</tbody></table>`;}
+document.addEventListener("click",e=>{const th=e.target.closest("th[data-i]");if(!th)return;
+  const w=th.closest("[data-t]");if(!w)return;const o=T[w.dataset.t],i=+th.dataset.i;
+  if(o.s.i===i)o.s.d*=-1;else{o.s.i=i;o.s.d=1;}const col=o.cols[i],d=o.s.d,val=r=>sv(ctext(col.f(r)));
+  o.rows.sort((a,b)=>{const x=val(a),y=val(b);if(x===null)return 1;if(y===null)return -1;
+    return typeof x==="number"&&typeof y==="number"?(x-y)*d:String(x).localeCompare(String(y),"zh-Hant")*d;});
+  w.innerHTML=tinner(w.dataset.t);});
+
+// ---- 點類股 / 次產業（delegated）----
+document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-sec]");if(!s)return;
+  const v=decodeURIComponent(s.dataset.sec),cur=state.sub[state.tab].open;
+  state.sub[state.tab].open=cur===v?null:v;state.sub[state.tab].opensub=null;render();});
+document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-sub]");if(!s)return;
+  const v=decodeURIComponent(s.dataset.sub),cur=state.sub.chain.opensub;
+  state.sub.chain.opensub=cur===v?null:v;render();});
+
+// ---- render ----
+function idxLine(label,d,mk,key){
+  if(!d||d.val==null)return `<span>${label} <span class="mut">—</span></span>`;
+  const v=d.val.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+  const P=(k,cls,t)=>`<span class="${cls} clk" data-pool="${key}:${k}">${t}</span>`;
+  const cnt=mk?` <span class="mut">漲${P('up','up',mk.up)}(${P('ul','up',mk.up_lim||0)})/跌${P('down','down',mk.down)}(${P('dl','down',mk.down_lim||0)}) ${mk.n}檔</span>`:"";
+  return `<span>${label} <b>${v}</b> ${sgn(d.chgP,(d.chgP>0?'+':'')+d.chgP.toFixed(2)+' ('+pct(d.chg)+')')} <span class="mut">量${yi(d.amt_yi)}</span>${cnt}</span>`;
+}
+function renderMarket(){
+  const ix=state.live.index||{}, m=state.live.market||{};
+  document.getElementById("mkcard").innerHTML=
+    `<div class="mkrow">${idxLine("加權",ix.tse,m.tse,"tse")}</div>`+
+    `<div class="mkrow">${idxLine("櫃買",ix.otc,m.otc,"otc")}</div>`;
+  const src=CFG.worker?" · 即時(Worker)":isLocal?"":" · 靜態快照";
+  document.getElementById("tsline").textContent="資料時間 "+(state.live.ts||"—")+src+(autoTimer?" · ⏱自動":"");
+}
+function idxSeg(){return `<div style="display:flex;gap:6px;margin:2px 0 8px;align-items:center"><span class="mut" style="font-size:11px">市場</span>`+
+  `<button class="seg2 ${state.idx==='tse'?'on':''}" data-idx="tse">加權(TSE)</button>`+
+  `<button class="seg2 ${state.idx==='otc'?'on':''}" data-idx="otc">櫃買(OTC)</button></div>`;}
+// 成交佔比 tab：該市場全個股，預設依佔週變(佔比−上週佔)由大到小
+function renderRank(){
+  const want=state.idx==="tse"?"twse":"tpex", mn=state.idx==="tse"?"加權":"櫃買";
+  const rows=Object.keys(state.live.stocks).filter(c=>(state.cl[c]||{}).t===want).map(mkStockRow).filter(Boolean)
+    .filter(r=>r.amt_yi>0).sort((a,b)=>(shr(b)-lwShr(b))-(shr(a)-lwShr(a)));
+  document.getElementById("main").innerHTML=
+    `<div class="note">${mn}市場全個股（${rows.length}），預設依「佔週變」由大到小（點欄位標題可改排序）。</div>`+idxSeg()+tbl(stockCols(),rows);
+}
+// 佔比分母＝該市場(加權/櫃買)分類股總成交值：今日 amt_yi / 上週 lw_amt_yi
+function mktTotal(){const m=state.live.market||{};return (m[state.idx]&&m[state.idx].amt_yi)||0;}
+function mktLwTotal(){const m=state.live.market||{};return (m[state.idx]&&m[state.idx].lw_amt_yi)||0;}
+const shr=r=>{const t=mktTotal();return t?r.amt_yi/t*100:0;};              // 佔比%
+const lwShr=r=>{const t=mktLwTotal();return t?(r.lw_amt_yi||0)/t*100:0;};  // 上週佔%
+const pctCell=(v,signed)=>signed?sgn(v,(v>0?"+":"")+v.toFixed(2)+"%"):v.toFixed(2)+"%";
+// 三表共用欄寬（前7欄同序同寬；末2欄 類股/次產業＝漲/跌、檔；成分股＝漲跌額、最新價；再接 上週佔、上週均）
+const W=[116,74,54,58,54,58,58,60,58,66,56,56];
+const C_AMT={h:"成交值",w:W[1],f:r=>yi(r.amt_yi)};
+const C_SHR={h:"佔比",w:W[2],f:r=>pctCell(shr(r))};
+const C_SCHG={h:"佔週變",w:W[3],f:r=>pctCell(shr(r)-lwShr(r),1)};
+const C_ASHR={h:"均佔",w:W[4],f:r=>pctCell(shr(r)/(r.n||1))};
+const C_ACHG={h:"均週變",w:W[5],f:r=>pctCell(shr(r)/(r.n||1)-lwShr(r)/(r.n||1),1)};
+const C_PTS={h:"貢獻點",w:W[6],f:r=>sgn(r.pts||0,((r.pts||0)>0?"+":"")+(r.pts||0).toFixed(1))};
+const C_LWSHR={h:"上週佔",w:W[10],f:r=>pctCell(lwShr(r))};
+const C_LWAVG={h:"上週均",w:W[11],f:r=>pctCell(lwShr(r)/(r.n||1))};
+function aggCols(nameH){return[
+  {h:nameH,cls:"l",w:W[0],f:r=>r.name}, C_AMT, C_SHR, C_SCHG, C_ASHR, C_ACHG, C_PTS,
+  {h:"漲跌%",w:W[7],f:r=>sgn(r.avg_chg,pct(r.avg_chg))},
+  {h:"漲/跌",w:W[8],f:r=>`<span class="up">${r.up}</span>/<span class="down">${r.down}</span>`},
+  {h:"檔",w:W[9],f:r=>r.n}, C_LWSHR, C_LWAVG];}
+function stockCols(){return[
+  {h:"個股",cls:"l",w:W[0],f:r=>r.name}, C_AMT, C_SHR, C_SCHG, C_ASHR, C_ACHG, C_PTS,
+  {h:"漲跌%",w:W[7],f:r=>r.chgp==null?'<span class="mut">—</span>':sgn(r.chgp,pct(r.chgp))},
+  {h:"漲跌額",w:W[8],f:r=>r.dp==null?'<span class="mut">—</span>':sgn(r.dp,(r.dp>0?"+":"")+r.dp.toFixed(2))},
+  {h:"最新價",w:W[9],cf:r=>r.lim===1?'lu':r.lim===-1?'ld':'',f:r=>r.price==null?'<span class="mut">—</span>':r.price.toLocaleString("en-US")},
+  C_LWSHR, C_LWAVG];}
+function sumRow(a,label){return {name:`<b>${label} 合計</b>`,amt_yi:a.amt_yi,lw_amt_yi:a.lw_amt_yi,n:a.n,pts:a.pts,chgp:a.avg_chg,dp:null,price:null};}
+function mkStockRow(c){const v=sval(c);if(!v)return null;const info=state.cl[c]||{};const a=v.amt/1e8;
+  return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,amt_yi:a,lw_amt_yi:(v.lw||0)/1e8,n:1,pts:v.pts,chgp:v.chg,dp:v.dp,price:v.close,lim:v.lim};}
+function stockRows(codes){
+  const want=state.idx==="tse"?"twse":"tpex";
+  return codes.filter(c=>(state.cl[c]||{}).t===want).map(mkStockRow).filter(Boolean).filter(r=>r.amt_yi>0).sort((x,y)=>y.amt_yi-x.amt_yi);}
+// 點卡片數字 → 該條件個股池（同欄位、依成交值排序）
+function renderPool(){
+  const {mkt,kind}=state.pool, want=mkt==="tse"?"twse":"tpex";
+  const sc=state.live.stock_cols, ci=sc.indexOf("chg"), li=sc.indexOf("lim");
+  const codes=Object.keys(state.live.stocks).filter(c=>{const info=state.cl[c];if(!info||info.t!==want)return false;
+    const v=state.live.stocks[c];return kind==="up"?v[ci]>0:kind==="down"?v[ci]<0:kind==="ul"?v[li]===1:v[li]===-1;});
+  const rows=codes.map(mkStockRow).filter(Boolean).sort((x,y)=>y.amt_yi-x.amt_yi);
+  const lab={up:"上漲",down:"下跌",ul:"漲停",dl:"跌停"}[kind], mn=mkt==="tse"?"加權":"櫃買";
+  let html=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><button class="btn" id="poolBack">← 返回</button><b>${mn} · ${lab}</b> <span class="mut">${rows.length} 檔（依成交值）</span></div>`;
+  html+=tbl(stockCols(),rows);
+  document.getElementById("main").innerHTML=html;
+  document.getElementById("poolBack").onclick=()=>{state.pool=null;render();};
+}
+
+function render(){
+  for(const k in T)delete T[k];
+  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===state.tab));
+  if(!state.live||!state.cl){document.getElementById("main").innerHTML='<div class="loading">載入中…</div>';return;}
+  renderMarket();
+  if(state.pool)return renderPool();
+  if(state.tab==="rank")return renderRank();
+  const open=state.sub[state.tab].open;
+  const list=(state.live[state.tab]||[]).map(s=>{const o={sector:s.sector,...s[state.idx]};
+      o.name=`<span class="sl ${open===s.sector?'sel':''}" data-sec="${encodeURIComponent(s.sector)}">${s.sector}</span>`;return o;})
+    .filter(r=>r.n>0).sort((a,b)=>b.amt_yi-a.amt_yi);
+  let html="";
+  if(state.tab==="chain"){const c=state.live.chain_coverage||{};
+    html+=`<div class="note">產業鏈為<b>多對多</b>（一檔可屬多類）：各類加總會重疊、非市佔，代表主題曝險；不含指數/部分標的（涵蓋 ${c.with_chain||"—"}/${c.total||"—"} 檔）。點類股看次產業→成分股。</div>`;
+  }else html+=`<div class="note">交易所產業別（互斥）。淨流入＝漲家額−跌家額；貢獻點＝個股依市值權重對指數的漲跌點，類股加總＝指數漲跌點。點類股看成分股。</div>`;
+  html+=idxSeg();
+  html+=tbl(aggCols("類股"),list);
+  if(open){
+    if(state.tab==="exchange"){
+      const codes=Object.keys(state.cl).filter(c=>state.cl[c].e===open);
+      const rows=stockRows(codes), agg=list.find(r=>r.sector===open);
+      html+=`<div id="dd"${/ETF/.test(open)?' class="wrap2"':''}><div class="crumb"><b>${open}</b> 成分股（${rows.length}，再點類股收合）</div>`+tbl(stockCols(),rows,agg?sumRow(agg,open):null)+`</div>`;
+    }else html+=`<div id="dd">`+chainSub(open, list.find(r=>r.sector===open))+`</div>`;
+  }
+  document.getElementById("main").innerHTML=html;
+  if(open){const boxes=[...document.querySelectorAll("#main .scrollbox")];
+    if(boxes.length>1)boxes.slice(0,-1).forEach(b=>b.style.maxHeight="34vh");
+    const dd=document.getElementById("dd");if(dd)dd.scrollIntoView({behavior:"smooth",block:"start"});}
+}
+function chainSub(ind,indAgg){
+  const opensub=state.sub.chain.opensub, agg={}, want=state.idx==="tse"?"twse":"tpex";
+  for(const c in state.cl){const info=state.cl[c];if(!info.c.includes(ind)||info.t!==want)continue;const v=sval(c);if(!v)continue;
+    const subs=[...new Set(info.p.filter(p=>p[0]===ind).map(p=>p[1]))];
+    for(const s of subs){const o=agg[s]||(agg[s]={sub:s,amt:0,lw:0,wchg:0,up:0,down:0,n:0,pts:0});
+      const a=v.amt;o.amt+=a;o.lw+=(v.lw||0);o.wchg+=v.chg*a;o.n++;o.pts+=v.pts;
+      if(v.chg>0)o.up++;else if(v.chg<0)o.down++;}}
+  const subs=Object.values(agg).map(o=>({sub:o.sub,amt_yi:o.amt/1e8,lw_amt_yi:o.lw/1e8,
+    avg_chg:o.amt?o.wchg/o.amt:0,up:o.up,down:o.down,n:o.n,pts:o.pts,
+    name:`<span class="sl ${opensub===o.sub?'sel':''}" data-sub="${encodeURIComponent(o.sub)}">${cleanSub(o.sub)}</span>`}))
+    .filter(o=>o.amt_yi>0).sort((a,b)=>b.amt_yi-a.amt_yi);
+  let html=`<div class="crumb"><b>${ind}</b> · ${subs.length} 次產業（點看成分股；再點類股收合）</div>`+tbl(aggCols("次產業"),subs,indAgg?{...indAgg,name:`<b>${ind} 合計</b>`}:null);
+  if(opensub){const codes=Object.keys(state.cl).filter(c=>state.cl[c].p.some(p=>p[0]===ind&&p[1]===opensub));
+    const rows=stockRows(codes), sa=subs.find(s=>s.sub===opensub);
+    html+=`<div id="dd2"><div class="crumb">${ind} › <b>${cleanSub(opensub)}</b> 成分股（${rows.length}）</div>`+tbl(stockCols(),rows,sa?sumRow(sa,cleanSub(opensub)):null)+`</div>`;}
+  return html;
+}
+document.addEventListener("click",e=>{const el=e.target.closest("[data-pool]");if(!el)return;const a=el.dataset.pool.split(":");state.pool={mkt:a[0],kind:a[1]};render();});
+document.addEventListener("click",e=>{const b=e.target.closest("[data-idx]");if(!b)return;state.idx=b.dataset.idx;state.pool=null;render();});
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{state.tab=t.dataset.tab;state.pool=null;render();});
+
+// ---- data load / refresh ----
+async function loadJSON(u){return (await fetch(u,{cache:"no-store"})).json();}
+async function boot(){
+  try{state.cl=(await loadJSON("data/classify.json")).map;}catch(e){document.getElementById("main").innerHTML='<div class="loading">無法載入 classify.json：'+e+'</div>';return;}
+  await pull(false);
+  initAuto();
+}
+// 抓一次即時資料並重繪；manual=true 時在按鈕顯示狀態
+async function pull(manual){
+  const btn=document.getElementById("refresh");let old;
+  if(manual){old=btn.textContent;btn.textContent="⏳…";btn.disabled=true;}
+  try{
+    const j=await loadJSON(liveURL());
+    if(j&&j.ts){state.live=j;render();}
+  }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
+  finally{ if(manual){btn.textContent=old;btn.disabled=false;} }
+}
+// ---- 自動刷新 ----
+let autoTimer=null;
+function setAuto(on){
+  const b=document.getElementById("auto");
+  if(on){ b.classList.add("on"); localStorage.setItem("tflive2_auto","1");
+    autoTimer=setInterval(()=>pull(false), CFG.autoSec*1000); }
+  else{ b.classList.remove("on"); localStorage.removeItem("tflive2_auto");
+    if(autoTimer){clearInterval(autoTimer);autoTimer=null;} }
+  if(state.live)renderMarket();  // 更新時間列的 ⏱自動 標記
+}
+function initAuto(){
+  const b=document.getElementById("auto");
+  b.title=`每 ${CFG.autoSec} 秒自動更新`+(CFG.worker?"":"（未設 Worker：僅本機/靜態）");
+  b.onclick=()=>setAuto(!autoTimer);
+  if(localStorage.getItem("tflive2_auto")) setAuto(true);
+}
+document.getElementById("refresh").onclick=()=>pull(true);
+boot();
+</script>
+</body>
+</html>
