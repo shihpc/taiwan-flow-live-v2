@@ -325,16 +325,29 @@ export default {
     if (url.pathname !== "/live") {
       return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap"] });
     }
+    // stale-while-revalidate：新鮮(≤LIVE_TTL秒)直接回；過期但未太舊(≤STALE秒)先回舊資料、
+    // 背景重建下一份（使用者永遠毫秒級回應，不用同步等 FinMind）；太舊才同步重建。
+    const FRESH_MS = Number(env.LIVE_TTL || 15) * 1000;
+    const STALE_MS = 120 * 1000;
     const cache = caches.default;
     const cacheKey = new Request(new URL("/live", url.origin).toString());
-    const hit = await cache.match(cacheKey);
-    if (hit) return hit;                            // 命中快取（未過期）→ 秒回、不打 FinMind
-    try {
+    const rebuild = async () => {
       const live = await buildLive(env);
-      const ttl = Number(env.LIVE_TTL || 15);
-      const resp = json(live, { "Cache-Control": `public, max-age=${ttl}` });
-      ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+      const resp = json(live, { "Cache-Control": "public, max-age=120", "x-gen": String(Date.now()) });
+      await cache.put(cacheKey, resp.clone());
       return resp;
+    };
+    const hit = await cache.match(cacheKey);
+    if (hit) {
+      const age = Date.now() - Number(hit.headers.get("x-gen") || 0);
+      if (age < FRESH_MS) return hit;
+      if (age < STALE_MS) {
+        ctx.waitUntil(rebuild().catch(() => {}));   // 背景刷新，失敗下次再試
+        return hit;
+      }
+    }
+    try {
+      return await rebuild();
     } catch (e) {
       return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
     }
