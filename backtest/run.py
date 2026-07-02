@@ -93,17 +93,20 @@ def build(days, price, inst):
             else:
                 continue
             fwd = [cl[t+k] / c0 - 1 for k in (1, 2, 3)]
-            # 投信近3日買超日數（含當日）
-            it_days = 0
+            # 投信近3日買超/賣超日數（含當日）
+            it_days, its_days = 0, 0
             for k in (0, 1, 2):
                 v = (inst[days[t-k]].get(c) or [0, 0])[0]
                 if v > 0:
                     it_days += 1
+                elif v < 0:
+                    its_days += 1
             samples.append(dict(
                 d=days[t], c=c, surge=a / a5, ret=ret, pos=pos, amt=a,
                 r1=fwd[0], r2=fwd[1], r3=fwd[2],
                 e1=fwd[0]-mkt[0], e2=fwd[1]-mkt[1], e3=fwd[2]-mkt[2],
-                lim=(ret >= 0.095 and h == c0), it=it_days,
+                lim=(ret >= 0.095 and h == c0), limd=(ret <= -0.095 and l == c0),
+                it=it_days, its=its_days,
             ))
     return samples
 

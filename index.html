@@ -229,7 +229,8 @@ function renderFlow(){
   const fl=state.live.flow, main=document.getElementById("main");
   let html=out
     ?`<div class="note">資金<b>退出</b>＝短窗集中度高且<b>窗內下跌</b>（賣壓集中湧出）。`+
-     `注意：回測僅驗證上漲方向的延續性；退出榜屬<b>風險警示</b>用途。</div>`
+     `回測：<b>個股</b>爆量下殺有<span class="down">續弱傾向</span>（T+3輸大盤63% vs 對照58%，跌停鎖死更強）；`+
+     `<b>次產業</b>退出平均不續跌（修正期例外），次產業榜屬警示參考。</div>`
     :`<div class="note">短窗<b>資金集中度</b>＝近N分佔全市場成交比 ÷ 5日常態佔比。`+
      `回測：<b>次產業</b>湧入有延續性（隔日資金黏性約8成）；<b>個股</b>追高平均不利，`+
      `<span class="up">投信連買</span>為有效續勢旗標。</div>`;

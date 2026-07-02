@@ -151,6 +151,43 @@ def run_level(days, price, cl, level: str, lines: list):
     for l in sub:
         print(l); lines.append(l)
 
+    # 退出方向（集中度高 + 下跌）：續跌率/輸大盤率（方向反轉判讀）
+    def stat_dn(rows):
+        if len(rows) < 20:
+            return None
+        k = len(rows)
+        return dict(n=k,
+                    w1=sum(1 for r in rows if r["r1"] < 0)/k*100,
+                    w3=sum(1 for r in rows if r["r3"] < 0)/k*100,
+                    we3=sum(1 for r in rows if r["e3"] < 0)/k*100,
+                    e3=st.mean(r["e3"] for r in rows)*100,
+                    e3m=st.median(r["e3"] for r in rows)*100,
+                    stick=sum(1 for r in rows if r["sticky"])/k*100)
+
+    def fmt_dn(name, s):
+        if not s:
+            return f"{name:24s}  (樣本<20)"
+        return (f"{name:24s} N={s['n']:6d}  T+3跌{s['w3']:5.1f}%  輸大盤{s['we3']:5.1f}%  "
+                f"超額avg{s['e3']:+6.2f}% med{s['e3m']:+6.2f}%  隔日資金黏{s['stick']:5.1f}%")
+
+    dn_hdr = f"### 退出方向（C≥門檻 且 當日等權下跌，續跌判讀）"
+    print(dn_hdr); lines.append(dn_hdr)
+    ctrl_dn = [r for r in samples if r["conc"] < 1.1 and abs(r["ret"]) < 0.005]
+    l = fmt_dn("對照組(無訊號)", stat_dn(ctrl_dn)); print(l); lines.append(l)
+    for C2 in GRID_C:
+        for R2 in GRID_R:
+            sig = [r for r in samples if r["conc"] >= C2 and r["ret"] <= -R2]
+            l = fmt_dn(f"C≥{C2} R≤-{R2:.1%}", stat_dn(sig)); print(l); lines.append(l)
+    dmain = [r for r in samples if r["conc"] >= 1.5 and r["ret"] <= -0.01]
+    sub2 = ["### 退出主組合 C≥1.5 R≤-1% 逐月"]
+    by2 = {}
+    for r in dmain:
+        by2.setdefault(r["d"], []).append(r)
+    for m in sorted(by2):
+        sub2.append(fmt_dn(f"  {m}", stat_dn(by2[m])))
+    for l in sub2:
+        print(l); lines.append(l)
+
 
 def main():
     days, price, cl = load()
