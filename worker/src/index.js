@@ -156,6 +156,26 @@ export function aggregate(cl, rows, limits, lw) {
 }
 const mkZero = () => ({ amt: 0, up: 0, down: 0, flat: 0, n: 0, ul: 0, dl: 0 });
 
+// ---- 盤中分鐘 frame（Cron 每分鐘寫入 KV，資金湧入的時間序列）----
+// key = f:<資料日>:<HH:MM>（取快照自身時間戳 → 收盤後重跑覆寫同 key，冪等）
+// value = {code: 累計成交額}；expirationTtl 2 天自動清理
+async function storeFrame(env) {
+  const rows = await finSnapshot(env.FINMIND_TOKEN);
+  let ts = null;
+  const amt = {};
+  for (const r of rows) {
+    const c = String(r.stock_id || "");
+    if (!c || c === "001" || c === "101") continue;
+    ts = ts || String(r.date || "");
+    const a = num(r.total_amount);
+    if (a > 0) amt[c] = Math.round(a);
+  }
+  if (!ts) throw new Error("snapshot 無資料");
+  const d = ts.slice(0, 10), hm = ts.slice(11, 16);
+  await env.FLOW_KV.put(`f:${d}:${hm}`, JSON.stringify(amt), { expirationTtl: 172800 });
+  return { key: `f:${d}:${hm}`, stocks: Object.keys(amt).length };
+}
+
 // ---- HTTP ----
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" };
 const json = (obj, extra) => new Response(JSON.stringify(obj), {
@@ -163,11 +183,22 @@ const json = (obj, extra) => new Response(JSON.stringify(obj), {
 });
 
 export default {
+  // Cron（盤中每分鐘）：存分鐘 frame
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(storeFrame(env).catch((e) => console.log("storeFrame:", e.message)));
+  },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+    if (url.pathname === "/snap") {  // 手動觸發存 frame（測試/補格用）
+      try {
+        return json(await storeFrame(env));
+      } catch (e) {
+        return json({ error: String(e && e.message || e) });
+      }
+    }
     if (url.pathname !== "/live") {
-      return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live"] });
+      return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap"] });
     }
     const cache = caches.default;
     const cacheKey = new Request(new URL("/live", url.origin).toString());

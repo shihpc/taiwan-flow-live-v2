@@ -2,6 +2,15 @@ name = "taiwan-flow-v2"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
+# 盤中每分鐘存一格「分鐘快照 frame」到 KV（資金湧入偵測的盤中序列）
+# 01:00-05:59 UTC = 09:00-13:59 台北，週一~五；收盤後 frame 值不再變、冪等
+[triggers]
+crons = ["* 1-5 * * 1-5"]
+
+[[kv_namespaces]]
+binding = "FLOW_KV"
+id = "71ed931c80b045fc80529c265e089f15"
+
 # 靜態依賴（classify.json / lastweek.json）來源：預設讀 V2 repo 的 raw；
 # repo 尚未 push 前可暫時指向 V1（classify 結構相同）：
 #   https://raw.githubusercontent.com/shihpc/taiwan-flow-live/main/data
