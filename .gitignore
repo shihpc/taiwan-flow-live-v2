@@ -7,3 +7,4 @@ venv/
 node_modules/
 .wrangler/
 worker/.dev.vars
+backtest/cache/
