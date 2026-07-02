@@ -62,7 +62,8 @@ def sector_members(cl, level: str) -> dict:
     return {k: v for k, v in m.items() if len(v) >= MIN_MEMBERS}
 
 
-def run_level(days, price, cl, level: str, lines: list):
+def build_samples(days, price, cl, level: str):
+    """sector-day 樣本（供 run_level 與 run_lag 共用）。d=完整日期。"""
     members = sector_members(cl, level)
     tx = [f((price[d].get("_TAIEX") or [None]*5)[4]) for d in days]
     n = len(days)
@@ -106,11 +107,16 @@ def run_level(days, price, cl, level: str, lines: list):
                 continue
             m1, m3 = tx[t+1]/tx[t]-1, tx[t+3]/tx[t]-1
             samples.append(dict(
-                d=days[t][:7], sec=sec, conc=conc, ret=st.mean(rets),
+                d=days[t], sec=sec, conc=conc, ret=st.mean(rets),
                 r1=st.mean(fwd1), r3=st.mean(fwd3),
                 e1=st.mean(fwd1)-m1, e3=st.mean(fwd3)-m3,
                 sticky=(share[t+1] / base >= 1.2),
             ))
+    return samples, len(members)
+
+
+def run_level(days, price, cl, level: str, lines: list):
+    samples, n_members = build_samples(days, price, cl, level)
 
     def stat(rows):
         if len(rows) < 20:
@@ -131,7 +137,7 @@ def run_level(days, price, cl, level: str, lines: list):
                 f"超額avg{s['e3']:+6.2f}% med{s['e3m']:+6.2f}%  隔日資金黏{s['stick']:5.1f}%")
 
     lv = "次產業" if level == "sub" else "產業鏈"
-    hdr = f"\n## {lv}層（{len(members)} 個分類，sector-day 樣本 {len(samples):,}）"
+    hdr = f"\n## {lv}層（{n_members} 個分類，sector-day 樣本 {len(samples):,}）"
     print(hdr); lines.append(hdr)
     ctrl = [r for r in samples if r["conc"] < 1.1 and abs(r["ret"]) < 0.005]
     l = fmt("對照組(無訊號)", stat(ctrl)); print(l); lines.append(l)
@@ -145,7 +151,7 @@ def run_level(days, price, cl, level: str, lines: list):
     sub = [f"### 主組合 C≥{C} R≥{R:.0%} 逐月"]
     by = {}
     for r in main:
-        by.setdefault(r["d"], []).append(r)
+        by.setdefault(r["d"][:7], []).append(r)
     for m in sorted(by):
         sub.append(fmt(f"  {m}", stat(by[m])))
     for l in sub:
@@ -182,7 +188,7 @@ def run_level(days, price, cl, level: str, lines: list):
     sub2 = ["### 退出主組合 C≥1.5 R≤-1% 逐月"]
     by2 = {}
     for r in dmain:
-        by2.setdefault(r["d"], []).append(r)
+        by2.setdefault(r["d"][:7], []).append(r)
     for m in sorted(by2):
         sub2.append(fmt_dn(f"  {m}", stat_dn(by2[m])))
     for l in sub2:

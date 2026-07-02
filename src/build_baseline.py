@@ -1,15 +1,17 @@
 # src/build_baseline.py — 產 data/baseline.json（資金湧入偵測的常態基準，每交易日收盤後跑）
 #
 # 內容（給 Worker /live 當靜態依賴，快取到隔日）：
-#   stocks: {code: [a5, it, fi]}
+#   stocks: {code: [a5, it, fi, y1, y2]}
 #     a5 = 前 5 個交易日平均成交額（元）→ 集中度分母（個股常態佔比 = a5/tot5）
-#     it = 投信近 3 交易日買超日數 0~3（回測實證的個股續勢旗標）
-#     fi = 外資近 3 交易日買超日數 0~3
-#   tot5 = 全市場（上市+上櫃，排除指數/權證/興櫃）5 日均總額（元）
-#   days = 取用的 5 個交易日（新→舊）
+#     it/fi = 投信/外資近 3 交易日買超日數 0~3（回測實證的個股續勢旗標）
+#     y1/y2 = 最近一日/前一日的日線訊號：1=湧入(爆量2x+漲2%+收高0.7) / -1=退出(爆量+跌+收低0.3) / 0=無
+#       回測（report_lag.md）：個股昨湧→今日平均偏弱(追高警示)、昨退→續弱；連續兩日效果加倍
+#   subs_y: {次產業: [y1, y2]}（僅列非零者）
+#       次產業訊號＝集中度(佔比/前5日均佔比)≥1.5 且 等權漲跌 ≥1%(湧)/≤-1%(退)
+#       回測：次產業昨湧→今日平均續強(+0.3pp)、連湧更強；昨退→今日偏弱
+#   tot5 = 全市場（上市+上櫃）5 日均總額（元）；days = 取用的交易日（新→舊，共 7）
 #
 # 用法：FINMIND_TOKEN=... python src/build_baseline.py
-# 回測依據見 backtest/report*.md：次產業集中度有延續性；個股層以投信連買為有效旗標。
 
 from __future__ import annotations
 import json
@@ -21,20 +23,92 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fin  # noqa: E402
 
 OUT = fin.ROOT / "data" / "baseline.json"
+NDAYS = 7           # y2 的爆量分母需要 D-2..D-6
+SUB_MIN_MEM = 5
+SUB_AMT_MIN = 10e8
 
 
-def classify_keep() -> set:
-    cl = json.loads((fin.ROOT / "data" / "classify.json").read_text(encoding="utf-8"))["map"]
-    return {c for c, v in cl.items() if v.get("t") in ("twse", "tpex") and c[:1].isdigit()}
+def classify() -> dict:
+    return json.loads((fin.ROOT / "data" / "classify.json").read_text(encoding="utf-8"))["map"]
+
+
+def fv(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def day_signal(pd, i):
+    """pd=每日 {c:(amt,close,high,low)} 新→舊；回 {code: 1/-1}（第 i 日的日線湧入/退出訊號）。"""
+    out = {}
+    cur, prev = pd[i], pd[i + 1]
+    for c, (amt, close, hi, lo) in cur.items():
+        if not amt or amt < 1e8 or close is None:   # 流動性≥1億（與回測一致）
+            continue
+        base = sum((pd[k].get(c) or (0,))[0] or 0 for k in range(i + 1, i + 6)) / 5
+        pc = (prev.get(c) or (None, None))[1]
+        if not base or not pc:
+            continue
+        surge = amt / base
+        ret = close / pc - 1
+        pos = (close - lo) / (hi - lo) if (hi is not None and lo is not None and hi > lo) else 1.0
+        if surge >= 2 and ret >= 0.02 and pos >= 0.7:
+            out[c] = 1
+        elif surge >= 2 and ret <= -0.02 and pos <= 0.3:
+            out[c] = -1
+    return out
+
+
+def sub_signal(pd, i, members):
+    """第 i 日的次產業訊號 {sub: 1/-1}。集中度=佔比/前5日均佔比。"""
+    tots = []
+    for k in range(i, i + 6):
+        tots.append(sum(v[0] or 0 for c, v in pd[k].items() if not c.startswith("00")))
+    out = {}
+    for sub, mem in members.items():
+        amt_now = sum((pd[i].get(c) or (0,))[0] or 0 for c in mem)
+        if amt_now < SUB_AMT_MIN or not tots[0]:
+            continue
+        shares = []
+        for k in range(1, 6):
+            shares.append((sum((pd[i + k].get(c) or (0,))[0] or 0 for c in mem) / tots[k]) if tots[k] else 0.0)
+        base = sum(shares) / 5
+        if base <= 0:
+            continue
+        conc = (amt_now / tots[0]) / base
+        rets = []
+        for c in mem:
+            c0 = (pd[i].get(c) or (None, None))[1]
+            c1 = (pd[i + 1].get(c) or (None, None))[1]
+            if c0 and c1:
+                rets.append(c0 / c1 - 1)
+        if len(rets) < SUB_MIN_MEM or conc < 1.5:
+            continue
+        ret = sum(rets) / len(rets)
+        if ret >= 0.01:
+            out[sub] = 1
+        elif ret <= -0.01:
+            out[sub] = -1
+    return out
 
 
 def main():
-    keep = classify_keep()
-    # 從今天往回走，收集最近 5 個有資料的交易日（含今天：收盤後跑，今天就是最新完成日）
-    days, amts = [], {}     # amts: {code: [各日成交額]}
+    cl = classify()
+    keep = {c for c, v in cl.items() if v.get("t") in ("twse", "tpex") and c[:1].isdigit()}
+    members = {}
+    for c, info in cl.items():
+        if c.startswith("00") or info.get("t") not in ("twse", "tpex"):
+            continue
+        for p in info.get("p", []):
+            members.setdefault(p[1], set()).add(c)
+    members = {k: v for k, v in members.items() if len(v) >= SUB_MIN_MEM}
+
+    # 收集最近 NDAYS 個交易日（新→舊），每日 {c:(amt,close,high,low)}
+    days, pd = [], []
     d = date.today()
     probe = 0
-    while len(days) < 5 and probe < 15:
+    while len(days) < NDAYS and probe < 20:
         ds = d.isoformat()
         d -= timedelta(days=1)
         probe += 1
@@ -43,14 +117,16 @@ def main():
         rows = fin.api_get("TaiwanStockPrice", start_date=ds, end_date=ds)
         if not rows:
             continue
-        days.append(ds)
+        m = {}
         for r in rows:
             c = str(r.get("stock_id") or "")
-            if c in keep and r.get("Trading_money"):
-                amts.setdefault(c, []).append(float(r["Trading_money"]))
-        print(f"price {ds} ok", flush=True)
-    if len(days) < 5:
-        raise RuntimeError(f"僅找到 {len(days)} 個交易日")
+            if c in keep:
+                m[c] = (fv(r.get("Trading_money")) or 0, fv(r.get("close")), fv(r.get("max")), fv(r.get("min")))
+        days.append(ds)
+        pd.append(m)
+        print(f"price {ds} ok ({len(m)})", flush=True)
+    if len(days) < NDAYS:
+        raise RuntimeError(f"僅找到 {len(days)} 個交易日（需 {NDAYS}）")
 
     # 投信/外資近 3 交易日買超日數
     it, fi = {}, {}
@@ -67,16 +143,30 @@ def main():
                     fi[c] = fi.get(c, 0) + 1
         print(f"inst {ds} ok", flush=True)
 
+    y1, y2 = day_signal(pd, 0), day_signal(pd, 1)
+    s1, s2 = sub_signal(pd, 0, members), sub_signal(pd, 1, members)
+
     stocks = {}
     tot5 = 0.0
-    for c, arr in amts.items():
-        a5 = sum(arr) / 5  # 除以 5（缺日視為 0，與回測一致）
-        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0)]
+    for c in keep:
+        arr = [pd[k].get(c) for k in range(5)]
+        amts = [a[0] for a in arr if a]
+        if not amts:
+            continue
+        a5 = sum(amts) / 5
+        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0)]
         tot5 += a5
-    out = {"date": days[0], "days": days, "tot5": round(tot5), "stocks": stocks}
+    subs_y = {}
+    for k in set(s1) | set(s2):
+        subs_y[k] = [s1.get(k, 0), s2.get(k, 0)]
+
+    out = {"date": days[0], "days": days, "tot5": round(tot5), "stocks": stocks, "subs_y": subs_y}
     OUT.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    n_y1 = sum(1 for v in stocks.values() if v[3] == 1)
+    n_y1d = sum(1 for v in stocks.values() if v[3] == -1)
     print(f"baseline {days[0]}: {len(stocks)} 檔, tot5={tot5/1e8:.0f}億, "
-          f"投信連買3日 {sum(1 for v in stocks.values() if v[1] == 3)} 檔")
+          f"昨湧{n_y1}/昨退{n_y1d} 檔, 次產業旗標 {len(subs_y)} 個, "
+          f"投信3連買 {sum(1 for v in stocks.values() if v[1] == 3)} 檔")
 
 
 if __name__ == "__main__":

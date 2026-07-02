@@ -99,10 +99,10 @@ async function buildLive(env) {
     const blst = baseline.stocks || {};
     for (const code in live.stocks) {
       const s = per[code] || [null, null, null, null];
-      const b = blst[code] || [0, 0, 0];
-      live.stocks[code].push(s[0], s[1], s[2], s[3], b[1], b[2]);
+      const b = blst[code] || [0, 0, 0, 0, 0];
+      live.stocks[code].push(s[0], s[1], s[2], s[3], b[1], b[2], b[3] || 0, b[4] || 0);
     }
-    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "r10", "it", "fi"];
+    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "r10", "it", "fi", "y1", "y2"];
     live.flow = flow;
   } catch (e) {
     live.flow = null;
@@ -282,6 +282,7 @@ function computeFlow(cl, items, baseline, frames) {
     }
   }
   const subList = [];
+  const subsY = baseline.subs_y || {};   // 昨日/前日次產業訊號 [y1,y2]（見 build_baseline.py）
   for (const k in subs) {
     const s = subs[k];
     if (s.d1 <= 0 || s.n < 3) continue;          // 有意義門檻：有量且成員≥3
@@ -291,7 +292,8 @@ function computeFlow(cl, items, baseline, frames) {
     const ret = s.rets.length ? s.rets.reduce((a, b2) => a + b2, 0) / s.rets.length : null;
     subList.push({ name: k, n: s.n, d_yi: Math.round(s.d1 / 1e6) / 100,
       c1: c1 && Math.round(c1 * 100) / 100, c2: c2 && Math.round(c2 * 100) / 100,
-      ret: ret != null ? Math.round(ret * 10000) / 100 : null });
+      ret: ret != null ? Math.round(ret * 10000) / 100 : null,
+      y: subsY[k] || null });
   }
   subList.sort((a, b) => b.d_yi - a.d_yi);
   const flow = {
