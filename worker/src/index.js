@@ -255,7 +255,9 @@ function computeFlow(cl, items, baseline, frames) {
 
   // 個股集中度（r10=窗內漲跌%，湧入/退出方向判定用——全日跌但近窗爆量反攻仍屬湧入）
   const stockFlow = {};  // code → [f10, c10, c30, r10]
-  const W1 = wins[0], W2 = wins[wins.length - 1];
+  const W1 = wins[0];
+  // 開盤初期只有短窗時，長窗回 null（避免 c30 顯示成 c10 的複製品誤導）
+  const W2 = wins.length > 1 ? wins[wins.length - 1] : null;
   for (const code in per) {
     const o = per[code], b = bl[code];
     const base = b[0] / tot5;

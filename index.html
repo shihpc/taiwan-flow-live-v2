@@ -144,7 +144,11 @@ function renderMarket(){
     `<div class="mkrow">${idxLine("加權",ix.tse,m.tse,"tse")}</div>`+
     `<div class="mkrow">${idxLine("櫃買",ix.otc,m.otc,"otc")}</div>`;
   const src=CFG.worker?" · 即時(Worker)":isLocal?"":" · 靜態快照";
-  document.getElementById("tsline").textContent="資料時間 "+(state.live.ts||"—")+src+(autoTimer?" · ⏱自動":"");
+  // 產生時間距今 >3 分鐘 → 標示資料偏舊（Worker/上游卡住時可察覺）
+  let stale="";
+  try{const age=(Date.now()-Date.parse(state.live.generated_at))/1000;
+    if(age>180)stale=" · ⚠資料"+Math.round(age/60)+"分前";}catch(e){}
+  document.getElementById("tsline").textContent="資料時間 "+(state.live.ts||"—")+src+(autoTimer?" · ⏱自動":"")+stale;
 }
 function idxSeg(){return `<div style="display:flex;gap:6px;margin:2px 0 8px;align-items:center"><span class="mut" style="font-size:11px">市場</span>`+
   `<button class="seg2 ${state.idx==='tse'?'on':''}" data-idx="tse">加權(TSE)</button>`+
@@ -230,9 +234,12 @@ function flowStockRow(c){const v=sval(c);if(!v||v.f10==null)return null;const in
   return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,f10:v.f10,c10:v.c10,c30:v.c30,r10:v.r10,
     chgp:v.chg,price:v.close,lim:v.lim,it:v.it,fi:v.fi,y1:v.y1,y2:v.y2,ints:v.ints,nl:v.nl};}
 // 各次產業總成員數（分母，讓「檔」有參與率意義；由 classify 現算、快取一次）
+// 只計上市/上櫃（與湧入統計的分子同一母體；興櫃不在 baseline，不能進分母）
 let SUBN=null;
 function subTotal(name){
-  if(!SUBN){SUBN={};for(const c in state.cl)for(const p of (state.cl[c].p||[]))SUBN[p[1]]=(SUBN[p[1]]||0)+1;}
+  if(!SUBN){SUBN={};for(const c in state.cl){const t=state.cl[c].t;
+    if(t!=="twse"&&t!=="tpex")continue;
+    for(const p of (state.cl[c].p||[]))SUBN[p[1]]=(SUBN[p[1]]||0)+1;}}
   return SUBN[name]||0;}
 function flowStockCols(out){const cols=[
   {h:"個股",cls:"l",w:W[0],f:r=>r.name},
@@ -360,17 +367,20 @@ async function loadJSON(u){return (await fetch(u,{cache:"no-store"})).json();}
 async function boot(){
   try{state.cl=(await loadJSON("data/classify.json")).map;}catch(e){document.getElementById("main").innerHTML='<div class="loading">無法載入 classify.json：'+e+'</div>';return;}
   await pull(false);
+  if(!state.live){await new Promise(s=>setTimeout(s,6000));await pull(false);}  // 首拉失敗重試一次，避免卡「載入中」
   initAuto();
 }
-// 抓一次即時資料並重繪；manual=true 時在按鈕顯示狀態
+// 抓一次即時資料並重繪；manual=true 時在按鈕顯示狀態。in-flight 防重疊（慢回應時自動刷新不疊發）
+let pulling=false;
 async function pull(manual){
+  if(pulling)return; pulling=true;
   const btn=document.getElementById("refresh");let old;
   if(manual){old=btn.textContent;btn.textContent="⏳…";btn.disabled=true;}
   try{
     const j=await loadJSON(liveURL());
     if(j&&j.ts){state.live=j;render();}
   }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
-  finally{ if(manual){btn.textContent=old;btn.disabled=false;} }
+  finally{ pulling=false; if(manual){btn.textContent=old;btn.disabled=false;} }
 }
 // ---- 自動刷新 ----
 let autoTimer=null;
