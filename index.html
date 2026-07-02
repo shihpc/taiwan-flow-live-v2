@@ -51,6 +51,7 @@ tbody tr.pin td.l{background:#16202c}
 td.lu{background:var(--up)!important;color:#fff}
 td.ld{background:var(--down)!important;color:#fff}
 .up{color:var(--up)}.down{color:var(--down)}.mut{color:var(--muted)}
+.db{background:#4a2430;color:#ff8f8f;border-radius:4px;padding:0 4px}
 .sl{cursor:pointer;border-bottom:1px dotted currentColor}
 .sl.sel{font-weight:700;border-bottom-style:solid}
 .crumb{font-size:12px;color:var(--dim);margin:10px 0 4px}
@@ -101,7 +102,7 @@ const pct=v=>v==null?"—":(v>0?"+":"")+v.toFixed(2)+"%";
 const sgn=(v,t)=>`<span class="${v>0?'up':v<0?'down':'mut'}">${t}</span>`;
 const yahoo=c=>`<a href="https://tw.stock.yahoo.com/quote/${c}" target="_blank" rel="noopener" style="color:var(--accent)">${c}</a>`;
 const cleanSub=s=>(s||"").replace(/\s*[（(].*$/,"");  // 次產業顯示去掉括號內說明
-const SC=["chg","amt","close","vol","bv","sv","pts","dp","lim","lw","f10","c10","c30","r10","it","fi","y1","y2"]; // live.stocks 陣列欄位（後備）
+const SC=["chg","amt","close","vol","bv","sv","pts","dp","lim","lw","f10","c10","c30","r10","it","fi","y1","y2","ints","nl"]; // live.stocks 陣列欄位（後備）
 const sval=(code)=>{const a=state.live.stocks[code]; if(!a)return null; const cols=(state.live&&state.live.stock_cols)||SC; const o={}; cols.forEach((k,i)=>o[k]=a[i]); return o;};
 
 // ---- sortable table ----
@@ -209,7 +210,13 @@ function renderPool(){
 const FLOW_SUB_MIN_YI=0.5;    // 次產業近10分額下限（億）
 const FLOW_STK_MIN=3e7;       // 個股近10分額下限（元）
 const cxCell=v=>v==null?'<span class="mut">—</span>':`<span class="${v>=2?'up':v>=1.3?'':'mut'}">${v.toFixed(2)}×</span>`;
-const itCell=v=>!v?'<span class="mut">0</span>':`<span class="${v>=2?'up':''}">${v}日</span>`;
+// dual=土洋同買（投信≥2且外資≥2，湧入訊號唯一翻正的疊加 +0.55%）→ 紅底標亮
+const itCell=(v,dual)=>{const t=!v?'0':v+"日";
+  return `<span class="${dual?'db':v>=2?'up':!v?'mut':''}">${t}</span>`;};
+// 法人強度%（(投信+外資淨買額)/成交額；>5% 湧入加分、<-5% 退出更弱）
+const intsCell=v=>{if(v==null)return '<span class="mut">—</span>';
+  const b=Math.abs(v)>=5;const t=(v>0?"+":"")+v.toFixed(1)+"%";
+  return `<span class="${v>0?'up':v<0?'down':'mut'}">${b?`<b>${t}</b>`:t}</span>`;};
 // 昨日/前日日線訊號標註（回測 report_lag.md：次產業昨湧→今日續強；個股昨湧→偏弱、昨退→續弱；連續兩日效果加倍）
 const annCell=(y1,y2)=>{
   if(y1===1&&y2===1)return '<b class="up">連湧</b>';
@@ -221,13 +228,13 @@ const annCell=(y1,y2)=>{
   return '<span class="mut">—</span>';};
 function flowStockRow(c){const v=sval(c);if(!v||v.f10==null)return null;const info=state.cl[c]||{};
   return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,f10:v.f10,c10:v.c10,c30:v.c30,r10:v.r10,
-    chgp:v.chg,price:v.close,lim:v.lim,it:v.it,fi:v.fi,y1:v.y1,y2:v.y2};}
+    chgp:v.chg,price:v.close,lim:v.lim,it:v.it,fi:v.fi,y1:v.y1,y2:v.y2,ints:v.ints,nl:v.nl};}
 // 各次產業總成員數（分母，讓「檔」有參與率意義；由 classify 現算、快取一次）
 let SUBN=null;
 function subTotal(name){
   if(!SUBN){SUBN={};for(const c in state.cl)for(const p of (state.cl[c].p||[]))SUBN[p[1]]=(SUBN[p[1]]||0)+1;}
   return SUBN[name]||0;}
-function flowStockCols(){return[
+function flowStockCols(out){const cols=[
   {h:"個股",cls:"l",w:W[0],f:r=>r.name},
   {h:"近10分",w:70,f:r=>yi(r.f10/1e8)},
   {h:"集中10分",w:70,f:r=>cxCell(r.c10)},
@@ -235,9 +242,12 @@ function flowStockCols(){return[
   {h:"窗內%",w:62,f:r=>r.r10==null?'<span class="mut">—</span>':sgn(r.r10,(r.r10>0?"+":"")+r.r10.toFixed(2)+"%")},
   {h:"漲跌%",w:W[7],f:r=>r.chgp==null?'<span class="mut">—</span>':sgn(r.chgp,pct(r.chgp))},
   {h:"最新價",w:W[9],cf:r=>r.lim===1?'lu':r.lim===-1?'ld':'',f:r=>r.price==null?'<span class="mut">—</span>':r.price.toLocaleString("en-US")},
+  {h:"法人強度",w:66,f:r=>intsCell(r.ints)},
   {h:"前日訊號",w:64,f:r=>annCell(r.y1,r.y2)},
-  {h:"投信3日",w:62,f:r=>itCell(r.it)},
-  {h:"外資3日",w:62,f:r=>itCell(r.fi)}];}
+  {h:"投信3日",w:62,f:r=>itCell(r.it,r.it>=2&&r.fi>=2)},
+  {h:"外資3日",w:62,f:r=>itCell(r.fi,r.it>=2&&r.fi>=2)}];
+  if(out)cols.splice(8,0,{h:"破底",w:48,f:r=>r.nl?'<b class="down">破底</b>':'<span class="mut">—</span>'});
+  return cols;}
 // 湧入/退出共用：同一套集中度，依「窗內方向」拆分（漲=買盤湧入、跌=賣壓退出）
 function renderFlow(){
   const out=state.tab==="outflow", word=out?"退出":"湧入";
@@ -246,12 +256,15 @@ function renderFlow(){
     ?`<div class="note">資金<b>退出</b>＝短窗集中度高且<b>窗內下跌</b>（賣壓集中湧出）。`+
      `回測：<b>個股</b>爆量下殺有<span class="down">續弱傾向</span>（T+3輸大盤63% vs 對照58%，跌停鎖死更強）；`+
      `<b>次產業</b>退出平均不續跌（修正期例外）。`+
-     `「前日訊號」：<span class="down">昨退/連退</span>股今日平均續弱（連退超額-1.3%）。</div>`
+     `「前日訊號」：<span class="down">昨退/連退</span>股今日平均續弱（連退超額-1.3%）。`+
+     `「<b>破底</b>」＝跌破20日低點，退出股續弱最確定（超額-1.08%）；法人強度<span class="down">≤-5%</span>同樣加重續弱。</div>`
     :`<div class="note">短窗<b>資金集中度</b>＝近N分佔全市場成交比 ÷ 5日常態佔比。`+
      `回測：<b>次產業</b>湧入有延續性（隔日資金黏性約8成）；<b>個股</b>追高平均不利，`+
      `<span class="up">投信連買</span>為有效續勢旗標。`+
      `「前日訊號」：次產業<span class="up">昨湧/連湧</span>今日平均續強(+0.3pp)；`+
-     `個股昨湧/連湧今日平均<b>偏弱</b>（追高風險，非加分）。</div>`;
+     `個股昨湧/連湧今日平均<b>偏弱</b>（追高風險，非加分）。`+
+     `「法人強度」＝法人淨買額佔成交額，<span class="up">≥+5%</span>湧入股不再追高吃虧；`+
+     `<span class="db">土洋同買</span>（投信外資皆≥2日，紅底）為湧入唯一翻正組合(+0.55%)。</div>`;
   if(!fl){
     main.innerHTML=html+`<div class="loading">盤中每分鐘累積後生效（約 09:10 起）。目前無盤中序列資料。</div>`;
     return;
@@ -277,11 +290,11 @@ function renderFlow(){
   if(open){
     const codes=Object.keys(state.cl).filter(c=>(state.cl[c].p||[]).some(p=>p[1]===open));
     const rows=codes.map(flowStockRow).filter(Boolean).filter(r=>r.f10>0).sort((a,b)=>b.f10-a.f10);
-    html+=`<div id="dd"><div class="crumb"><b>${cleanSub(open)}</b> 成分股（${rows.length}，依近10分額，再點收合）</div>`+tbl(flowStockCols(),rows)+`</div>`;
+    html+=`<div id="dd"><div class="crumb"><b>${cleanSub(open)}</b> 成分股（${rows.length}，依近10分額，再點收合）</div>`+tbl(flowStockCols(out),rows)+`</div>`;
   }
   const rows=Object.keys(state.live.stocks).map(flowStockRow).filter(Boolean)
     .filter(r=>r.f10>=FLOW_STK_MIN).filter(dirStk).sort((a,b)=>(b.c10||0)-(a.c10||0)).slice(0,80);
-  html+=`<div class="crumb"><b>個股${word}排行</b>（近10分額≥${FLOW_STK_MIN/1e8}億，依集中度，前80）</div>`+tbl(flowStockCols(),rows);
+  html+=`<div class="crumb"><b>個股${word}排行</b>（近10分額≥${FLOW_STK_MIN/1e8}億，依集中度，前80）</div>`+tbl(flowStockCols(out),rows);
   main.innerHTML=html;
   if(open){const boxes=[...document.querySelectorAll("#main .scrollbox")];
     if(boxes.length>1)boxes.forEach((b,i)=>{if(i!==1)b.style.maxHeight="34vh"});

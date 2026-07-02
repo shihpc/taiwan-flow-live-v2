@@ -1,11 +1,14 @@
 # src/build_baseline.py — 產 data/baseline.json（資金湧入偵測的常態基準，每交易日收盤後跑）
 #
 # 內容（給 Worker /live 當靜態依賴，快取到隔日）：
-#   stocks: {code: [a5, it, fi, y1, y2]}
+#   stocks: {code: [a5, it, fi, y1, y2, ints, nl]}
 #     a5 = 前 5 個交易日平均成交額（元）→ 集中度分母（個股常態佔比 = a5/tot5）
 #     it/fi = 投信/外資近 3 交易日買超日數 0~3（回測實證的個股續勢旗標）
 #     y1/y2 = 最近一日/前一日的日線訊號：1=湧入(爆量2x+漲2%+收高0.7) / -1=退出(爆量+跌+收低0.3) / 0=無
 #       回測（report_lag.md）：個股昨湧→今日平均偏弱(追高警示)、昨退→續弱；連續兩日效果加倍
+#     ints = 法人買賣強度%（最近一日 (投信+外資淨買股數×close)/成交額×100，1位小數）
+#       回測（report_indicators.md）：>5% 疊湧入 -0.51→-0.10；<-5% 疊退出 -0.64→-0.97
+#     nl = 1 若最近一日收盤跌破前20日收盤最低（破底；退出訊號最強技術確認 -0.64→-1.08）
 #   subs_y: {次產業: [y1, y2]}（僅列非零者）
 #       次產業訊號＝集中度(佔比/前5日均佔比)≥1.5 且 等權漲跌 ≥1%(湧)/≤-1%(退)
 #       回測：次產業昨湧→今日平均續強(+0.3pp)、連湧更強；昨退→今日偏弱
@@ -23,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fin  # noqa: E402
 
 OUT = fin.ROOT / "data" / "baseline.json"
-NDAYS = 7           # y2 的爆量分母需要 D-2..D-6
+NDAYS = 21          # 破20日新低需要 D-1..D-20；y2 的爆量分母需要 D-2..D-6
 SUB_MIN_MEM = 5
 SUB_AMT_MIN = 10e8
 
@@ -108,7 +111,7 @@ def main():
     days, pd = [], []
     d = date.today()
     probe = 0
-    while len(days) < NDAYS and probe < 20:
+    while len(days) < NDAYS and probe < 45:
         ds = d.isoformat()
         d -= timedelta(days=1)
         probe += 1
@@ -128,18 +131,23 @@ def main():
     if len(days) < NDAYS:
         raise RuntimeError(f"僅找到 {len(days)} 個交易日（需 {NDAYS}）")
 
-    # 投信/外資近 3 交易日買超日數
-    it, fi = {}, {}
+    # 投信/外資近 3 交易日買超日數 + 最近一日淨買股數（法人強度用）
+    it, fi, net0 = {}, {}, {}
     for ds in days[:3]:
         for r in fin.api_get("TaiwanStockInstitutionalInvestorsBuySell", start_date=ds, end_date=ds):
             c = str(r.get("stock_id") or "")
             if c not in keep:
                 continue
+            name = r.get("name")
+            if name not in ("Investment_Trust", "Foreign_Investor"):
+                continue
             net = (r.get("buy") or 0) - (r.get("sell") or 0)
+            if ds == days[0]:
+                net0[c] = net0.get(c, 0) + net
             if net > 0:
-                if r.get("name") == "Investment_Trust":
+                if name == "Investment_Trust":
                     it[c] = it.get(c, 0) + 1
-                elif r.get("name") == "Foreign_Investor":
+                else:
                     fi[c] = fi.get(c, 0) + 1
         print(f"inst {ds} ok", flush=True)
 
@@ -154,7 +162,16 @@ def main():
         if not amts:
             continue
         a5 = sum(amts) / 5
-        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0)]
+        # 法人強度%（最近一日）與 破20日新低
+        cur = pd[0].get(c)
+        ints = 0.0
+        nl = 0
+        if cur and cur[0] and cur[1] is not None:
+            ints = round(net0.get(c, 0) * cur[1] / cur[0] * 1000) / 10
+            lows = [v[1] for v in (pd[k].get(c) for k in range(1, NDAYS)) if v and v[1] is not None]
+            if lows and cur[1] < min(lows):
+                nl = 1
+        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0), ints, nl]
         tot5 += a5
     subs_y = {}
     for k in set(s1) | set(s2):
@@ -166,7 +183,9 @@ def main():
     n_y1d = sum(1 for v in stocks.values() if v[3] == -1)
     print(f"baseline {days[0]}: {len(stocks)} 檔, tot5={tot5/1e8:.0f}億, "
           f"昨湧{n_y1}/昨退{n_y1d} 檔, 次產業旗標 {len(subs_y)} 個, "
-          f"投信3連買 {sum(1 for v in stocks.values() if v[1] == 3)} 檔")
+          f"投信3連買 {sum(1 for v in stocks.values() if v[1] == 3)} 檔, "
+          f"法人強度>5% {sum(1 for v in stocks.values() if v[5] > 5)} 檔, "
+          f"破底 {sum(1 for v in stocks.values() if v[6])} 檔")
 
 
 if __name__ == "__main__":

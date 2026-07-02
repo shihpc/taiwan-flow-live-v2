@@ -99,10 +99,10 @@ async function buildLive(env) {
     const blst = baseline.stocks || {};
     for (const code in live.stocks) {
       const s = per[code] || [null, null, null, null];
-      const b = blst[code] || [0, 0, 0, 0, 0];
-      live.stocks[code].push(s[0], s[1], s[2], s[3], b[1], b[2], b[3] || 0, b[4] || 0);
+      const b = blst[code] || [0, 0, 0, 0, 0, 0, 0];
+      live.stocks[code].push(s[0], s[1], s[2], s[3], b[1], b[2], b[3] || 0, b[4] || 0, b[5] || 0, b[6] || 0);
     }
-    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "r10", "it", "fi", "y1", "y2"];
+    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "r10", "it", "fi", "y1", "y2", "ints", "nl"];
     live.flow = flow;
   } catch (e) {
     live.flow = null;
