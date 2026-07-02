@@ -222,6 +222,11 @@ const annCell=(y1,y2)=>{
 function flowStockRow(c){const v=sval(c);if(!v||v.f10==null)return null;const info=state.cl[c]||{};
   return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,f10:v.f10,c10:v.c10,c30:v.c30,r10:v.r10,
     chgp:v.chg,price:v.close,lim:v.lim,it:v.it,fi:v.fi,y1:v.y1,y2:v.y2};}
+// 各次產業總成員數（分母，讓「檔」有參與率意義；由 classify 現算、快取一次）
+let SUBN=null;
+function subTotal(name){
+  if(!SUBN){SUBN={};for(const c in state.cl)for(const p of (state.cl[c].p||[]))SUBN[p[1]]=(SUBN[p[1]]||0)+1;}
+  return SUBN[name]||0;}
 function flowStockCols(){return[
   {h:"個股",cls:"l",w:W[0],f:r=>r.name},
   {h:"近10分",w:70,f:r=>yi(r.f10/1e8)},
@@ -255,7 +260,7 @@ function renderFlow(){
   const dirSub=s=>out?(s.ret!=null&&s.ret<0):(s.ret==null||s.ret>=0);
   const dirStk=r=>out?(r.r10!=null&&r.r10<0):(r.r10==null||r.r10>=0);
   const openState=state.sub[state.tab];
-  const subs=(fl.subs||[]).filter(s=>s.d_yi>=FLOW_SUB_MIN_YI).filter(dirSub).map(s=>({...s,
+  const subs=(fl.subs||[]).filter(s=>s.d_yi>=FLOW_SUB_MIN_YI).filter(dirSub).map(s=>({...s,raw:s.name,
     name:`<span class="sl ${openState.open===s.name?'sel':''}" data-fsub="${encodeURIComponent(s.name)}">${cleanSub(s.name)}</span>`}))
     .sort((a,b)=>(b.c1||0)-(a.c1||0));
   html+=`<div class="crumb"><b>次產業${word}排行</b>（近10分額≥${FLOW_SUB_MIN_YI}億，依集中度）</div>`;
@@ -266,7 +271,8 @@ function renderFlow(){
     {h:"集中30分",w:70,f:r=>cxCell(r.c2)},
     {h:"窗內漲跌",w:70,f:r=>r.ret==null?'<span class="mut">—</span>':sgn(r.ret,(r.ret>0?"+":"")+r.ret.toFixed(2)+"%")},
     {h:"前日訊號",w:64,f:r=>annCell(r.y?r.y[0]:0,r.y?r.y[1]:0)},
-    {h:"檔",w:44,f:r=>r.n}],subs);
+    {h:"參與/全",w:58,f:r=>{const t=subTotal(r.raw);const hot=t&&r.n/t>=0.7;
+      return `<span class="${hot?'up':''}">${r.n}/${t||"?"}</span>`;}}],subs);
   const open=openState.open;
   if(open){
     const codes=Object.keys(state.cl).filter(c=>(state.cl[c].p||[]).some(p=>p[1]===open));
