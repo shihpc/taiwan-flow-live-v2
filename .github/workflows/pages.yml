@@ -11,9 +11,10 @@ permissions:
   id-token: write
 
 concurrency:
-  # 連續 push 時取消還在跑的舊 run，避免同 run 撞見兩份 github-pages artifact 而 deploy 失敗
+  # 連續 push 改「排隊」不取消：cancel-in-progress 會在 upload 後取消舊 run，
+  # 殘留的 artifact 讓後續 deploy-pages 撞 "Multiple artifacts named github-pages"（2026-07-02 連炸 #17-#25）
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -27,5 +28,8 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
+          name: pages-${{ github.run_id }}   # 每 run 唯一名，杜絕同名 artifact 衝突
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: pages-${{ github.run_id }}
