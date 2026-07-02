@@ -85,7 +85,30 @@ async function buildLive(env) {
     finPriceLimit(token, d),
     fetchJSON(`${base}/lastweek.json`, 3600),     // 上週欄位：快取一小時
   ]);
-  return aggregate(cl, rows, limits, lw);
+  const live = aggregate(cl, rows, limits, lw);
+
+  // P3：資金湧入（frames + baseline；任何失敗不影響 /live 主體）
+  try {
+    const baseline = await fetchJSON(`${base}/baseline.json`, 3600);
+    const ts = String(live.ts || "");
+    const frames = env.FLOW_KV
+      ? await pickFrames(env, ts.slice(0, 10), hm2min(ts.slice(11, 16)), [10, 30])
+      : {};
+    const items = Object.entries(live.stocks).map(([code, a]) => ({ code, amt: a[1], close: a[2] }));
+    const { flow, per } = computeFlow(cl, items, baseline, frames);
+    const blst = baseline.stocks || {};
+    for (const code in live.stocks) {
+      const s = per[code] || [null, null, null];
+      const b = blst[code] || [0, 0, 0];
+      live.stocks[code].push(s[0], s[1], s[2], b[1], b[2]);
+    }
+    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "it", "fi"];
+    live.flow = flow;
+  } catch (e) {
+    live.flow = null;
+    live.flow_err = String(e && e.message || e);
+  }
+  return live;
 }
 
 // 純聚合（無 I/O，可離線測試）：對應 snapshot.py 的 build_live 主體
@@ -162,18 +185,120 @@ const mkZero = () => ({ amt: 0, up: 0, down: 0, flat: 0, n: 0, ul: 0, dl: 0 });
 async function storeFrame(env) {
   const rows = await finSnapshot(env.FINMIND_TOKEN);
   let ts = null;
-  const amt = {};
+  const fr = {};   // {code: [累計成交額, 現價]}
   for (const r of rows) {
     const c = String(r.stock_id || "");
     if (!c || c === "001" || c === "101") continue;
     ts = ts || String(r.date || "");
     const a = num(r.total_amount);
-    if (a > 0) amt[c] = Math.round(a);
+    if (a > 0) fr[c] = [Math.round(a), orNull(r.close)];
   }
   if (!ts) throw new Error("snapshot 無資料");
   const d = ts.slice(0, 10), hm = ts.slice(11, 16);
-  await env.FLOW_KV.put(`f:${d}:${hm}`, JSON.stringify(amt), { expirationTtl: 172800 });
-  return { key: `f:${d}:${hm}`, stocks: Object.keys(amt).length };
+  await env.FLOW_KV.put(`f:${d}:${hm}`, JSON.stringify(fr), { expirationTtl: 172800 });
+  return { key: `f:${d}:${hm}`, stocks: Object.keys(fr).length };
+}
+
+// ---- 資金湧入指標（P3）----
+// 集中度 = 短窗佔全市場成交比 ÷ 常態佔比(a5/tot5)。佔比相除 → 市場 U 型時段效應自動抵消；
+// 窗長取「最接近目標的既有 frame」，佔比法對實際窗長不敏感。回測依據 backtest/report_sector.md。
+const hm2min = (hm) => +hm.slice(0, 2) * 60 + +hm.slice(3, 5);
+
+async function pickFrames(env, d, nowMin, wins) {
+  const ls = await env.FLOW_KV.list({ prefix: `f:${d}:`, limit: 1000 });
+  const names = ls.keys.map((k) => k.name).sort();
+  const chosen = {};
+  for (const w of wins) {
+    const target = nowMin - w;
+    let best = null;
+    for (const nm of names) {
+      const m = hm2min(nm.slice(-5));
+      if (m <= target && m < nowMin - 2) best = nm;   // 最接近目標且確實比現在舊
+    }
+    if (best) chosen[w] = best;
+  }
+  const uniq = [...new Set(Object.values(chosen))];
+  const bodies = {};
+  await Promise.all(uniq.map(async (nm) => { bodies[nm] = await env.FLOW_KV.get(nm, "json"); }));
+  const out = {};
+  for (const w of wins) if (chosen[w] && bodies[chosen[w]]) out[w] = { name: chosen[w], data: bodies[chosen[w]] };
+  return out;
+}
+
+// frame 舊格式（純數字）相容
+const frAmt = (v) => (v == null ? null : Array.isArray(v) ? v[0] : v);
+const frClose = (v) => (v == null || !Array.isArray(v) ? null : v[1]);
+
+function computeFlow(cl, items, baseline, frames) {
+  const bl = baseline.stocks || {}, tot5 = baseline.tot5 || 0;
+  if (!tot5) return { flow: null, per: {} };
+  const wins = Object.keys(frames).map(Number).sort((a, b) => a - b);
+  if (!wins.length) return { flow: null, per: {} };
+
+  // 每檔各窗Δ額；全市場Δ = baseline universe 加總
+  const per = {};        // code → {d:{win:Δ}, cNow, cThen(win10)}
+  const mktD = {};       // win → 市場Δ
+  for (const it_ of items) {
+    const { code, amt, close } = it_;
+    if (!bl[code]) continue;
+    const o = { d: {}, close };
+    for (const w of wins) {
+      const f = frames[w].data[code];
+      const a0 = frAmt(f);
+      if (a0 == null || amt < a0) continue;      // 無舊值或資料倒退 → 略過該窗
+      o.d[w] = amt - a0;
+      mktD[w] = (mktD[w] || 0) + (amt - a0);
+      if (frClose(f) != null) o["p" + w] = frClose(f);   // 窗口起點價
+    }
+    per[code] = o;
+  }
+
+  // 個股集中度
+  const stockFlow = {};  // code → [f10, c10, c30]
+  const W1 = wins[0], W2 = wins[wins.length - 1];
+  for (const code in per) {
+    const o = per[code], b = bl[code];
+    const base = b[0] / tot5;
+    const cx = (w) => (o.d[w] != null && mktD[w] > 0 && base > 0)
+      ? Math.round((o.d[w] / mktD[w]) / base * 100) / 100 : null;
+    stockFlow[code] = [o.d[W1] != null ? o.d[W1] : null, cx(W1), cx(W2)];
+  }
+
+  // 次產業聚合（classify.p 第二層）
+  const subs = {};
+  for (const code in per) {
+    const info = cl[code];
+    if (!info || !info.p) continue;
+    const o = per[code], b = bl[code];
+    for (const sname of new Set(info.p.map((p) => p[1]))) {
+      const s = subs[sname] || (subs[sname] = { name: sname, d1: 0, d2: 0, a5: 0, n: 0, rets: [] });
+      if (o.d[W1] != null) { s.d1 += o.d[W1]; s.n += 1; }
+      if (o.d[W2] != null) s.d2 += o.d[W2];
+      s.a5 += b[0];
+      const p1 = o["p" + W1];
+      if (p1 && o.close != null) s.rets.push(o.close / p1 - 1);
+    }
+  }
+  const subList = [];
+  for (const k in subs) {
+    const s = subs[k];
+    if (s.d1 <= 0 || s.n < 3) continue;          // 有意義門檻：有量且成員≥3
+    const base = s.a5 / tot5;
+    const c1 = mktD[W1] > 0 && base > 0 ? (s.d1 / mktD[W1]) / base : null;
+    const c2 = mktD[W2] > 0 && base > 0 ? (s.d2 / mktD[W2]) / base : null;
+    const ret = s.rets.length ? s.rets.reduce((a, b2) => a + b2, 0) / s.rets.length : null;
+    subList.push({ name: k, n: s.n, d_yi: Math.round(s.d1 / 1e6) / 100,
+      c1: c1 && Math.round(c1 * 100) / 100, c2: c2 && Math.round(c2 * 100) / 100,
+      ret: ret != null ? Math.round(ret * 10000) / 100 : null });
+  }
+  subList.sort((a, b) => b.d_yi - a.d_yi);
+  const flow = {
+    wins: { w1: W1, w2: W2 },
+    frames: Object.fromEntries(wins.map((w) => [w, frames[w].name.slice(-5)])),
+    baseline_date: baseline.date,
+    subs: subList,
+  };
+  return { flow, per: stockFlow };
 }
 
 // ---- HTTP ----
