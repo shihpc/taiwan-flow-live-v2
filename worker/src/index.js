@@ -98,11 +98,11 @@ async function buildLive(env) {
     const { flow, per } = computeFlow(cl, items, baseline, frames);
     const blst = baseline.stocks || {};
     for (const code in live.stocks) {
-      const s = per[code] || [null, null, null];
+      const s = per[code] || [null, null, null, null];
       const b = blst[code] || [0, 0, 0];
-      live.stocks[code].push(s[0], s[1], s[2], b[1], b[2]);
+      live.stocks[code].push(s[0], s[1], s[2], s[3], b[1], b[2]);
     }
-    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "it", "fi"];
+    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "r10", "it", "fi"];
     live.flow = flow;
   } catch (e) {
     live.flow = null;
@@ -253,15 +253,17 @@ function computeFlow(cl, items, baseline, frames) {
     per[code] = o;
   }
 
-  // 個股集中度
-  const stockFlow = {};  // code → [f10, c10, c30]
+  // 個股集中度（r10=窗內漲跌%，湧入/退出方向判定用——全日跌但近窗爆量反攻仍屬湧入）
+  const stockFlow = {};  // code → [f10, c10, c30, r10]
   const W1 = wins[0], W2 = wins[wins.length - 1];
   for (const code in per) {
     const o = per[code], b = bl[code];
     const base = b[0] / tot5;
     const cx = (w) => (o.d[w] != null && mktD[w] > 0 && base > 0)
       ? Math.round((o.d[w] / mktD[w]) / base * 100) / 100 : null;
-    stockFlow[code] = [o.d[W1] != null ? o.d[W1] : null, cx(W1), cx(W2)];
+    const p1 = o["p" + W1];
+    const r10 = (p1 && o.close != null) ? Math.round((o.close / p1 - 1) * 10000) / 100 : null;
+    stockFlow[code] = [o.d[W1] != null ? o.d[W1] : null, cx(W1), cx(W2), r10];
   }
 
   // 次產業聚合（classify.p 第二層）
