@@ -1,9 +1,9 @@
 name: us
-# 台股開盤前「昨夜美股速覽」：美股收盤(台北凌晨)後、07:30 台北 產 data/us.json。
-# 23:30 UTC 週日~四 = 07:30 台北 週一~五。
+# 台股開盤前「昨夜美股速覽」：美股收盤(台北凌晨4/5點)後、06:00 台北 產 data/us.json。
+# 22:00 UTC 週日~四 = 06:00 台北 週一~五。
 on:
   schedule:
-    - cron: '30 23 * * 0-4'
+    - cron: '0 22 * * 0-4'
   workflow_dispatch:
 
 permissions:
