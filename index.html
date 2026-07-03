@@ -72,6 +72,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
     <div class="tab active" data-tab="exchange">產業別</div>
     <div class="tab" data-tab="chain">產業鏈</div>
     <div class="tab" data-tab="rank">成交佔比</div>
+    <div class="tab" data-tab="us">美股速覽</div>
     <div class="tab" data-tab="flow">資金湧入</div>
     <div class="tab" data-tab="outflow">資金退出</div>
   </div>
@@ -93,7 +94,7 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
                 : isLocal ? "/api/refresh"
                 : "data/live.json?t="+Date.now();
 
-const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}}};
+const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}}};
 
 // ---- formatters ----
 const yi=v=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1})+"億";
@@ -311,9 +312,40 @@ document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-fsub]")
   const st=state.sub[state.tab];if(!st)return;
   const v=decodeURIComponent(s.dataset.fsub);st.open=st.open===v?null:v;render();});
 
+// ---- 美股速覽 tab（開盤前看昨夜美股；data/us.json 每交易日 07:30 由 Action 產）----
+async function renderUS(){
+  const main=document.getElementById("main");
+  if(!state.us){
+    main.innerHTML='<div class="loading">載入美股資料…</div>';
+    try{state.us=await loadJSON("data/us.json?t="+Date.now());}
+    catch(e){main.innerHTML='<div class="loading">無法載入 us.json：'+e+'</div>';return;}
+    if(state.tab!=="us")return;
+  }
+  const u=state.us;
+  let html=`<div class="note">美股 <b>${u.date||"—"}</b> 收盤 · USD/TWD ${u.fx||"—"} · `+
+    `量比＝當日量/前5日均量 · ADR溢價＝ADR折台股價 vs 台股收盤（正=美股買貴、開盤偏多）</div>`;
+  try{const ageD=(Date.now()-Date.parse(u.date))/86400e3;
+    if(ageD>4)html+=`<div class="note"><span class="down">⚠ 美股資料已 ${Math.floor(ageD)} 天未更新</span></div>`;}catch(e){}
+  for(const g of (u.groups||[])){
+    const isAdr=(g.g||"").includes("ADR");
+    const cols=[
+      {h:g.g,cls:"l",w:112,f:r=>`${r.n}<span class="nm mut">${r.s.replace("^","")}</span>`},
+      {h:"收盤",w:76,f:r=>r.c>=1000?r.c.toLocaleString("en-US",{maximumFractionDigits:0}):r.c.toLocaleString("en-US")},
+      {h:"漲跌%",w:62,f:r=>sgn(r.chg,pct(r.chg))},
+      {h:"量比",w:54,f:r=>r.vr==null?'<span class="mut">—</span>':`<span class="${r.vr>=1.5?'up':r.vr<0.7?'mut':''}">${r.vr.toFixed(2)}×</span>`},
+      {h:"振幅",w:56,f:r=>r.amp==null?'<span class="mut">—</span>':r.amp.toFixed(2)+"%"}];
+    if(isAdr)cols.push({h:"ADR溢價",w:68,f:r=>r.prem==null?'<span class="mut">—</span>':sgn(r.prem,(r.prem>0?"+":"")+r.prem.toFixed(2)+"%")});
+    html+=tbl(cols,g.rows||[]);
+  }
+  html+=`<div class="note mut">FinMind USStockPrice 日線 · 每交易日 07:30 自動更新 · 🔄可重抓</div>`;
+  main.innerHTML=html;
+  document.querySelectorAll("#main .scrollbox").forEach(b=>b.style.maxHeight="none");
+}
+
 function render(){
   for(const k in T)delete T[k];
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===state.tab));
+  if(state.tab==="us"){if(state.live)renderMarket();renderUS();return;}
   if(!state.live||!state.cl){document.getElementById("main").innerHTML='<div class="loading">載入中…</div>';return;}
   renderMarket();
   if(state.pool)return renderPool();
@@ -377,8 +409,10 @@ async function pull(manual){
   const btn=document.getElementById("refresh");let old;
   if(manual){old=btn.textContent;btn.textContent="⏳…";btn.disabled=true;}
   try{
+    if(state.tab==="us"&&manual)state.us=null;   // 美股 tab 手動更新 → 重抓 us.json
     const j=await loadJSON(liveURL());
     if(j&&j.ts){state.live=j;render();}
+    else if(state.tab==="us")render();
   }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
   finally{ pulling=false; if(manual){btn.textContent=old;btn.disabled=false;} }
 }

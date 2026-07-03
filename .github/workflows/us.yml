@@ -1,0 +1,36 @@
+name: us
+# 台股開盤前「昨夜美股速覽」：美股收盤(台北凌晨)後、07:30 台北 產 data/us.json。
+# 23:30 UTC 週日~四 = 07:30 台北 週一~五。
+on:
+  schedule:
+    - cron: '30 23 * * 0-4'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: us
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: build us.json
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python src/build_us.py
+      - name: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/us.json
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "us $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break || sleep 4; done
