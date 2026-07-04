@@ -89,10 +89,13 @@ def _seg_word(r: float) -> str:
 
 
 def session_brief(us_date: str) -> str:
-    """由分鐘K描述當日美股早/午/尾盤走勢（S&P 三段 + 費半概括），一句 ~40 字內。"""
+    """由分鐘K描述當日美股盤中走勢：S&P/納指/費半 各三段（早盤=首60分、午盤=中段、尾盤=末60分）。"""
     def segs(tic):
-        rows = [r for r in fin.api_get("USStockPriceMinute", data_id=tic, start_date=us_date)
-                if str(r.get("date", "")).startswith(us_date) and fv(r.get("close"))]
+        try:
+            rows = [r for r in fin.api_get("USStockPriceMinute", data_id=tic, start_date=us_date)
+                    if str(r.get("date", "")).startswith(us_date) and fv(r.get("close"))]
+        except Exception:
+            return None
         n = len(rows)
         if n < 60:
             return None
@@ -102,21 +105,16 @@ def session_brief(us_date: str) -> str:
         c1, c2, c3 = fv(rows[e - 1]["close"]), fv(rows[ls - 1]["close"]), fv(rows[n - 1]["close"])
         return ((c1 / o - 1) * 100, (c2 / c1 - 1) * 100, (c3 / c2 - 1) * 100)
 
-    try:
-        sp = segs("^GSPC")
-    except Exception:
-        sp = None
-    if not sp:
-        return ""
-    s = f"盤中：S&P早盤{_seg_word(sp[0])}、午盤{_seg_word(sp[1])}、尾盤{_seg_word(sp[2])}"
-    try:
-        sx = segs("^SOX")
-    except Exception:
-        sx = None
-    if sx:
-        rest = sx[1] + sx[2]
-        s += f"；費半早盤{_seg_word(sx[0])}後{'反彈' if (sx[0] < -0.3 and rest > 0.3) else '收復' if (sx[0] < -0.3 and rest > 0) else '續弱' if rest < -0.3 else '走高' if rest > 0.3 else '整理'}"
-    return s + "。"
+    parts = []
+    for tics, name in ((("^GSPC",), "S&P"), (("^IXIC",), "納指"), (("^SOX", "SOXX"), "費半")):
+        g = None
+        for tic in tics:   # ^SOX 無分鐘資料時退用 SOXX ETF 代理
+            g = segs(tic)
+            if g:
+                break
+        if g:
+            parts.append(f"{name}早盤{_seg_word(g[0])}、午盤{_seg_word(g[1])}、尾盤{_seg_word(g[2])}")
+    return ("盤中：" + "；".join(parts) + "。") if parts else ""
 
 
 def brief(groups) -> str:
