@@ -196,6 +196,13 @@ async function storeFrame(env) {
   if (!ts) throw new Error("snapshot 無資料");
   const d = ts.slice(0, 10), hm = ts.slice(11, 16);
   await env.FLOW_KV.put(`f:${d}:${hm}`, JSON.stringify(fr), { expirationTtl: 172800 });
+  // 維護當日 frame 時間索引（pickFrames 用 get 讀索引，不用 list——KV 免費版 list 僅 1000次/日）
+  const idxKey = `fi:${d}`;
+  const idx = (await env.FLOW_KV.get(idxKey, "json")) || [];
+  if (!idx.includes(hm)) {
+    idx.push(hm);
+    await env.FLOW_KV.put(idxKey, JSON.stringify(idx.sort()), { expirationTtl: 172800 });
+  }
   return { key: `f:${d}:${hm}`, stocks: Object.keys(fr).length };
 }
 
@@ -205,17 +212,17 @@ async function storeFrame(env) {
 const hm2min = (hm) => +hm.slice(0, 2) * 60 + +hm.slice(3, 5);
 
 async function pickFrames(env, d, nowMin, wins) {
-  const ls = await env.FLOW_KV.list({ prefix: `f:${d}:`, limit: 1000 });
-  const names = ls.keys.map((k) => k.name).sort();
+  // 讀索引 key（storeFrame 維護）取代 list——免費版 list 僅 1000次/日，get 有 10 萬
+  const times = (await env.FLOW_KV.get(`fi:${d}`, "json")) || [];
   const chosen = {};
   for (const w of wins) {
     const target = nowMin - w;
     let best = null;
-    for (const nm of names) {
-      const m = hm2min(nm.slice(-5));
-      if (m <= target && m < nowMin - 2) best = nm;   // 最接近目標且確實比現在舊
+    for (const hm of times) {
+      const m = hm2min(hm);
+      if (m <= target && m < nowMin - 2) best = hm;   // 最接近目標且確實比現在舊
     }
-    if (best) chosen[w] = best;
+    if (best) chosen[w] = `f:${d}:${best}`;
   }
   const uniq = [...new Set(Object.values(chosen))];
   const bodies = {};
