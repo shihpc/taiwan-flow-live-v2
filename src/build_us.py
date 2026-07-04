@@ -24,11 +24,12 @@ GROUPS = [
     ("指數", [("^GSPC", "S&P 500"), ("^IXIC", "那斯達克"), ("^DJI", "道瓊"), ("^SOX", "費城半導體")]),
     ("台股ADR", [("TSM", "台積電ADR", "2330", 5), ("UMC", "聯電ADR", "2303", 5), ("ASX", "日月光ADR", "3711", 2)]),
     ("AI／半導體", [("NVDA", "輝達"), ("AMD", "超微"), ("AVGO", "博通"), ("QCOM", "高通"),
-                  ("INTC", "英特爾"), ("MU", "美光"), ("AMAT", "應用材料"), ("ASML", "艾司摩爾")]),
+                  ("INTC", "英特爾"), ("AMAT", "應用材料"), ("ASML", "艾司摩爾")]),
     ("大型科技", [("AAPL", "蘋果"), ("MSFT", "微軟"), ("TSLA", "特斯拉"), ("META", "Meta"),
-                ("GOOGL", "Google"), ("AMZN", "亞馬遜"), ("ORCL", "甲骨文")]),
+                ("GOOGL", "Google"), ("AMZN", "亞馬遜"), ("ORCL", "甲骨文"),
+                ("MU", "美光"), ("SNDK", "SanDisk"), ("SPCX", "SpaceX")]),
 ]
-# 註：SMCI/SNDK/SPCX/DRAM/COIN/USO 移為前端「自選」預設（使用者可自行刪增）。
+# 註：SMCI/DRAM/COIN/USO 為前端「自選」預設（使用者可自行刪增）；MU 自 AI/半導體移入大型科技。
 
 
 def fv(v):
@@ -73,6 +74,49 @@ def usdtwd() -> float | None:
         if b and s and b > 0 and s > 0:
             return (b + s) / 2
     return None
+
+
+def _seg_word(r: float) -> str:
+    if r >= 0.5:
+        return "強拉"
+    if r >= 0.15:
+        return "走高"
+    if r <= -0.5:
+        return "急殺"
+    if r <= -0.15:
+        return "走低"
+    return "震盪持平"
+
+
+def session_brief(us_date: str) -> str:
+    """由分鐘K描述當日美股早/午/尾盤走勢（S&P 三段 + 費半概括），一句 ~40 字內。"""
+    def segs(tic):
+        rows = [r for r in fin.api_get("USStockPriceMinute", data_id=tic, start_date=us_date)
+                if str(r.get("date", "")).startswith(us_date) and fv(r.get("close"))]
+        n = len(rows)
+        if n < 60:
+            return None
+        o = fv(rows[0].get("open")) or fv(rows[0]["close"])
+        e = min(60, n // 3)                 # 早盤=首60分
+        ls = max(n - 60, (2 * n) // 3)      # 尾盤=末60分
+        c1, c2, c3 = fv(rows[e - 1]["close"]), fv(rows[ls - 1]["close"]), fv(rows[n - 1]["close"])
+        return ((c1 / o - 1) * 100, (c2 / c1 - 1) * 100, (c3 / c2 - 1) * 100)
+
+    try:
+        sp = segs("^GSPC")
+    except Exception:
+        sp = None
+    if not sp:
+        return ""
+    s = f"盤中：S&P早盤{_seg_word(sp[0])}、午盤{_seg_word(sp[1])}、尾盤{_seg_word(sp[2])}"
+    try:
+        sx = segs("^SOX")
+    except Exception:
+        sx = None
+    if sx:
+        rest = sx[1] + sx[2]
+        s += f"；費半早盤{_seg_word(sx[0])}後{'反彈' if (sx[0] < -0.3 and rest > 0.3) else '收復' if (sx[0] < -0.3 and rest > 0) else '續弱' if rest < -0.3 else '走高' if rest > 0.3 else '整理'}"
+    return s + "。"
 
 
 def brief(groups) -> str:
@@ -148,7 +192,8 @@ def main():
     from datetime import datetime, timezone
     out = {"date": us_date, "fx": round(fx, 3) if fx else None,
            "generated_at": datetime.now(timezone.utc).isoformat(),
-           "brief": brief(groups), "groups": groups}
+           "brief": brief(groups), "session": session_brief(us_date) if us_date else "",
+           "groups": groups}
     OUT.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     n = sum(len(g["rows"]) for g in groups)
     print(f"us.json: 美股日期 {us_date}, {n} 檔, USDTWD={out['fx']}")
