@@ -333,6 +333,13 @@ async function usWatch(env, list) {
   return out;
 }
 
+// ---- 美股自選跨裝置同步（/usersync?k=同步碼[&set=A,B]）----
+// 清單存 KV `usw:<sha256(碼)>`（永久）；同步碼=輕量共享密鑰，內容僅股票代號、低敏感。
+async function syncKey(code) {
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("usw:" + code));
+  return "usw:" + [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
 // ---- HTTP ----
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" };
 const json = (obj, extra) => new Response(JSON.stringify(obj), {
@@ -353,6 +360,18 @@ export default {
       } catch (e) {
         return json({ error: String(e && e.message || e) });
       }
+    }
+    if (url.pathname === "/usersync") {  // 自選清單跨裝置同步
+      const k = (url.searchParams.get("k") || "").trim();
+      if (k.length < 4 || k.length > 64) return json({ error: "同步碼需 4~64 字元" });
+      const key = await syncKey(k);
+      const set = url.searchParams.get("set");
+      if (set !== null) {
+        const list = [...new Set(set.toUpperCase().split(",").map((s) => s.trim()).filter((s) => USW_RE.test(s)))].slice(0, 12);
+        await env.FLOW_KV.put(key, JSON.stringify(list));
+        return json({ ok: true, list });
+      }
+      return json({ list: (await env.FLOW_KV.get(key, "json")) || [] });
     }
     if (url.pathname === "/uswatch") {  // 美股自選報價
       const list = [...new Set((url.searchParams.get("t") || "").toUpperCase()

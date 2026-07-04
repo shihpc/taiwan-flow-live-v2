@@ -344,17 +344,36 @@ async function renderUS(){
   bindUsWatch();
   loadUsWatch();
 }
-// ---- 美股自選（清單存 localStorage；報價走 Worker /uswatch，token 不落地前端）----
+// ---- 美股自選（報價走 Worker /uswatch；清單可用「同步碼」跨裝置同步存 KV）----
 const uswList=()=>{try{return JSON.parse(localStorage.getItem("tflive2_uswatch")||"[]");}catch(e){return [];}};
 const uswSave=l=>localStorage.setItem("tflive2_uswatch",JSON.stringify(l));
+const uswSyncCode=()=>localStorage.getItem("tflive2_usw_sync")||"";
 let uswCache=null;   // {key, rows}
+let uswPulled=false; // 本次瀏覽已從遠端拉過
+async function uswRemotePull(){
+  if(!CFG.worker||!uswSyncCode()||uswPulled)return;
+  try{const j=await loadJSON(CFG.worker+"/usersync?k="+encodeURIComponent(uswSyncCode()));
+    if(j&&Array.isArray(j.list)){uswSave(j.list);uswCache=null;}
+  }catch(e){}
+  uswPulled=true;
+}
+function uswRemotePush(){
+  if(!CFG.worker||!uswSyncCode())return;
+  loadJSON(CFG.worker+"/usersync?k="+encodeURIComponent(uswSyncCode())+"&set="+encodeURIComponent(uswList().join(","))).catch(()=>{});
+}
 function usWatchHtml(){
-  return `<div class="crumb"><b>自選</b>（代號存於本機瀏覽器）</div>
-  <div style="display:flex;gap:6px;margin:4px 0 8px">
+  const syncOn=!!uswSyncCode();
+  const syncUi=syncOn
+    ?`<span class="note mut" style="margin:0">☁ 同步中（碼 ${uswSyncCode().slice(0,2)}***）</span><button class="btn" id="uswSyncOff">停用同步</button>`
+    :`<input id="uswSyncIn" placeholder="同步碼(自訂,≥4字)" style="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:5px 10px;font-size:13px;width:140px" maxlength="64">
+      <button class="btn" id="uswSyncEn">☁ 啟用同步</button>`;
+  return `<div class="crumb"><b>自選</b>（${syncOn?"跨裝置同步":"僅存本機"}）</div>
+  <div style="display:flex;gap:6px;margin:4px 0 8px;flex-wrap:wrap;align-items:center">
     <input id="uswIn" placeholder="美股代號，如 PLTR" style="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:5px 10px;font-size:13px;width:150px" maxlength="8">
     <button class="btn" id="uswAdd">＋加入</button>
+    <span style="flex:1"></span>${syncUi}
   </div>
-  <div id="uswBox">${uswList().length?'<div class="loading">載入自選…</div>':'<div class="note mut">尚無自選。輸入美股代號加入（上限 12 檔）。</div>'}</div>`;
+  <div id="uswBox">${uswList().length||uswSyncCode()?'<div class="loading">載入自選…</div>':'<div class="note mut">尚無自選。輸入美股代號加入（上限 12 檔）；設同步碼可跨裝置共用清單。</div>'}</div>`;
 }
 function bindUsWatch(){
   const btn=document.getElementById("uswAdd"), inp=document.getElementById("uswIn");
@@ -364,14 +383,29 @@ function bindUsWatch(){
     const l=uswList();
     if(l.includes(v))return;
     if(l.length>=12){alert("自選上限 12 檔");return;}
-    l.push(v);uswSave(l);uswCache=null;inp.value="";
+    l.push(v);uswSave(l);uswRemotePush();uswCache=null;inp.value="";
     if(state.tab==="us")render();};
   btn.onclick=add;
   inp.onkeydown=e=>{if(e.key==="Enter")add();};
+  const en=document.getElementById("uswSyncEn");
+  if(en)en.onclick=async()=>{
+    const v=(document.getElementById("uswSyncIn").value||"").trim();
+    if(v.length<4){alert("同步碼至少 4 個字");return;}
+    if(!CFG.worker){alert("同步需要 Worker");return;}
+    localStorage.setItem("tflive2_usw_sync",v);
+    try{const j=await loadJSON(CFG.worker+"/usersync?k="+encodeURIComponent(v));
+      if(j&&Array.isArray(j.list)&&j.list.length)uswSave(j.list);   // 遠端已有 → 用遠端
+      else uswRemotePush();                                          // 遠端空 → 推本機
+    }catch(e){alert("同步啟用失敗："+(e.message||e));}
+    uswPulled=true;uswCache=null;render();};
+  const off=document.getElementById("uswSyncOff");
+  if(off)off.onclick=()=>{localStorage.removeItem("tflive2_usw_sync");uswPulled=false;render();};
 }
 async function loadUsWatch(){
+  await uswRemotePull();   // 有同步碼 → 每次瀏覽首次先拉遠端（遠端為準）
   const box=document.getElementById("uswBox"), l=uswList();
-  if(!box||!l.length)return;
+  if(!box)return;
+  if(!l.length){box.innerHTML='<div class="note mut">尚無自選。輸入美股代號加入（上限 12 檔）。</div>';return;}
   if(!CFG.worker){box.innerHTML='<div class="note mut">自選需要 Worker（CFG.worker 未設定）。</div>';return;}
   const key=l.join(",");
   if(!uswCache||uswCache.key!==key){
@@ -391,7 +425,7 @@ async function loadUsWatch(){
   document.querySelectorAll("#uswBox .scrollbox").forEach(b=>b.style.maxHeight="none");
 }
 document.addEventListener("click",e=>{const d=e.target.closest("[data-uswdel]");if(!d)return;
-  uswSave(uswList().filter(x=>x!==d.dataset.uswdel));uswCache=null;
+  uswSave(uswList().filter(x=>x!==d.dataset.uswdel));uswRemotePush();uswCache=null;
   if(state.tab==="us")render();});
 
 function render(){
