@@ -76,15 +76,24 @@ def usdtwd() -> float | None:
     return None
 
 
-def _seg_word(r: float) -> str:
-    if r >= 0.5:
+def _seg_word(r: float, amp: float) -> str:
+    """段漲跌以「當日高低點振幅」為分母分級（相對強度，避免大振幅日把小反彈說成強拉）。
+    x=段漲跌/振幅：|x|≥50% 強拉/急殺、25~50% 走高/走低、10~25% 小漲/小跌、<10% 震盪持平。"""
+    if not amp or amp <= 0:
+        return "震盪持平"
+    x = r / amp
+    if x >= 0.5:
         return "強拉"
-    if r >= 0.15:
+    if x >= 0.25:
         return "走高"
-    if r <= -0.5:
+    if x >= 0.10:
+        return "小漲"
+    if x <= -0.5:
         return "急殺"
-    if r <= -0.15:
+    if x <= -0.25:
         return "走低"
+    if x <= -0.10:
+        return "小跌"
     return "震盪持平"
 
 
@@ -103,7 +112,10 @@ def session_brief(us_date: str) -> str:
         e = min(60, n // 3)                 # 早盤=首60分
         ls = max(n - 60, (2 * n) // 3)      # 尾盤=末60分
         c1, c2, c3 = fv(rows[e - 1]["close"]), fv(rows[ls - 1]["close"]), fv(rows[n - 1]["close"])
-        return ((c1 / o - 1) * 100, (c2 / c1 - 1) * 100, (c3 / c2 - 1) * 100)
+        hi = max(fv(r.get("high")) or 0 for r in rows)
+        lo = min(fv(r.get("low")) or 1e18 for r in rows)
+        amp = (hi - lo) / o * 100 if (hi and lo < 1e18 and o) else 0   # 當日振幅%
+        return ((c1 / o - 1) * 100, (c2 / c1 - 1) * 100, (c3 / c2 - 1) * 100, amp)
 
     parts = []
     for tics, name in ((("^GSPC",), "S&P"), (("^IXIC",), "納指"), (("^SOX", "SOXX"), "費半")):
@@ -113,7 +125,8 @@ def session_brief(us_date: str) -> str:
             if g:
                 break
         if g:
-            parts.append(f"{name}早盤{_seg_word(g[0])}、午盤{_seg_word(g[1])}、尾盤{_seg_word(g[2])}")
+            r1, r2, r3, amp = g
+            parts.append(f"{name}早盤{_seg_word(r1, amp)}、午盤{_seg_word(r2, amp)}、尾盤{_seg_word(r3, amp)}")
     return ("盤中：" + "；".join(parts) + "。") if parts else ""
 
 
