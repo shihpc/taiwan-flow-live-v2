@@ -364,15 +364,17 @@ function uswRemotePush(){
 }
 function usWatchHtml(){
   const syncOn=!!uswSyncCode();
+  const inStyle="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:5px 8px;font-size:13px;flex:1;min-width:0;width:auto";
+  // 單列（含手機）：輸入框彈性縮放、按鈕字精簡、不換行
   const syncUi=syncOn
-    ?`<span class="note mut" style="margin:0">☁ 同步中（碼 ${uswSyncCode().slice(0,2)}***）</span><button class="btn" id="uswSyncOff">停用同步</button>`
-    :`<input id="uswSyncIn" placeholder="同步碼(自訂,≥4字)" style="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:5px 10px;font-size:13px;width:140px" maxlength="64">
-      <button class="btn" id="uswSyncEn">☁ 啟用同步</button>`;
+    ?`<span class="mut" style="font-size:11px;white-space:nowrap">☁${uswSyncCode().slice(0,2)}***</span><button class="btn" id="uswSyncOff">停用</button>`
+    :`<input id="uswSyncIn" placeholder="同步碼≥4字" style="${inStyle}" maxlength="64">
+      <button class="btn" id="uswSyncEn">☁同步</button>`;
   return `<div class="crumb"><b>自選</b>（${syncOn?"跨裝置同步":"僅存本機"}）</div>
-  <div style="display:flex;gap:6px;margin:4px 0 8px;flex-wrap:wrap;align-items:center">
-    <input id="uswIn" placeholder="美股代號，如 PLTR" style="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:5px 10px;font-size:13px;width:150px" maxlength="8">
-    <button class="btn" id="uswAdd">＋加入</button>
-    <span style="flex:1"></span>${syncUi}
+  <div style="display:flex;gap:4px;margin:4px 0 8px;align-items:center">
+    <input id="uswIn" placeholder="代號如PLTR" style="${inStyle}" maxlength="8">
+    <button class="btn" id="uswAdd">加入</button>
+    ${syncUi}
   </div>
   <div id="uswBox">${uswList().length||uswSyncCode()?'<div class="loading">載入自選…</div>':'<div class="note mut">尚無自選。輸入美股代號加入（上限 12 檔）；設同步碼可跨裝置共用清單。</div>'}</div>`;
 }
