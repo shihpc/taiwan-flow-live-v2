@@ -324,7 +324,9 @@ async function renderUS(){
   const u=state.us;
   const sess=u.session?u.session.replace(/^盤中：/,"").replace(/。$/,"").split("；"):[];
   let html=u.brief?`<div class="card" style="margin:0 0 8px;font-size:15px;line-height:1.55"><b>${u.brief}</b>`+
-    (sess.length?`<div class="mut" style="font-size:13px;margin-top:4px;line-height:1.6">${sess.map(x=>`<div>${x}</div>`).join("")}</div>`:"")+`</div>`:"";
+    (sess.length?`<div class="mut" style="font-size:13px;margin-top:4px;line-height:1.6">${sess.map(x=>`<div>${x}</div>`).join("")}`+
+      `<div style="font-size:10px;margin-top:3px;opacity:.75">段定義：早盤=開盤首60分/午盤=中段/尾盤=末60分；`+
+      `強拉≥+0.5%｜走高+0.15~0.5%｜持平±0.15%｜走低−0.15~−0.5%｜急殺≤−0.5%</div></div>`:"")+`</div>`:"";
   html+=`<div class="note">美股 <b>${u.date||"—"}</b> 收盤 · USD/TWD ${u.fx||"—"} · `+
     `量比＝當日量/前5日均量 · ADR溢價＝ADR折台股價 vs 台股收盤（正=美股買貴、開盤偏多）</div>`;
   try{const ageD=(Date.now()-Date.parse(u.date))/86400e3;
