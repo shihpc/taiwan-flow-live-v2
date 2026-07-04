@@ -322,7 +322,8 @@ async function renderUS(){
     if(state.tab!=="us")return;
   }
   const u=state.us;
-  let html=`<div class="note">美股 <b>${u.date||"—"}</b> 收盤 · USD/TWD ${u.fx||"—"} · `+
+  let html=u.brief?`<div class="card" style="margin:0 0 8px;font-size:15px;line-height:1.55"><b>${u.brief}</b></div>`:"";
+  html+=`<div class="note">美股 <b>${u.date||"—"}</b> 收盤 · USD/TWD ${u.fx||"—"} · `+
     `量比＝當日量/前5日均量 · ADR溢價＝ADR折台股價 vs 台股收盤（正=美股買貴、開盤偏多）</div>`;
   try{const ageD=(Date.now()-Date.parse(u.date))/86400e3;
     if(ageD>4)html+=`<div class="note"><span class="down">⚠ 美股資料已 ${Math.floor(ageD)} 天未更新</span></div>`;}catch(e){}
@@ -401,8 +402,15 @@ function bindUsWatch(){
   const off=document.getElementById("uswSyncOff");
   if(off)off.onclick=()=>{localStorage.removeItem("tflive2_usw_sync");uswPulled=false;render();};
 }
+const USW_DEFAULT=["SMCI","SNDK","SPCX","DRAM","COIN","USO"];  // 自選預設（原大型科技組移出）
 async function loadUsWatch(){
   await uswRemotePull();   // 有同步碼 → 每次瀏覽首次先拉遠端（遠端為準）
+  if(!localStorage.getItem("tflive2_usw_seed")){   // 一次性種入預設（之後刪掉不會回來）
+    const l0=uswList();let ch=false;
+    for(const t of USW_DEFAULT)if(!l0.includes(t)&&l0.length<12){l0.push(t);ch=true;}
+    if(ch){uswSave(l0);uswRemotePush();uswCache=null;}
+    localStorage.setItem("tflive2_usw_seed","1");
+  }
   const box=document.getElementById("uswBox"), l=uswList();
   if(!box)return;
   if(!l.length){box.innerHTML='<div class="note mut">尚無自選。輸入美股代號加入（上限 12 檔）。</div>';return;}
@@ -431,7 +439,9 @@ document.addEventListener("click",e=>{const d=e.target.closest("[data-uswdel]");
 function render(){
   for(const k in T)delete T[k];
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===state.tab));
-  if(state.tab==="us"){if(state.live)renderMarket();renderUS();return;}
+  // 美股 tab：隱藏加權/櫃買卡（其它 tab 照舊），主區改盤勢分析+速覽
+  document.getElementById("mkcard").style.display=(state.tab==="us")?"none":"";
+  if(state.tab==="us"){renderUS();return;}
   if(!state.live||!state.cl){document.getElementById("main").innerHTML='<div class="loading">載入中…</div>';return;}
   renderMarket();
   if(state.pool)return renderPool();

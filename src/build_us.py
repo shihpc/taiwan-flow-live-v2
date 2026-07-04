@@ -26,10 +26,9 @@ GROUPS = [
     ("AI／半導體", [("NVDA", "輝達"), ("AMD", "超微"), ("AVGO", "博通"), ("QCOM", "高通"),
                   ("INTC", "英特爾"), ("MU", "美光"), ("AMAT", "應用材料"), ("ASML", "艾司摩爾")]),
     ("大型科技", [("AAPL", "蘋果"), ("MSFT", "微軟"), ("TSLA", "特斯拉"), ("META", "Meta"),
-                ("GOOGL", "Google"), ("AMZN", "亞馬遜"), ("ORCL", "甲骨文"), ("SMCI", "美超微"),
-                ("SNDK", "SanDisk"), ("SPCX", "SpaceX"), ("DRAM", "DRAM"), ("COIN", "Coinbase"),
-                ("USO", "原油ETF")]),
+                ("GOOGL", "Google"), ("AMZN", "亞馬遜"), ("ORCL", "甲骨文")]),
 ]
+# 註：SMCI/SNDK/SPCX/DRAM/COIN/USO 移為前端「自選」預設（使用者可自行刪增）。
 
 
 def fv(v):
@@ -76,6 +75,51 @@ def usdtwd() -> float | None:
     return None
 
 
+def brief(groups) -> str:
+    """70 字內規則式盤勢分析：大盤定調→費半→台積ADR→開盤含義→極端個股（空間夠才放）。"""
+    g = {x["g"]: x["rows"] for x in groups}
+    idx = {r["s"]: r for r in g.get("指數", [])}
+    sp, nq, dj, sox = idx.get("^GSPC"), idx.get("^IXIC"), idx.get("^DJI"), idx.get("^SOX")
+    adr = {r["s"]: r for r in g.get("台股ADR", [])}
+    t = adr.get("TSM")
+    parts = []
+    chgs = [r["chg"] for r in (sp, nq, dj) if r]
+    if chgs:
+        up = sum(1 for c in chgs if c > 0.15)
+        dn = sum(1 for c in chgs if c < -0.15)
+        tone = "美股收漲" if up == len(chgs) else "美股收跌" if dn == len(chgs) else "美股漲跌互見"
+        if max(abs(c) for c in chgs) >= 2:
+            tone = tone.replace("收", "大")
+        parts.append(tone)
+    if sox:
+        s = f"費半{sox['chg']:+.1f}%"
+        if sox["chg"] <= -3:
+            s += "重挫"
+        elif sox["chg"] >= 3:
+            s += "大漲"
+        parts.append(s)
+    if t:
+        s = f"台積ADR{t['chg']:+.1f}%"
+        if t.get("prem") is not None:
+            s += f"(溢價{t['prem']:+.0f}%)"
+        parts.append(s)
+    if sox and t:
+        bias = sox["chg"] * 0.6 + t["chg"] * 0.4
+        parts.append("電子開盤偏空" if bias <= -1 else "電子開盤偏多" if bias >= 1 else "電子開盤中性")
+    stocks = g.get("AI／半導體", []) + g.get("大型科技", [])
+    if stocks:
+        w = max(stocks, key=lambda r: abs(r["chg"]))
+        if abs(w["chg"]) >= 5:
+            parts.append(f"{w['n']}{w['chg']:+.1f}%{'領跌' if w['chg'] < 0 else '領漲'}")
+    out = ""
+    for p in parts:  # 依優先序湊滿 70 字
+        cand = (out + "，" + p) if out else p
+        if len(cand) + 1 > 70:
+            break
+        out = cand
+    return out + "。"
+
+
 def main():
     fx = usdtwd()
     us_date = None
@@ -104,7 +148,7 @@ def main():
     from datetime import datetime, timezone
     out = {"date": us_date, "fx": round(fx, 3) if fx else None,
            "generated_at": datetime.now(timezone.utc).isoformat(),
-           "groups": groups}
+           "brief": brief(groups), "groups": groups}
     OUT.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     n = sum(len(g["rows"]) for g in groups)
     print(f"us.json: 美股日期 {us_date}, {n} 檔, USDTWD={out['fx']}")
