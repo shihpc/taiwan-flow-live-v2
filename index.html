@@ -337,10 +337,62 @@ async function renderUS(){
     if(isAdr)cols.push({h:"ADR溢價",w:68,f:r=>r.prem==null?'<span class="mut">—</span>':sgn(r.prem,(r.prem>0?"+":"")+r.prem.toFixed(2)+"%")});
     html+=tbl(cols,g.rows||[]);
   }
-  html+=`<div class="note mut">FinMind USStockPrice 日線 · 每交易日 07:30 自動更新 · 🔄可重抓</div>`;
+  html+=usWatchHtml();
+  html+=`<div class="note mut">FinMind USStockPrice 日線 · 每交易日 06:00 自動更新 · 🔄可重抓</div>`;
   main.innerHTML=html;
   document.querySelectorAll("#main .scrollbox").forEach(b=>b.style.maxHeight="none");
+  bindUsWatch();
+  loadUsWatch();
 }
+// ---- 美股自選（清單存 localStorage；報價走 Worker /uswatch，token 不落地前端）----
+const uswList=()=>{try{return JSON.parse(localStorage.getItem("tflive2_uswatch")||"[]");}catch(e){return [];}};
+const uswSave=l=>localStorage.setItem("tflive2_uswatch",JSON.stringify(l));
+let uswCache=null;   // {key, rows}
+function usWatchHtml(){
+  return `<div class="crumb"><b>自選</b>（代號存於本機瀏覽器）</div>
+  <div style="display:flex;gap:6px;margin:4px 0 8px">
+    <input id="uswIn" placeholder="美股代號，如 PLTR" style="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:5px 10px;font-size:13px;width:150px" maxlength="8">
+    <button class="btn" id="uswAdd">＋加入</button>
+  </div>
+  <div id="uswBox">${uswList().length?'<div class="loading">載入自選…</div>':'<div class="note mut">尚無自選。輸入美股代號加入（上限 12 檔）。</div>'}</div>`;
+}
+function bindUsWatch(){
+  const btn=document.getElementById("uswAdd"), inp=document.getElementById("uswIn");
+  if(!btn)return;
+  const add=()=>{const v=(inp.value||"").trim().toUpperCase();
+    if(!/^[A-Z0-9^.\-]{1,8}$/.test(v)){alert("代號格式不對");return;}
+    const l=uswList();
+    if(l.includes(v))return;
+    if(l.length>=12){alert("自選上限 12 檔");return;}
+    l.push(v);uswSave(l);uswCache=null;inp.value="";
+    if(state.tab==="us")render();};
+  btn.onclick=add;
+  inp.onkeydown=e=>{if(e.key==="Enter")add();};
+}
+async function loadUsWatch(){
+  const box=document.getElementById("uswBox"), l=uswList();
+  if(!box||!l.length)return;
+  if(!CFG.worker){box.innerHTML='<div class="note mut">自選需要 Worker（CFG.worker 未設定）。</div>';return;}
+  const key=l.join(",");
+  if(!uswCache||uswCache.key!==key){
+    try{const j=await loadJSON(CFG.worker+"/uswatch?t="+encodeURIComponent(key));
+      uswCache={key,rows:j.rows||[]};}
+    catch(e){box.innerHTML='<div class="note mut">自選載入失敗：'+(e.message||e)+'</div>';return;}
+  }
+  if(state.tab!=="us")return;
+  const rows=uswCache.rows;
+  box.innerHTML=tbl([
+    {h:"自選",cls:"l",w:96,f:r=>r.err?`${r.s} <span class="mut">(${r.err})</span>`:`<b>${r.s}</b><span class="nm mut">${r.d||""}</span>`},
+    {h:"收盤",w:76,f:r=>r.c==null?'<span class="mut">—</span>':(r.c>=1000?r.c.toLocaleString("en-US",{maximumFractionDigits:0}):r.c.toLocaleString("en-US"))},
+    {h:"漲跌%",w:62,f:r=>r.chg==null?'<span class="mut">—</span>':sgn(r.chg,pct(r.chg))},
+    {h:"量比",w:54,f:r=>r.vr==null?'<span class="mut">—</span>':`<span class="${r.vr>=1.5?'up':r.vr<0.7?'mut':''}">${r.vr.toFixed(2)}×</span>`},
+    {h:"振幅",w:56,f:r=>r.amp==null?'<span class="mut">—</span>':r.amp.toFixed(2)+"%"},
+    {h:"",w:36,f:r=>`<span class="clk" data-uswdel="${r.s}">✕</span>`}],rows);
+  document.querySelectorAll("#uswBox .scrollbox").forEach(b=>b.style.maxHeight="none");
+}
+document.addEventListener("click",e=>{const d=e.target.closest("[data-uswdel]");if(!d)return;
+  uswSave(uswList().filter(x=>x!==d.dataset.uswdel));uswCache=null;
+  if(state.tab==="us")render();});
 
 function render(){
   for(const k in T)delete T[k];
@@ -409,7 +461,7 @@ async function pull(manual){
   const btn=document.getElementById("refresh");let old;
   if(manual){old=btn.textContent;btn.textContent="⏳…";btn.disabled=true;}
   try{
-    if(state.tab==="us"&&manual)state.us=null;   // 美股 tab 手動更新 → 重抓 us.json
+    if(state.tab==="us"&&manual){state.us=null;uswCache=null;}   // 美股 tab 手動更新 → 重抓 us.json+自選
     const j=await loadJSON(liveURL());
     if(j&&j.ts){state.live=j;render();}
     else if(state.tab==="us")render();

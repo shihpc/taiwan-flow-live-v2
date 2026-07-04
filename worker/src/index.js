@@ -307,6 +307,32 @@ function computeFlow(cl, items, baseline, frames) {
   return { flow, per: stockFlow };
 }
 
+// ---- 美股自選（/uswatch?t=PLTR,ARM）----
+// 前端自選清單存 localStorage，這裡代抓 USStockPrice 並算與 build_us.py 相同的指標。
+// 每檔 FinMind 回應以 cf cacheTtl 1800s 邊緣快取（日線資料，30 分綽綽有餘）。
+const USW_RE = /^[A-Z0-9^.\-]{1,8}$/;
+async function usWatch(env, list) {
+  const start = new Date(Date.now() - 25 * 86400e3).toISOString().slice(0, 10);
+  const out = await Promise.all(list.map(async (t) => {
+    try {
+      const u = `${FIN_BASE}?dataset=USStockPrice&data_id=${encodeURIComponent(t)}&start_date=${start}&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
+      const r = await fetch(u, { cf: { cacheTtl: 1800, cacheEverything: true } });
+      if (!r.ok) return { s: t, err: "HTTP " + r.status };
+      const d = ((await r.json()).data || []).filter((x) => num(x.Close));
+      if (d.length < 2) return { s: t, err: "查無資料" };
+      const cur = d[d.length - 1], prev = d[d.length - 2];
+      const vols = d.slice(-6, -1).map((x) => num(x.Volume));
+      const v5 = vols.length ? vols.reduce((a, b) => a + b, 0) / vols.length : 0;
+      const c = num(cur.Close), pc = num(prev.Close);
+      return { s: t, d: cur.date, c,
+        chg: Math.round((c / pc - 1) * 10000) / 100,
+        vr: v5 && num(cur.Volume) ? Math.round(num(cur.Volume) / v5 * 100) / 100 : null,
+        amp: (cur.High != null && cur.Low != null) ? Math.round((num(cur.High) - num(cur.Low)) / pc * 10000) / 100 : null };
+    } catch (e) { return { s: t, err: String(e && e.message || e) }; }
+  }));
+  return out;
+}
+
 // ---- HTTP ----
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, OPTIONS" };
 const json = (obj, extra) => new Response(JSON.stringify(obj), {
@@ -328,8 +354,14 @@ export default {
         return json({ error: String(e && e.message || e) });
       }
     }
+    if (url.pathname === "/uswatch") {  // 美股自選報價
+      const list = [...new Set((url.searchParams.get("t") || "").toUpperCase()
+        .split(",").map((s) => s.trim()).filter((s) => USW_RE.test(s)))].slice(0, 12);
+      if (!list.length) return json({ error: "t 參數需為逗號分隔代號（≤12 檔）" });
+      return json({ rows: await usWatch(env, list) }, { "Cache-Control": "public, max-age=300" });
+    }
     if (url.pathname !== "/live") {
-      return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap"] });
+      return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch"] });
     }
     // stale-while-revalidate：新鮮(≤LIVE_TTL秒)直接回；過期但未太舊(≤STALE秒)先回舊資料、
     // 背景重建下一份（使用者永遠毫秒級回應，不用同步等 FinMind）；太舊才同步重建。

@@ -26,7 +26,9 @@ GROUPS = [
     ("AI／半導體", [("NVDA", "輝達"), ("AMD", "超微"), ("AVGO", "博通"), ("QCOM", "高通"),
                   ("INTC", "英特爾"), ("MU", "美光"), ("AMAT", "應用材料"), ("ASML", "艾司摩爾")]),
     ("大型科技", [("AAPL", "蘋果"), ("MSFT", "微軟"), ("TSLA", "特斯拉"), ("META", "Meta"),
-                ("GOOGL", "Google"), ("AMZN", "亞馬遜")]),
+                ("GOOGL", "Google"), ("AMZN", "亞馬遜"), ("ORCL", "甲骨文"), ("SMCI", "美超微"),
+                ("SNDK", "SanDisk"), ("SPCX", "SpaceX"), ("DRAM", "DRAM"), ("COIN", "Coinbase"),
+                ("USO", "原油ETF")]),
 ]
 
 
