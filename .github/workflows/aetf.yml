@@ -24,6 +24,10 @@ jobs:
       - run: pip install requests
       - name: build aetf snapshot
         run: python src/build_aetf.py
+      - name: build active diff
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python src/build_aetf_diff.py
       - name: commit
         run: |
           git config user.name "github-actions[bot]"
