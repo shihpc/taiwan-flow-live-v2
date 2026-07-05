@@ -72,7 +72,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
     <div class="tab active" data-tab="exchange">產業別</div>
     <div class="tab" data-tab="chain">產業鏈</div>
     <div class="tab" data-tab="rank">成交佔比</div>
-    <div class="tab" data-tab="us">美股速覽</div>
+    <div class="tab" data-tab="us">晨報</div>
     <div class="tab" data-tab="flow">資金湧入</div>
     <div class="tab" data-tab="outflow">資金退出</div>
     <div class="tab" data-tab="aetf">主動ETF</div>
@@ -95,7 +95,7 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
                 : isLocal ? "/api/refresh"
                 : "data/live.json?t="+Date.now();
 
-const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, aetf:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null}}};
+const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null}}};
 
 // ---- formatters ----
 const yi=v=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1})+"億";
@@ -314,20 +314,65 @@ document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-fsub]")
   const v=decodeURIComponent(s.dataset.fsub);st.open=st.open===v?null:v;render();});
 
 // ---- 美股速覽 tab（開盤前看昨夜美股；data/us.json 每交易日 07:30 由 Action 產）----
+// 晨報區塊（data/morning.json，06:20 產；缺檔時各區優雅省略）
+function morningTopHtml(m){
+  if(!m||!m.gap)return "";
+  const g=m.gap, s=m.spot||{};
+  const dir=g.gap>50?"偏多":g.gap<-50?"偏空":"中性";
+  const cls=g.gap>50?"up":g.gap<-50?"down":"mut";
+  return `<div class="card" style="margin:0 0 8px;font-size:15px;line-height:1.55">`+
+    `<b>開盤參考：<span class="${cls}">${dir} ${g.gap>0?"+":""}${g.gap} 點</span></b>`+
+    `<div class="mut" style="font-size:12px;margin-top:3px">台指期夜盤 ${g.close.toLocaleString("en-US")}（${(g.chg_pct>0?"+":"")+g.chg_pct}%）vs 加權收盤 ${s.close?s.close.toLocaleString("en-US"):"—"}（${s.date||""}）</div></div>`;
+}
+function morningRestHtml(m){
+  if(!m)return "";
+  let h="";
+  const chip=(arr,cls)=>arr.map(x=>`<span class="${cls||''}" style="white-space:nowrap">${cleanSub(x)}</span>`).join("、");
+  // ⑥ 驗證訊號（優先——回測背書）
+  const sg=m.signals||{};
+  if((sg.cont_subs||[]).length||(sg.dual||[]).length||(sg.new_subs||[]).length){
+    h+=`<div class="card" style="margin:0 0 8px;font-size:13px;line-height:1.7">`;
+    if((sg.dual||[]).length)h+=`<div>⚡<b>雙確認</b>（昨湧＋ETF加碼）：${chip(sg.dual,"up")}</div>`;
+    if((sg.cont_subs||[]).length)h+=`<div><b class="up">連湧次產業</b>（回測：今日平均續強）：${chip(sg.cont_subs.slice(0,6),"up")}</div>`;
+    if((sg.new_subs||[]).length)h+=`<div class="mut">昨新湧入：${chip(sg.new_subs.slice(0,5))}</div>`;
+    h+=`</div>`;
+  }
+  // ④⑤ 備忘+籌碼
+  const r=m.recap||{}, c=m.chips||{}, inst=c.inst||null;
+  let lines=[];
+  if(r.baseline_date)lines.push(`昨日（${(r.baseline_date||"").slice(5)}）湧入 <span class="up">${r.y1_up||0}</span> 檔／退出 <span class="down">${r.y1_dn||0}</span> 檔`);
+  if(inst)lines.push(`法人（億）：外資 ${sgn(inst.foreign,(inst.foreign>0?"+":"")+inst.foreign)}｜投信 ${sgn(inst.trust,(inst.trust>0?"+":"")+inst.trust)}｜自營 ${sgn(inst.dealer,(inst.dealer>0?"+":"")+inst.dealer)}`);
+  if((c.it3||[]).length)lines.push(`投信3日連買：${c.it3.map(x=>x.n||x.c).slice(0,6).join("、")}`);
+  for(const l of (c.aetf||[]))lines.push(`主動ETF ${l}`);
+  if((m.exdiv||[]).length)lines.push(`今日除權息：${m.exdiv.slice(0,6).map(x=>`${x.n||x.c}${x.div?`(${x.div}元)`:""}`).join("、")}`);
+  if(lines.length)h+=`<div class="card" style="margin:0 0 8px;font-size:13px;line-height:1.7">${lines.map(x=>`<div>${x}</div>`).join("")}</div>`;
+  // ⑦ 新聞
+  if((m.news||[]).length){
+    h+=`<div class="crumb"><b>隔夜相關新聞</b>（訊號股/ETF同買/權值）</div><div class="card" style="margin:0 0 8px;font-size:13px;line-height:1.75">`;
+    for(const n of m.news){
+      h+=`<div><span class="mut" style="font-size:11px">[${n.why}·${n.n}]</span> <a href="${n.u}" target="_blank" rel="noopener" style="color:var(--fg)">${n.t}</a> <span class="mut" style="font-size:11px">${n.s} ${n.tm||""}</span></div>`;
+    }
+    h+=`</div>`;
+  }
+  return h;
+}
 async function renderUS(){
   const main=document.getElementById("main");
   if(!state.us){
-    main.innerHTML='<div class="loading">載入美股資料…</div>';
+    main.innerHTML='<div class="loading">載入晨報資料…</div>';
     try{state.us=await loadJSON("data/us.json?t="+Date.now());}
     catch(e){main.innerHTML='<div class="loading">無法載入 us.json：'+e+'</div>';return;}
+    try{state.morning=await loadJSON("data/morning.json?t="+Date.now());}catch(e){state.morning=null;}
     if(state.tab!=="us")return;
   }
   const u=state.us;
   const sess=u.session?u.session.replace(/^盤中：/,"").replace(/。$/,"").split("；"):[];
-  let html=u.brief?`<div class="card" style="margin:0 0 8px;font-size:15px;line-height:1.55"><b>${u.brief}</b>`+
+  let html=morningTopHtml(state.morning);
+  html+=u.brief?`<div class="card" style="margin:0 0 8px;font-size:15px;line-height:1.55"><b>${u.brief}</b>`+
     (sess.length?`<div class="mut" style="font-size:13px;margin-top:4px;line-height:1.6">${sess.map(x=>`<div>${x}</div>`).join("")}`+
       `<div style="font-size:10px;margin-top:3px;opacity:.75">段定義：早盤=開盤首60分/午盤=中段/尾盤=末60分；`+
       `以段漲跌÷當日振幅分級：≥50%強拉(急殺)｜25~50%走高(走低)｜10~25%小漲(小跌)｜&lt;10%震盪持平</div></div>`:"")+`</div>`:"";
+  html+=morningRestHtml(state.morning);
   html+=`<div class="note">美股 <b>${u.date||"—"}</b> 收盤 · USD/TWD ${u.fx||"—"} · `+
     `量比＝當日量/前5日均量 · ADR溢價＝ADR折台股價 vs 台股收盤（正=美股買貴、開盤偏多）</div>`;
   try{const ageD=(Date.now()-Date.parse(u.date))/86400e3;
@@ -613,7 +658,7 @@ async function pull(manual){
   const btn=document.getElementById("refresh");let old;
   if(manual){old=btn.textContent;btn.textContent="⏳…";btn.disabled=true;}
   try{
-    if(state.tab==="us"&&manual){state.us=null;uswCache=null;}   // 美股 tab 手動更新 → 重抓 us.json+自選
+    if(state.tab==="us"&&manual){state.us=null;state.morning=null;uswCache=null;}   // 晨報 tab 手動更新 → 重抓全部
     if(state.tab==="aetf"&&manual)state.aetf=null;               // 主動ETF tab 手動更新 → 重抓快照+diff
     const j=await loadJSON(liveURL());
     if(j&&j.ts){state.live=j;render();}
