@@ -75,6 +75,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
     <div class="tab" data-tab="us">美股速覽</div>
     <div class="tab" data-tab="flow">資金湧入</div>
     <div class="tab" data-tab="outflow">資金退出</div>
+    <div class="tab" data-tab="aetf">主動ETF</div>
   </div>
 </header>
 <div class="card" id="mkcard" style="margin:8px 10px"></div>
@@ -94,7 +95,7 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
                 : isLocal ? "/api/refresh"
                 : "data/live.json?t="+Date.now();
 
-const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}}};
+const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, aetf:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null}}};
 
 // ---- formatters ----
 const yi=v=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1})+"億";
@@ -447,12 +448,108 @@ document.addEventListener("click",e=>{const d=e.target.closest("[data-uswdel]");
   uswSave(uswList().filter(x=>x!==d.dataset.uswdel));uswRemotePush();uswCache=null;
   if(state.tab==="us")render();});
 
+// ---- 主動ETF tab（每日投組快照+主動加減碼；資料源 data/aetf/，夜間 Action 產）----
+const zh2=v=>v==null?'<span class="mut">—</span>':sgn(v,(v>0?"+":"")+Math.round(v).toLocaleString("en-US")+"張");
+const yi2=v=>v==null?'<span class="mut">—</span>':sgn(v,(v>0?"+":"")+(v/1e8).toFixed(2)+"億");
+const byChips=by=>Object.entries(by||{}).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1]))
+  .map(([k,v])=>`<span class="${v>0?'up':'down'}" style="white-space:nowrap">${k} ${(v>0?"+":"")+v.toLocaleString("en-US")}</span>`).join("　");
+function aetfAdvice(diff){
+  const L=[];
+  const st=diff.stocks||[], sb=diff.subs||[];
+  const co=st.filter(s=>Object.values(s.by||{}).filter(v=>v>0).length>=2).slice(0,3);
+  if(co.length)L.push(`<b class="up">多檔同買</b>：${co.map(s=>s.n||s.c).join("、")}`);
+  const cs=st.filter(s=>Object.values(s.by||{}).filter(v=>v<0).length>=2).slice(0,2);
+  if(cs.length)L.push(`<b class="down">多檔同賣</b>：${cs.map(s=>s.n||s.c).join("、")}`);
+  const inn=sb.filter(s=>s.val>0)[0], out=sb.filter(s=>s.val<0)[0];
+  if(inn)L.push(`次產業最大加碼：<span class="up">${cleanSub(inn.name)} +${(inn.val/1e8).toFixed(1)}億</span>`);
+  if(out)L.push(`最大減碼：<span class="down">${cleanSub(out.name)} ${(out.val/1e8).toFixed(1)}億</span>`);
+  for(const [k,v] of Object.entries(diff.etfs||{})){
+    if(v.est_flow&&Math.abs(v.est_flow)>=10e8)L.push(`${k} 淨${v.est_flow>0?"申購":"贖回"}約 ${(Math.abs(v.est_flow)/1e8).toFixed(0)}億`);
+  }
+  if(state.live&&state.live.flow){
+    const hot=new Set((state.live.flow.subs||[]).filter(s=>(s.c1||0)>=1.5&&(s.ret==null||s.ret>=0)).map(s=>s.name));
+    const x=sb.filter(s=>s.val>0&&hot.has(s.name)).slice(0,2);
+    if(x.length)L.push(`⚡<b>雙確認</b>（ETF加碼＋盤中湧入）：${x.map(s=>cleanSub(s.name)).join("、")}`);
+  }
+  return L;
+}
+async function renderAETF(){
+  const main=document.getElementById("main");
+  if(!state.aetf){
+    main.innerHTML='<div class="loading">載入主動ETF資料…</div>';
+    const o={latest:null,diff:null};
+    try{o.latest=await loadJSON("data/aetf/latest.json?t="+Date.now());}catch(e){}
+    try{o.diff=await loadJSON("data/aetf/diff.json?t="+Date.now());}catch(e){}
+    state.aetf=o;
+    if(state.tab!=="aetf")return;
+  }
+  const {latest,diff}=state.aetf;
+  if(!latest){main.innerHTML='<div class="loading">尚無主動ETF快照（每交易日 18:30 自動產生）。</div>';return;}
+  let html=`<div class="note">主動式ETF每日投組（投信 16:30 揭露，18:30 更新）。「主動加減碼」已排除申購贖回的等比效應`+
+    `（股數法/權重差法），呈現經理人真實動作。</div>`;
+  // 建議句
+  if(diff&&(diff.stocks||[]).length){
+    const adv=aetfAdvice(diff);
+    if(adv.length)html+=`<div class="card" style="margin:0 0 8px;font-size:14px;line-height:1.6">${adv.map(x=>`<div>${x}</div>`).join("")}</div>`;
+  }
+  // ① ETF 總覽
+  const ov=Object.entries(latest.etfs||{}).map(([code,e])=>{
+    const d=(diff&&diff.etfs&&diff.etfs[code])||{};
+    return {code,name:e.name,aum:e.twse_aum_yi,src:(e.src_date||"").slice(5),
+      flow:d.est_flow!=null?d.est_flow:null,nb:d.n_buy,ns:d.n_sell};});
+  ov.sort((a,b)=>(b.aum||0)-(a.aum||0));
+  html+=`<div class="crumb"><b>ETF 總覽</b>（規模=集保口徑）</div>`;
+  html+=tbl([
+    {h:"ETF",cls:"l",w:118,f:r=>`<b>${r.code}</b><span class="nm">${r.name||""}</span>`},
+    {h:"規模(億)",w:70,f:r=>r.aum==null?'<span class="mut">—</span>':r.aum.toLocaleString("en-US")},
+    {h:"申贖估",w:70,f:r=>yi2(r.flow)},
+    {h:"加碼檔",w:56,f:r=>r.nb==null?'<span class="mut">—</span>':`<span class="up">${r.nb}</span>`},
+    {h:"減碼檔",w:56,f:r=>r.ns==null?'<span class="mut">—</span>':`<span class="down">${r.ns}</span>`},
+    {h:"揭露日",w:56,f:r=>r.src||"—"}],ov);
+  if(!diff||!(diff.stocks||[]).length){
+    html+=`<div class="loading">主動加減碼需累積 2 個揭露日的快照，資料累積中（最快下一個交易日 18:30 後生效）。</div>`;
+    main.innerHTML=html;return;
+  }
+  // ② 進出個股（含各ETF張數明細）
+  const dates=(diff.generated_dates||[]).join("、");
+  html+=`<div class="crumb"><b>進出個股</b>（主動加減碼，${dates}）</div>`;
+  html+=tbl([
+    {h:"個股",cls:"l",w:110,f:r=>`${yahoo(r.c)}<span class="nm">${r.n||""}</span>`},
+    {h:"合計",w:78,f:r=>zh2(r.zh)},
+    {h:"金額",w:76,f:r=>yi2(r.val)},
+    {h:"各ETF明細(張)",cls:"l",w:210,f:r=>byChips(r.by)}],(diff.stocks||[]).slice(0,60));
+  // ③ 次產業流向（點開明細）
+  const open=state.sub.aetf.open;
+  html+=`<div class="crumb"><b>次產業流向</b>（點名稱展開明細）</div>`;
+  html+=tbl([
+    {h:"次產業",cls:"l",w:130,f:r=>`<span class="sl ${open===r.name?'sel':''}" data-asub="${encodeURIComponent(r.name)}">${cleanSub(r.name)}</span>`},
+    {h:"淨金額",w:82,f:r=>yi2(r.val)},
+    {h:"筆數",w:50,f:r=>(r.detail||[]).length}],(diff.subs||[]).slice(0,40));
+  if(open){
+    const so=(diff.subs||[]).find(s=>s.name===open);
+    if(so){
+      html+=`<div id="dd"><div class="crumb"><b>${cleanSub(open)}</b> 明細（ETF×個股，再點收合）</div>`;
+      html+=tbl([
+        {h:"ETF",cls:"l",w:70,f:r=>r.etf},
+        {h:"個股",cls:"l",w:104,f:r=>`${yahoo(r.c)}<span class="nm">${r.n||""}</span>`},
+        {h:"張數",w:78,f:r=>zh2(r.zh)},
+        {h:"金額",w:76,f:r=>yi2(r.val)}],so.detail||[]);
+      html+=`</div>`;
+    }
+  }
+  main.innerHTML=html;
+  if(open){const dd=document.getElementById("dd");if(dd)dd.scrollIntoView({behavior:"smooth",block:"start"});}
+}
+document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-asub]");if(!s)return;
+  const v=decodeURIComponent(s.dataset.asub);state.sub.aetf.open=state.sub.aetf.open===v?null:v;render();});
+
 function render(){
   for(const k in T)delete T[k];
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===state.tab));
   // 美股 tab：隱藏加權/櫃買卡（其它 tab 照舊），主區改盤勢分析+速覽
   document.getElementById("mkcard").style.display=(state.tab==="us")?"none":"";
   if(state.tab==="us"){renderUS();return;}
+  if(state.tab==="aetf"){if(state.live&&state.cl)renderMarket();renderAETF();return;}
   if(!state.live||!state.cl){document.getElementById("main").innerHTML='<div class="loading">載入中…</div>';return;}
   renderMarket();
   if(state.pool)return renderPool();
@@ -517,6 +614,7 @@ async function pull(manual){
   if(manual){old=btn.textContent;btn.textContent="⏳…";btn.disabled=true;}
   try{
     if(state.tab==="us"&&manual){state.us=null;uswCache=null;}   // 美股 tab 手動更新 → 重抓 us.json+自選
+    if(state.tab==="aetf"&&manual)state.aetf=null;               // 主動ETF tab 手動更新 → 重抓快照+diff
     const j=await loadJSON(liveURL());
     if(j&&j.ts){state.live=j;render();}
     else if(state.tab==="us")render();
