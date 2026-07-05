@@ -1,0 +1,34 @@
+name: aetf
+# 主動式ETF 每日投組快照：各投信 16:30 後揭露 → 18:30 台北抓（10:30 UTC 週一~五）。
+# 累積 data/aetf/YYYY-MM-DD.json（P3 以跨日 diff 算主動加減碼）。
+on:
+  schedule:
+    - cron: '30 10 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aetf
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: build aetf snapshot
+        run: python src/build_aetf.py
+      - name: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/aetf/
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "aetf $(date -u +%FT%TZ)"
+          for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break || sleep 4; done
