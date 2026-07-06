@@ -23,10 +23,20 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: build us.json
+      # FinMind 美股日線在收盤後逐檔滾動入庫（07-07 實測：06:46 全無、07:36 部分仍舊）。
+      # 日期未推進、或 >1/3 檔仍是舊日期 → 等 10 分鐘重跑，最多 6 次；美國休市日會重試耗盡後照常輸出。
+      - name: build us.json（等 FinMind 入庫）
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python src/build_us.py
+        run: |
+          prev=$(python -c "import json;print(json.load(open('data/us.json')).get('date') or '')" 2>/dev/null || echo '')
+          for i in 1 2 3 4 5 6; do
+            python src/build_us.py
+            new=$(python -c "import json;print(json.load(open('data/us.json')).get('date') or '')")
+            fresh=$(python -c "import json;d=json.load(open('data/us.json'));rows=[r for g in d['groups'] for r in g['rows']];stale=sum(1 for r in rows if r.get('d') and r['d']<(d.get('date') or ''));print('yes' if rows and stale*3<=len(rows) else 'no')")
+            if [ "$new" != "$prev" ] && [ "$fresh" = "yes" ]; then echo "資料已齊：$prev → $new"; break; fi
+            if [ $i -lt 6 ]; then echo "US 資料未齊（date=$new fresh=$fresh），10 分鐘後重試 $i/6"; sleep 600; fi
+          done
       - name: commit
         run: |
           git config user.name "github-actions[bot]"
