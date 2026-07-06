@@ -1,9 +1,9 @@
 name: morning
-# 台股晨報：美股(us.yml 06:00)之後、開盤前 06:20 台北 產 data/morning.json。
-# 22:20 UTC 週日~四 = 06:20 台北 週一~五。
+# 台股晨報：美股(us.yml 05:40)之後、開盤前 06:00 台北 產 data/morning.json。
+# 22:00 UTC 週日~四 = 06:00 台北 週一~五（cron 常延遲 ~70 分鐘，實際約 07:10）。
 on:
   schedule:
-    - cron: '20 22 * * 0-4'
+    - cron: '0 22 * * 0-4'
   workflow_dispatch:
 
 permissions:
