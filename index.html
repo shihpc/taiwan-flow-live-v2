@@ -313,8 +313,20 @@ document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-fsub]")
   const st=state.sub[state.tab];if(!st)return;
   const v=decodeURIComponent(s.dataset.fsub);st.open=st.open===v?null:v;render();});
 
-// ---- 美股速覽 tab（開盤前看昨夜美股；data/us.json 每交易日 07:30 由 Action 產）----
-// 晨報區塊（data/morning.json，06:20 產；缺檔時各區優雅省略）
+// ---- 資料時間呈現：agoTxt=相對/絕對時間、metaLine=區塊層級的小字更新列 ----
+function agoTxt(iso){
+  const t=Date.parse(iso);if(!t)return "";
+  const d=new Date(t),now=new Date(),mins=(now-t)/6e4;
+  const hm=("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2);
+  if(mins<60)return Math.max(1,Math.round(mins))+"分前";
+  if(d.toDateString()===now.toDateString())return "今天 "+hm;
+  return (d.getMonth()+1)+"-"+d.getDate()+" "+hm;
+}
+function metaLine(txt,warn){return `<div class="note mut" style="font-size:11px">${txt}${warn?` <span class="down">${warn}</span>`:""}</div>`;}
+const isWeekday=()=>[1,2,3,4,5].includes(new Date().getDay());
+
+// ---- 美股速覽 tab（開盤前看昨夜美股；data/us.json 每交易日 05:40 由 Action 產）----
+// 晨報區塊（data/morning.json，06:00 產；缺檔時各區優雅省略）
 function morningTopHtml(m){
   if(!m||!m.gap)return "";
   const g=m.gap, s=m.spot||{};
@@ -373,10 +385,18 @@ async function renderUS(){
       `<div style="font-size:10px;margin-top:3px;opacity:.75">段定義：早盤=開盤首60分/午盤=中段/尾盤=末60分；`+
       `以段漲跌÷當日振幅分級：≥50%強拉(急殺)｜25~50%走高(走低)｜10~25%小漲(小跌)｜&lt;10%震盪持平</div></div>`:"")+`</div>`:"";
   html+=morningRestHtml(state.morning);
-  html+=`<div class="note">美股 <b>${u.date||"—"}</b> 收盤 · USD/TWD ${u.fx||"—"} · `+
+  if(state.morning&&state.morning.generated_at){
+    const m=state.morning;let w="";
+    try{const ageH=(Date.now()-Date.parse(m.generated_at))/36e5;
+      if(ageH>26&&isWeekday())w=`⚠ 晨報已 ${Math.round(ageH)} 小時未更新`;}catch(e){}
+    html+=metaLine(`晨報資料日 ${m.date||"—"} · 產生於 ${agoTxt(m.generated_at)}`,w);
+  }
+  html+=`<div class="note">美股 <b>${u.date||"—"}</b> 收盤${u.generated_at?` · ${agoTxt(u.generated_at)}更新`:""} · USD/TWD ${u.fx||"—"} · `+
     `量比＝當日量/前5日均量 · ADR溢價＝ADR折台股價 vs 台股收盤（正=美股買貴、開盤偏多）</div>`;
-  try{const ageD=(Date.now()-Date.parse(u.date))/86400e3;
-    if(ageD>4)html+=`<div class="note"><span class="down">⚠ 美股資料已 ${Math.floor(ageD)} 天未更新</span></div>`;}catch(e){}
+  try{const gen=Date.parse(u.generated_at)||Date.now();
+    if((gen-Date.parse(u.date))/864e5>4)html+=`<div class="note"><span class="down">⚠ 美股資料源延遲：行情日仍為 ${u.date}（管線 ${agoTxt(u.generated_at)}有跑）</span></div>`;
+    if((Date.now()-gen)/36e5>26&&isWeekday())html+=`<div class="note"><span class="down">⚠ 美股速覽已 ${Math.round((Date.now()-gen)/36e5)} 小時未重抓</span></div>`;
+  }catch(e){}
   for(const g of (u.groups||[])){
     const isAdr=(g.g||"").includes("ADR");
     const cols=[
@@ -389,7 +409,7 @@ async function renderUS(){
     html+=tbl(cols,g.rows||[]);
   }
   html+=usWatchHtml();
-  html+=`<div class="note mut">FinMind USStockPrice 日線 · 每交易日 06:00 自動更新 · 🔄可重抓</div>`;
+  html+=`<div class="note mut">FinMind USStockPrice 日線 · 每交易日 05:40 排程（入庫慢時自動等候重試）· 🔄可重抓</div>`;
   main.innerHTML=html;
   document.querySelectorAll("#main .scrollbox").forEach(b=>b.style.maxHeight="none");
   bindUsWatch();
@@ -532,6 +552,9 @@ async function renderAETF(){
   if(!latest){main.innerHTML='<div class="loading">尚無主動ETF快照（每交易日 18:30 自動產生）。</div>';return;}
   let html=`<div class="note">主動式ETF每日投組（投信 16:30 揭露，18:30 更新）。「主動加減碼」已排除申購贖回的等比效應`+
     `（股數法/權重差法），呈現經理人真實動作。</div>`;
+  {const n=new Date(),loc=`${n.getFullYear()}-${("0"+(n.getMonth()+1)).slice(-2)}-${("0"+n.getDate()).slice(-2)}`;
+   let w="";if(isWeekday()&&n.getHours()>=20&&latest.run_date&&latest.run_date!==loc)w="⚠ 今日快照尚未產生";
+   html+=metaLine(`快照 ${latest.run_date||"—"} · 抓取於 ${agoTxt(latest.generated_at)}`,w);}
   // 建議句
   if(diff&&(diff.stocks||[]).length){
     const adv=aetfAdvice(diff);
@@ -540,7 +563,9 @@ async function renderAETF(){
   // ① ETF 總覽
   const ov=Object.entries(latest.etfs||{}).map(([code,e])=>{
     const d=(diff&&diff.etfs&&diff.etfs[code])||{};
+    const dd=x=>(x||"").slice(5).replace("/","-");
     return {code,name:e.name,aum:e.twse_aum_yi,src:(e.src_date||"").slice(5),
+      d0:dd(d.d0),d1:dd(d.d1),
       flow:d.est_flow!=null?d.est_flow:null,nb:d.n_buy,ns:d.n_sell};});
   ov.sort((a,b)=>(b.aum||0)-(a.aum||0));
   html+=`<div class="crumb"><b>ETF 總覽</b>（規模=集保口徑）</div>`;
@@ -550,7 +575,7 @@ async function renderAETF(){
     {h:"申贖估",w:70,f:r=>yi2(r.flow)},
     {h:"加碼檔",w:56,f:r=>r.nb==null?'<span class="mut">—</span>':`<span class="up">${r.nb}</span>`},
     {h:"減碼檔",w:56,f:r=>r.ns==null?'<span class="mut">—</span>':`<span class="down">${r.ns}</span>`},
-    {h:"揭露日",w:56,f:r=>r.src||"—"}],ov);
+    {h:"資料日",w:96,f:r=>r.d0?`${r.d0}→${r.d1}`:(r.src||"—")}],ov);
   if(!diff||!(diff.stocks||[]).length){
     html+=`<div class="loading">主動加減碼需累積 2 個揭露日的快照，資料累積中（最快下一個交易日 18:30 後生效）。</div>`;
     main.innerHTML=html;return;
