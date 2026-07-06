@@ -7,6 +7,7 @@
 #   chips   ⑤籌碼速覽：三大法人整體買賣超、投信3日連買 top、主動ETF摘要(讀 aetf/diff.json)
 #   signals ⑥驗證訊號：連湧次產業(y1&y2, 回測:今日平均續強)、昨湧單日、雙確認候選(∩AETF加碼)
 #   news    ⑦相關新聞：訊號股+AETF同買股+權值前5 的隔夜新聞（去重/排論壇/每股≤2/共≤10）
+#           視窗=上一個有效交易日(TAIEX最近收盤日)14:00 → 現在；週一/連假後自動涵蓋整段空窗
 #
 # 用法：FINMIND_TOKEN=... python src/build_morning.py
 
@@ -97,15 +98,27 @@ def inst_total():
             "dealer": round((m.get("Dealer_self") or 0) + (m.get("Dealer_Hedging") or 0), 1)}
 
 
-def overnight_news(targets: list, cl: dict):
-    """targets=[(code, 理由)]；抓前一日 14:00 後的新聞，去重/排論壇/每股≤2/共≤10。"""
+def overnight_news(targets: list, cl: dict, since_dt: datetime):
+    """targets=[(code, 理由)]；抓 since_dt（上一交易日收盤後）→ 現在的新聞，
+    去重/排論壇/每股≤2/共≤10。
+    TaiwanStockNews 一次 request 只回單日，故逐日迴圈抓再合併；
+    週一視窗涵蓋五六日一、連假比照延伸（上限8天防呆）。"""
     seen_t, seen_u, out = set(), set(), []
-    since = (date.today() - timedelta(days=1)).isoformat()
+    days, d = [], since_dt.date()
+    while d <= date.today() and len(days) < 8:
+        days.append(d.isoformat())
+        d += timedelta(days=1)
+    cutoff = since_dt.strftime("%Y-%m-%d %H:%M:%S")
     for c, why in targets:
-        try:
-            rows = fin.api_get("TaiwanStockNews", data_id=c, start_date=since)
-        except Exception:
-            continue
+        rows = []
+        for ds in days:
+            try:
+                rows += fin.api_get("TaiwanStockNews", data_id=c,
+                                    start_date=ds, end_date=ds)
+            except Exception:
+                continue
+        rows = [r for r in rows
+                if str(r.get("date", "")).replace("T", " ") >= cutoff]
         rows.sort(key=lambda r: r.get("date", ""), reverse=True)
         n = 0
         for r in rows:
@@ -187,7 +200,11 @@ def main():
     for c in sorted(a5map, key=lambda c: -a5map[c])[:5]:
         if c not in used:
             tg.append((c, "權值")); used.add(c)
-    news = overnight_news(tg[:12], cl)
+    # 視窗起點：上一個有效交易日 14:00（收盤後）。TAIEX 最近收盤日即上一交易日，
+    # 週末/連假自動跳過非交易日；TAIEX 取不到時退回 3 天前保底。
+    prev_trade = t2[-1]["date"] if t2 else (date.today() - timedelta(days=3)).isoformat()
+    since_dt = datetime.strptime(str(prev_trade)[:10], "%Y-%m-%d").replace(hour=14)
+    news = overnight_news(tg[:12], cl, since_dt)
 
     out = {"date": date.today().isoformat(),
            "generated_at": datetime.now(TPE).isoformat(),
