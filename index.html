@@ -400,7 +400,8 @@ async function renderUS(){
   for(const g of (u.groups||[])){
     const isAdr=(g.g||"").includes("ADR");
     const cols=[
-      {h:g.g,cls:"l",w:112,f:r=>`${r.n}<span class="nm mut">${r.s.replace("^","")}</span>`},
+      {h:g.g,cls:"l",w:112,f:r=>`${r.n}<span class="nm mut">${r.s.replace("^","")}</span>`+
+        (r.d&&u.date&&r.d<u.date?` <span class="down" style="font-size:10px">(${r.d.slice(5)}舊)</span>`:"")},
       {h:"收盤",w:76,f:r=>r.c>=1000?r.c.toLocaleString("en-US",{maximumFractionDigits:0}):r.c.toLocaleString("en-US")},
       {h:"漲跌%",w:62,f:r=>sgn(r.chg,pct(r.chg))},
       {h:"量比",w:54,f:r=>r.vr==null?'<span class="mut">—</span>':`<span class="${r.vr>=1.5?'up':r.vr<0.7?'mut':''}">${r.vr.toFixed(2)}×</span>`},
