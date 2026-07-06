@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write   # 提交後 dispatch pages 部署
 
 concurrency:
   group: morning
@@ -34,3 +35,7 @@ jobs:
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git commit -m "morning $(date -u +%FT%TZ)"
           for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break || sleep 4; done
+          # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch 才會部署到網站
+          gh workflow run pages.yml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -29,7 +29,16 @@ jobs:
         with:
           path: .
           name: pages-${{ github.run_id }}   # 每 run 唯一名，杜絕同名 artifact 衝突
+      # Pages 後端偶發 "Deployment failed, try again later"（07-05/07-06 多次），失敗等 30 秒重試一次
       - id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+        with:
+          artifact_name: pages-${{ github.run_id }}
+      - if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+      - id: deployment-retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
         with:
           artifact_name: pages-${{ github.run_id }}
