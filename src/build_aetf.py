@@ -17,6 +17,7 @@ import html as html_
 import json
 import re
 import sys
+import time
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
@@ -171,17 +172,36 @@ def main():
     OUTDIR.mkdir(parents=True, exist_ok=True)
     out = {"run_date": date.today().isoformat(),
            "generated_at": datetime.now(TPE).isoformat(), "etfs": {}, "errors": {}}
+    # 前一份快照（供某檔全數重試仍失敗時沿用上次持股，避免 diff 因該檔缺席而錯亂/單邊）
+    prev = {}
+    try:
+        prev = (json.loads((OUTDIR / "latest.json").read_text(encoding="utf-8"))).get("etfs", {})
+    except Exception:
+        prev = {}
     for code, name, fn in ETFS:
-        try:
-            d = fn()
-            d["name"] = name
-            d["twse_aum_yi"] = grab_twse_aum(code)
-            out["etfs"][code] = d
-            print(f"{code} {name}: {len(d['stocks'])}檔 src={d.get('src_date')} "
-                  f"units={d.get('units')} aum={d.get('aum')} twse_aum={d.get('twse_aum_yi')}億", flush=True)
-        except Exception as e:
-            out["errors"][code] = str(e)
-            print(f"{code} {name}: 失敗 {e}", flush=True)
+        # PCF 端點偶發暫時性失敗（07-07 復華 RemoteDisconnected）→ 重試 3 次、退避 5/10 秒
+        last = None
+        for attempt in range(3):
+            try:
+                d = fn()
+                d["name"] = name
+                d["twse_aum_yi"] = grab_twse_aum(code)
+                out["etfs"][code] = d
+                print(f"{code} {name}: {len(d['stocks'])}檔 src={d.get('src_date')} "
+                      f"units={d.get('units')} aum={d.get('aum')} twse_aum={d.get('twse_aum_yi')}億", flush=True)
+                last = None
+                break
+            except Exception as e:
+                last = e
+                print(f"{code} {name}: 第{attempt + 1}次失敗 {e}", flush=True)
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+        if last is not None:
+            out["errors"][code] = str(last)
+            if code in prev:  # 沿用上次快照，並標記 stale 供前端/診斷辨識
+                carried = dict(prev[code]); carried["stale"] = True
+                out["etfs"][code] = carried
+                print(f"{code} {name}: 全數重試失敗，沿用上次快照（src={carried.get('src_date')}）", flush=True)
     if not out["etfs"]:
         raise RuntimeError("全部失敗，不寫檔")
     body = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
