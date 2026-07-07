@@ -1,11 +1,14 @@
 # src/build_aetf_diff.py — 主動式ETF「主動加減碼」跨日比對 → data/aetf/diff.json
 #
 # 方法論（見 memory aetf-tab-plan）：
-#   股數法（有 units：群益/野村/復華）：預期股數 = 前日股數 × (今單位數/前單位數)，
-#     主動Δ = 實際 − 預期 → 申贖造成的等比縮放被排除。新進場=全額買、清倉=賣出預期股數。
-#   權重差法（統一，無 units）：主動Δ金額 ≈ Δ權重% × AUM(TWSE億)，Δ股數 = 金額/收盤價。
-#     申贖不改變權重 → 天然免疫等比效應。
-#   噪音門檻：|Δ股| < max(1000股, 前日股數0.5%) 或 |Δ權重| < 0.03pp → 視為 0。
+#   股數法（統一四家一致）：預期股數 = 前日股數 × 申贖比 ratio，主動Δ = 實際 − 預期。
+#     申贖造成的等比縮放被排除，新進場=全額買、清倉=賣出預期股數。
+#   ratio 來源：
+#     有 units（群益/野村/復華）：ratio = 今單位數 / 前單位數。
+#     無 units（統一 00981A/00403A）：ratio = 各持股「今股數/前股數」的中位數。
+#       多數持股未主動交易 → 其股數僅隨申贖等比縮放，中位數即申贖比；主動交易為偏離中位數者。
+#       （原權重差法會把純股價漲跌的權重變化誤判為主動加減碼——07-07 實測 17~19 訊號僅 4~5 筆為真。）
+#   噪音門檻：|Δ股| < max(1000股, 前日股數0.5%) → 視為 0。
 # 產出 diff.json：
 #   etfs[code]  = {name, d0, d1, aum, units, est_flow(申贖估算金額), n_buy, n_sell}
 #   stocks[]    = [{c, n(名), zh(合計張), val(合計金額), by:{etf:張}}]  ← 進出個股表（含各ETF張數明細）
@@ -16,6 +19,7 @@
 
 from __future__ import annotations
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -24,8 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 ROOT = Path(__file__).resolve().parent.parent
 ADIR = ROOT / "data" / "aetf"
 NOISE_SH = 1000          # 股
-NOISE_W = 0.03           # 權重 pp
-WEIGHT_ETFS = {"00981A", "00403A"}   # 無 units → 權重差法
+NO_UNITS_ETFS = {"00981A", "00403A"}   # 統一無 units → 申贖比由持股股數比中位數推估
 
 
 def load_snapshots() -> dict:
@@ -56,36 +59,36 @@ def close_map(date_slash: str) -> dict:
         return {}
 
 
+def _units_ratio(code: str, cur: dict, prv: dict) -> float:
+    """申贖比 = 今單位數/前單位數；統一無 units 時以各持股股數比的中位數估之。"""
+    u1, u0 = cur.get("units"), prv.get("units")
+    if u1 and u0:
+        return u1 / u0
+    if code in NO_UNITS_ETFS:
+        s1, s0 = cur["stocks"], prv["stocks"]
+        # 只取兩日都在、且前日股數夠大（排除 1000 股佔位/雜訊）的持股算比值中位數
+        ratios = [(s1[c][0] / s0[c][0]) for c in (set(s1) & set(s0))
+                  if s0.get(c) and s0[c][0] >= 10000 and s1.get(c) and s1[c][0] > 0]
+        if ratios:
+            return statistics.median(ratios)
+    return 1.0
+
+
 def diff_one(code: str, cur: dict, prv: dict, closes: dict) -> tuple[list, dict]:
     """回 (rows[{c,n,dsh,val}], summary)。dsh=主動Δ股數(可為估算)。"""
     s1, s0 = cur["stocks"], prv["stocks"]
     rows = []
-    if code in WEIGHT_ETFS:
-        aum = (cur.get("twse_aum_yi") or 0) * 1e8
-        for c in set(s1) | set(s0):
-            w1 = (s1.get(c) or [0, "", None])[2] or 0
-            w0 = (s0.get(c) or [0, "", None])[2] or 0
-            dw = w1 - w0
-            if abs(dw) < NOISE_W or not aum:
-                continue
-            val = dw / 100 * aum
-            px = closes.get(c)
-            dsh = val / px if px else None
-            name = (s1.get(c) or s0.get(c))[1]
-            rows.append({"c": c, "n": name, "dsh": dsh, "val": val})
-    else:
-        u1, u0 = cur.get("units"), prv.get("units")
-        ratio = (u1 / u0) if (u1 and u0) else 1.0
-        for c in set(s1) | set(s0):
-            sh1 = (s1.get(c) or [0])[0]
-            sh0 = (s0.get(c) or [0])[0]
-            expected = sh0 * ratio
-            d = sh1 - expected
-            if abs(d) < max(NOISE_SH, sh0 * 0.005):
-                continue
-            px = closes.get(c)
-            name = (s1.get(c) or s0.get(c))[1]
-            rows.append({"c": c, "n": name, "dsh": d, "val": (d * px) if px else None})
+    ratio = _units_ratio(code, cur, prv)
+    for c in set(s1) | set(s0):
+        sh1 = (s1.get(c) or [0])[0]
+        sh0 = (s0.get(c) or [0])[0]
+        expected = sh0 * ratio
+        d = sh1 - expected
+        if abs(d) < max(NOISE_SH, sh0 * 0.005):
+            continue
+        px = closes.get(c)
+        name = (s1.get(c) or s0.get(c))[1]
+        rows.append({"c": c, "n": name, "dsh": d, "val": (d * px) if px else None})
     # 申贖金額估算（有 units 且有淨值）
     est_flow = None
     u1, u0, aum1 = cur.get("units"), prv.get("units"), cur.get("aum")
