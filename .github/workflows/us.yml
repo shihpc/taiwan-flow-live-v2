@@ -23,30 +23,30 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install requests
-      # FinMind 美股日線在收盤後逐檔滾動入庫（07-07 實測：06:46 全無、07:36 部分仍舊）。
-      # 日期未推進、或 >1/3 檔仍是舊日期 → 等 10 分鐘重跑，最多 12 次（07-07 實測 07:36 仍有 9/24 檔未入庫）；
-      # 美國休市日（日期本來就不會推進）重試耗盡後照常輸出。
-      - name: build us.json（等 FinMind 入庫）
+      # FinMind 美股日線收盤後逐檔滾動入庫（07-07 實測：06:46 全無、07:36 指數/權值先到、~08:25 全齊）。
+      # 策略：每 10 分鐘重跑、內容有變就即刻提交＋部署（分批上站，指數/ADR 先到先見），
+      # 直到日期推進且舊檔 ≤1/3 才算齊；美國休市日（日期不會推進）重試耗盡後結束。
+      - name: build us.json（等 FinMind 入庫，分批上站）
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          push_now() {
+            git add data/us.json
+            if git diff --cached --quiet; then echo "no change"; return 0; fi
+            git commit -m "us $(date -u +%FT%TZ)"
+            for k in 1 2 3 4 5; do git pull --rebase origin main && git push && break || sleep 4; done
+            # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch 才會部署到網站
+            gh workflow run pages.yml --ref main || true
+          }
           prev=$(python -c "import json;print(json.load(open('data/us.json')).get('date') or '')" 2>/dev/null || echo '')
           for i in $(seq 1 12); do
             python src/build_us.py
             new=$(python -c "import json;print(json.load(open('data/us.json')).get('date') or '')")
             fresh=$(python -c "import json;d=json.load(open('data/us.json'));rows=[r for g in d['groups'] for r in g['rows']];stale=sum(1 for r in rows if r.get('d') and r['d']<(d.get('date') or ''));print('yes' if rows and stale*3<=len(rows) else 'no')")
+            push_now
             if [ "$new" != "$prev" ] && [ "$fresh" = "yes" ]; then echo "資料已齊：$prev → $new"; break; fi
             if [ $i -lt 12 ]; then echo "US 資料未齊（date=$new fresh=$fresh），10 分鐘後重試 $i/12"; sleep 600; fi
           done
-      - name: commit
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/us.json
-          if git diff --cached --quiet; then echo "no change"; exit 0; fi
-          git commit -m "us $(date -u +%FT%TZ)"
-          for i in 1 2 3 4 5; do git pull --rebase origin main && git push && break || sleep 4; done
-          # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch 才會部署到網站
-          gh workflow run pages.yml --ref main
-        env:
-          GH_TOKEN: ${{ github.token }}
