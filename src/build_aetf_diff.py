@@ -10,7 +10,8 @@
 #       （原權重差法會把純股價漲跌的權重變化誤判為主動加減碼——07-07 實測 17~19 訊號僅 4~5 筆為真。）
 #   噪音門檻：|Δ股| < max(1000股, 前日股數0.5%) → 視為 0。
 # 產出 diff.json：
-#   etfs[code]  = {name, d0, d1, aum, units, est_flow(申贖估算金額), n_buy, n_sell}
+#   etfs[code]  = {name, d0, d1, aum, units, est_flow(申贖估算金額), n_buy, n_sell,
+#                  buy:[{c,n,zh,val}](該ETF加碼股，依金額大到小), sell:[...](減碼股，依金額小到大即賣超金額大到小)}
 #   stocks[]    = [{c, n(名), zh(合計張), val(合計金額), by:{etf:張}}]  ← 進出個股表（含各ETF張數明細）
 #   subs[]      = [{name(次產業), val(淨金額), detail:[{etf, c, n, zh, val}]}]  ← 次產業流向（可展開明細）
 #
@@ -88,18 +89,25 @@ def diff_one(code: str, cur: dict, prv: dict, closes: dict) -> tuple[list, dict]
             continue
         px = closes.get(c)
         name = (s1.get(c) or s0.get(c))[1]
-        rows.append({"c": c, "n": name, "dsh": d, "val": (d * px) if px else None})
+        zh = round(d / 1000)
+        if zh == 0:
+            zh = 1 if d > 0 else -1
+        rows.append({"c": c, "n": name, "dsh": d, "zh": zh, "val": (round(d * px) if px else None)})
     # 申贖金額估算（有 units 且有淨值）
     est_flow = None
     u1, u0, aum1 = cur.get("units"), prv.get("units"), cur.get("aum")
     if u1 and u0 and aum1:
         est_flow = (u1 - u0) * (aum1 / u1)
+    holdings = [{"c": r["c"], "n": r["n"], "zh": r["zh"], "val": r["val"]} for r in rows]
+    buy = sorted([h for h in holdings if (h["val"] or 0) > 0 or (h["val"] is None and h["zh"] > 0)],
+                 key=lambda x: -(x["val"] or 0))
+    sell = sorted([h for h in holdings if (h["val"] or 0) < 0 or (h["val"] is None and h["zh"] < 0)],
+                  key=lambda x: (x["val"] or 0))
     summary = {"name": cur.get("name"), "d0": prv_date_of(prv), "d1": prv_date_of(cur),
                "aum": cur.get("aum"), "aum_prev": prv.get("aum"),
                "twse_aum_yi": cur.get("twse_aum_yi"), "units": u1, "units_prev": u0,
                "est_flow": est_flow,
-               "n_buy": sum(1 for r in rows if (r["dsh"] or 0) > 0 or (r["val"] or 0) > 0),
-               "n_sell": sum(1 for r in rows if (r["dsh"] or 0) < 0 or (r["val"] or 0) < 0)}
+               "n_buy": len(buy), "n_sell": len(sell), "buy": buy, "sell": sell}
     return rows, summary
 
 
@@ -132,9 +140,7 @@ def main():
         out["etfs"][code] = summary
         latest_dates.append(d1)
         for r in rows:
-            zh = round(r["dsh"] / 1000) if r["dsh"] is not None else None
-            if zh == 0:
-                zh = 1 if (r["dsh"] or 0) > 0 else -1
+            zh = r["zh"]
             o = out["stocks"].setdefault(r["c"], {"c": r["c"], "n": r["n"], "zh": 0, "val": 0.0, "by": {}})
             if zh is not None:
                 o["zh"] += zh

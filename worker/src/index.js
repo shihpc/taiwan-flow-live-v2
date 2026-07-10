@@ -45,6 +45,34 @@ async function fetchJSON(url, ttl) {
   if (!r.ok) throw new Error(`${url} HTTP ${r.status}`);
   return r.json();
 }
+// 台指期正逆價差 + VIX恐慌指數：近月合約(依當日累計量挑主力月)最新一筆 tick 價 vs 加權現貨；
+// TaiwanOptionVix 當日最新一筆。兩者皆為當日快照，快取15秒跟 /live 節奏一致。
+async function finFuturesVix(token, date) {
+  // VIX 開盤前/資料未settle時當日可能查無資料，回看3天保底取最新一筆（資料量小，成本低）；
+  // 期貨tick當日量已足夠判斷主力月，不額外擴大範圍（避免大量資料拖慢/live）。
+  const prevDate = new Date(`${date}T00:00:00Z`);
+  prevDate.setUTCDate(prevDate.getUTCDate() - 3);
+  const vixStart = prevDate.toISOString().slice(0, 10);
+  const [futJ, vixJ] = await Promise.all([
+    fetch(`${FIN_BASE}?dataset=TaiwanFuturesTick&data_id=TX&start_date=${date}&token=${encodeURIComponent(token)}`,
+      { cf: { cacheTtl: 15, cacheEverything: true } }).then((r) => (r.ok ? r.json() : { data: [] })),
+    fetch(`${FIN_BASE}?dataset=TaiwanOptionVix&start_date=${vixStart}&end_date=${date}&token=${encodeURIComponent(token)}`,
+      { cf: { cacheTtl: 15, cacheEverything: true } }).then((r) => (r.ok ? r.json() : { data: [] })),
+  ]);
+  const futRows = (futJ.data || []).filter((r) => !String(r.contract_date || "").includes("/"));
+  let contract = null, price = null;
+  if (futRows.length) {
+    const vol = {};
+    for (const r of futRows) vol[r.contract_date] = (vol[r.contract_date] || 0) + num(r.volume);
+    contract = Object.entries(vol).sort((a, b) => b[1] - a[1])[0][0];
+    const frontRows = futRows.filter((r) => r.contract_date === contract);
+    price = num(frontRows[frontRows.length - 1].price);
+  }
+  const vixRows = (vixJ.data || []).slice().sort((a, b) =>
+    `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  const vix = vixRows.length ? num(vixRows[vixRows.length - 1].vix) : null;
+  return { price, contract, vix };
+}
 
 // ---- 聚合（對應 snapshot.py）----
 const zero = () => ({ amt: 0, lw: 0, wchg: 0, up: 0, down: 0, flat: 0, n: 0, pts: 0 });
@@ -86,6 +114,18 @@ async function buildLive(env) {
     fetchJSON(`${base}/lastweek.json`, 3600),     // 上週欄位：快取一小時
   ]);
   const live = aggregate(cl, rows, limits, lw);
+
+  // 台指期正逆價差 + VIX（失敗不影響 /live 主體）
+  try {
+    const { price, contract, vix } = await finFuturesVix(token, d);
+    const spot = live.index.tse.val;
+    live.futures = (price != null && spot != null)
+      ? { price, contract, basis: r1(price - spot) } : null;
+    live.vix = vix;
+  } catch (e) {
+    live.futures = null;
+    live.vix = null;
+  }
 
   // P3：資金湧入（frames + baseline；任何失敗不影響 /live 主體）
   try {

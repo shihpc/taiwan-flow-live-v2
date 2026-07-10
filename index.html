@@ -95,7 +95,7 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
                 : isLocal ? "/api/refresh"
                 : "data/live.json?t="+Date.now();
 
-const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null}}};
+const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null,openEtf:null}}};
 
 // ---- formatters ----
 const yi=v=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1})+"億";
@@ -140,11 +140,26 @@ function idxLine(label,d,mk,key){
   const cnt=mk?` <span class="mut">漲${P('up','up',mk.up)}(${P('ul','up',mk.up_lim||0)})/跌${P('down','down',mk.down)}(${P('dl','down',mk.down_lim||0)}) ${mk.n}檔</span>`:"";
   return `<span>${label} <b>${v}</b> ${sgn(d.chgP,(d.chgP>0?'+':'')+d.chgP.toFixed(2)+' ('+pct(d.chg)+')')} <span class="mut">量${yi(d.amt_yi)}</span>${cnt}</span>`;
 }
+function futuresVixLine(){
+  const fu=state.live.futures, vix=state.live.vix;
+  if(!fu&&vix==null)return "";
+  const parts=[];
+  if(fu){
+    const b=fu.basis, word=b>0?"正價差":b<0?"逆價差":"價差平";
+    parts.push(`期指(${(fu.contract||"").slice(4)}月) ${sgn(b,(b>0?"+":"")+b+" "+word)}`);
+  }
+  if(vix!=null){
+    const cls=vix>=30?"down":vix>=20?"":"mut", tag=vix>=30?"（恐慌）":vix>=20?"（警戒）":"（平靜）";
+    parts.push(`VIX恐慌指數 <span class="${cls}">${vix.toFixed(2)}${tag}</span>`);
+  }
+  return `<div class="mkrow mut" style="font-size:12px">${parts.join(" · ")}</div>`;
+}
 function renderMarket(){
   const ix=state.live.index||{}, m=state.live.market||{};
   document.getElementById("mkcard").innerHTML=
     `<div class="mkrow">${idxLine("加權",ix.tse,m.tse,"tse")}</div>`+
-    `<div class="mkrow">${idxLine("櫃買",ix.otc,m.otc,"otc")}</div>`;
+    `<div class="mkrow">${idxLine("櫃買",ix.otc,m.otc,"otc")}</div>`+
+    futuresVixLine();
   const src=CFG.worker?" · 即時(Worker)":isLocal?"":" · 靜態快照";
   // 產生時間距今 >3 分鐘 → 標示資料偏舊（Worker/上游卡住時可察覺）
   let stale="";
@@ -570,21 +585,37 @@ async function renderAETF(){
     if(adv.length)html+=`<div class="card" style="margin:0 0 8px;font-size:14px;line-height:1.6">${adv.map(x=>`<div>${x}</div>`).join("")}</div>`;
   }
   // ① ETF 總覽
+  const openEtf=state.sub.aetf.openEtf;
   const ov=Object.entries(latest.etfs||{}).map(([code,e])=>{
     const d=(diff&&diff.etfs&&diff.etfs[code])||{};
     const dd=x=>(x||"").slice(5).replace("/","-");
     return {code,name:e.name,aum:e.twse_aum_yi,src:(e.src_date||"").slice(5),
       d0:dd(d.d0),d1:dd(d.d1),
-      flow:d.est_flow!=null?d.est_flow:null,nb:d.n_buy,ns:d.n_sell};});
+      flow:d.est_flow!=null?d.est_flow:null,nb:d.n_buy,ns:d.n_sell,
+      hasDiff:!!(d.buy||d.sell)};});
   ov.sort((a,b)=>(b.aum||0)-(a.aum||0));
-  html+=`<div class="crumb"><b>ETF 總覽</b>（規模=集保口徑）</div>`;
+  html+=`<div class="crumb"><b>ETF 總覽</b>（規模=集保口徑 · 點名稱看加減碼明細）</div>`;
   html+=tbl([
-    {h:"ETF",cls:"l",w:118,f:r=>`<b>${r.code}</b><span class="nm">${r.name||""}</span>`},
+    {h:"ETF",cls:"l",w:118,f:r=>r.hasDiff
+      ?`<span class="sl ${openEtf===r.code?'sel':''}" data-etf="${r.code}"><b>${r.code}</b><span class="nm">${r.name||""}</span></span>`
+      :`<b>${r.code}</b><span class="nm">${r.name||""}</span>`},
     {h:"規模(億)",w:70,f:r=>r.aum==null?'<span class="mut">—</span>':r.aum.toLocaleString("en-US")},
     {h:"申贖估",w:70,f:r=>yi2(r.flow)},
     {h:"加碼檔",w:56,f:r=>r.nb==null?'<span class="mut">—</span>':`<span class="up">${r.nb}</span>`},
     {h:"減碼檔",w:56,f:r=>r.ns==null?'<span class="mut">—</span>':`<span class="down">${r.ns}</span>`},
     {h:"資料日",w:96,f:r=>r.d0?`${r.d0}→${r.d1}`:(r.src||"—")}],ov);
+  if(openEtf&&diff&&diff.etfs&&diff.etfs[openEtf]){
+    const de=diff.etfs[openEtf];
+    html+=`<div class="crumb"><b>${openEtf} ${de.name||""}</b> 加減碼明細（依金額排序）</div>`;
+    html+=`<div style="display:flex;gap:8px;flex-wrap:wrap">`+
+      `<div style="flex:1;min-width:220px"><div class="mut" style="font-size:12px;margin:2px 0">加碼（${(de.buy||[]).length}檔）</div>`+
+      tbl([{h:"個股",cls:"l",w:96,f:r=>`${yahoo(r.c)}<span class="nm">${r.n||""}</span>`},
+           {h:"張數",w:70,f:r=>zh2(r.zh)},{h:"金額",w:76,f:r=>yi2(r.val)}],de.buy||[])+`</div>`+
+      `<div style="flex:1;min-width:220px"><div class="mut" style="font-size:12px;margin:2px 0">減碼（${(de.sell||[]).length}檔）</div>`+
+      tbl([{h:"個股",cls:"l",w:96,f:r=>`${yahoo(r.c)}<span class="nm">${r.n||""}</span>`},
+           {h:"張數",w:70,f:r=>zh2(r.zh)},{h:"金額",w:76,f:r=>yi2(r.val)}],de.sell||[])+`</div>`+
+      `</div>`;
+  }
   if(!diff||!(diff.stocks||[]).length){
     html+=`<div class="loading">主動加減碼需累積 2 個揭露日的快照，資料累積中（最快下一個交易日 18:30 後生效）。</div>`;
     main.innerHTML=html;return;
@@ -621,6 +652,8 @@ async function renderAETF(){
 }
 document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-asub]");if(!s)return;
   const v=decodeURIComponent(s.dataset.asub);state.sub.aetf.open=state.sub.aetf.open===v?null:v;render();});
+document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-etf]");if(!s)return;
+  const v=s.dataset.etf;state.sub.aetf.openEtf=state.sub.aetf.openEtf===v?null:v;render();});
 
 function render(){
   for(const k in T)delete T[k];
