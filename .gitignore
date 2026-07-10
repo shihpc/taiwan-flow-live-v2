@@ -8,3 +8,4 @@ node_modules/
 .wrangler/
 worker/.dev.vars
 backtest/cache/
+backtest/fetch.log
