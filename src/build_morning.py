@@ -47,7 +47,8 @@ def taiex_last2():
 
 
 def night_gap(spot_close: float):
-    """夜盤(標記次一交易日)近月收盤 vs 現貨收盤。"""
+    """夜盤(標記次一交易日)近月合約自身漲跌點數（spread，即FinMind回傳的夜盤自身漲跌），
+    非夜盤收盤減現貨收盤（後者混雜了現貨與期貨的價差，不是市場常用的「夜盤漲跌」定義）。"""
     rows = fin.api_get("TaiwanFuturesDaily", data_id="TX",
                        start_date=(date.today() - timedelta(days=5)).isoformat())
     am = [r for r in rows if r.get("trading_session") == "after_market"
@@ -58,8 +59,9 @@ def night_gap(spot_close: float):
     cand = [r for r in am if r["date"] == last_date]
     front = max(cand, key=lambda r: r.get("volume") or 0)
     close = fv(front["close"])
+    spread = fv(front.get("spread"))
     return {"date": last_date, "close": close, "chg_pct": fv(front.get("spread_per")),
-            "spot": spot_close, "gap": round(close - spot_close, 1) if spot_close else None}
+            "spot": spot_close, "gap": spread}
 
 
 def exdiv_today(cl: dict, a5map: dict):
@@ -171,6 +173,9 @@ def main():
         print("inst_total 失敗:", e, flush=True)
     it3 = sorted([c for c, v in blst.items() if v[1] == 3], key=lambda c: -a5map.get(c, 0))[:8]
     it3 = [{"c": c, "n": cl.get(c, {}).get("n", "")} for c in it3]
+    it3_sell = sorted([c for c, v in blst.items() if len(v) > 7 and v[7] == 3],
+                       key=lambda c: -a5map.get(c, 0))[:8]
+    it3_sell = [{"c": c, "n": cl.get(c, {}).get("n", "")} for c in it3_sell]
     aetf_lines = []
     co_buy = []
     if diff:
@@ -178,11 +183,16 @@ def main():
         co_buy = [s for s in st if sum(1 for v in (s.get("by") or {}).values() if v > 0) >= 2][:3]
         if co_buy:
             aetf_lines.append("多檔同買：" + "、".join(s.get("n") or s["c"] for s in co_buy))
-        sb = diff.get("subs") or []
-        if sb and sb[0].get("val"):
-            s0 = sb[0]
-            aetf_lines.append(f"次產業最大{'加碼' if s0['val'] > 0 else '減碼'}："
-                              f"{s0['name'].split('（')[0]} {abs(s0['val']) / 1e8:.1f}億")
+        co_sell = [s for s in st if sum(1 for v in (s.get("by") or {}).values() if v < 0) >= 2][:3]
+        if co_sell:
+            aetf_lines.append("多檔同賣：" + "、".join(s.get("n") or s["c"] for s in co_sell))
+        sb = [s for s in (diff.get("subs") or []) if s.get("val")]
+        s_up = max(sb, key=lambda s: s["val"], default=None)
+        s_dn = min(sb, key=lambda s: s["val"], default=None)
+        if s_up and s_up["val"] > 0:
+            aetf_lines.append(f"次產業最大加碼：{s_up['name'].split('（')[0]} {s_up['val'] / 1e8:.1f}億")
+        if s_dn and s_dn["val"] < 0:
+            aetf_lines.append(f"次產業最大減碼：{s_dn['name'].split('（')[0]} {abs(s_dn['val']) / 1e8:.1f}億")
 
     # ⑥ 驗證訊號
     cont = sorted([k for k, v in subs_y.items() if v[0] == 1 and v[1] == 1])   # 連湧
@@ -213,7 +223,7 @@ def main():
            "exdiv": exdiv_today(cl, a5map),
            "recap": {"up_subs": up_subs[:8], "down_subs": dn_subs[:8], "y1_up": y1n, "y1_dn": y1d,
                      "baseline_date": bl.get("date")},
-           "chips": {"inst": inst, "it3": it3, "aetf": aetf_lines},
+           "chips": {"inst": inst, "it3": it3, "it3_sell": it3_sell, "aetf": aetf_lines},
            "signals": {"cont_subs": cont, "new_subs": [s for s in up_subs if s not in cont][:6],
                        "dual": dual},
            "news": news}

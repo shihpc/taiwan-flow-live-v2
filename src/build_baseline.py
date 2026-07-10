@@ -1,9 +1,10 @@
 # src/build_baseline.py — 產 data/baseline.json（資金湧入偵測的常態基準，每交易日收盤後跑）
 #
 # 內容（給 Worker /live 當靜態依賴，快取到隔日）：
-#   stocks: {code: [a5, it, fi, y1, y2, ints, nl]}
+#   stocks: {code: [a5, it, fi, y1, y2, ints, nl, its]}
 #     a5 = 前 5 個交易日平均成交額（元）→ 集中度分母（個股常態佔比 = a5/tot5）
 #     it/fi = 投信/外資近 3 交易日買超日數 0~3（回測實證的個股續勢旗標）
+#     its = 投信近 3 交易日賣超日數 0~3（連買的反向：連賣旗標）
 #     y1/y2 = 最近一日/前一日的日線訊號：1=湧入(爆量2x+漲2%+收高0.7) / -1=退出(爆量+跌+收低0.3) / 0=無
 #       回測（report_lag.md）：個股昨湧→今日平均偏弱(追高警示)、昨退→續弱；連續兩日效果加倍
 #     ints = 法人買賣強度%（最近一日 (投信+外資淨買股數×close)/成交額×100，1位小數）
@@ -132,7 +133,7 @@ def main():
         raise RuntimeError(f"僅找到 {len(days)} 個交易日（需 {NDAYS}）")
 
     # 投信/外資近 3 交易日買超日數 + 最近一日淨買股數（法人強度用）
-    it, fi, net0 = {}, {}, {}
+    it, fi, its, net0 = {}, {}, {}, {}
     for ds in days[:3]:
         for r in fin.api_get("TaiwanStockInstitutionalInvestorsBuySell", start_date=ds, end_date=ds):
             c = str(r.get("stock_id") or "")
@@ -149,6 +150,8 @@ def main():
                     it[c] = it.get(c, 0) + 1
                 else:
                     fi[c] = fi.get(c, 0) + 1
+            elif net < 0 and name == "Investment_Trust":
+                its[c] = its.get(c, 0) + 1
         print(f"inst {ds} ok", flush=True)
 
     y1, y2 = day_signal(pd, 0), day_signal(pd, 1)
@@ -171,7 +174,7 @@ def main():
             lows = [v[1] for v in (pd[k].get(c) for k in range(1, NDAYS)) if v and v[1] is not None]
             if lows and cur[1] < min(lows):
                 nl = 1
-        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0), ints, nl]
+        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0), ints, nl, its.get(c, 0)]
         tot5 += a5
     subs_y = {}
     for k in set(s1) | set(s2):

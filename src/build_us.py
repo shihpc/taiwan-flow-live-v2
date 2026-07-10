@@ -130,8 +130,8 @@ def session_brief(us_date: str) -> str:
     return ("盤中：" + "；".join(parts) + "。") if parts else ""
 
 
-def brief(groups) -> str:
-    """70 字內規則式盤勢分析：大盤定調→費半→台積ADR→開盤含義→極端個股（空間夠才放）。"""
+def brief(groups, us_date: str | None = None) -> str:
+    """70 字內規則式盤勢分析：日期→大盤定調→費半→台積ADR→開盤含義→極端個股（空間夠才放）。"""
     g = {x["g"]: x["rows"] for x in groups}
     idx = {r["s"]: r for r in g.get("指數", [])}
     sp, nq, dj, sox = idx.get("^GSPC"), idx.get("^IXIC"), idx.get("^DJI"), idx.get("^SOX")
@@ -145,6 +145,9 @@ def brief(groups) -> str:
         tone = "美股收漲" if up == len(chgs) else "美股收跌" if dn == len(chgs) else "美股漲跌互見"
         if max(abs(c) for c in chgs) >= 2:
             tone = tone.replace("收", "大")
+        if us_date:
+            y, mo, d = us_date.split("-")
+            tone = f"{int(mo)}/{int(d)}{tone}"
         parts.append(tone)
     if sox:
         s = f"費半{sox['chg']:+.1f}%"
@@ -203,7 +206,7 @@ def main():
     from datetime import datetime, timezone
     out = {"date": us_date, "fx": round(fx, 3) if fx else None,
            "generated_at": datetime.now(timezone.utc).isoformat(),
-           "brief": brief(groups), "session": session_brief(us_date) if us_date else "",
+           "brief": brief(groups, us_date), "session": session_brief(us_date) if us_date else "",
            "groups": groups}
     OUT.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     n = sum(len(g["rows"]) for g in groups)
