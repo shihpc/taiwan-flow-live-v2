@@ -29,7 +29,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 ROOT = Path(__file__).resolve().parent.parent
 ADIR = ROOT / "data" / "aetf"
 NOISE_SH = 1000          # 股
-NO_UNITS_ETFS = {"00981A", "00403A"}   # 統一無 units → 申贖比由持股股數比中位數推估
+NO_UNITS_ETFS = {"00981A", "00403A", "00400A"}   # 無 units → 申贖比由持股股數比中位數推估
+NO_SHARES_ETFS = {"00400A"}   # 國泰：連個股股數都不揭露，只有權重，股數用 fill_implied_shares() 反推
+
+
+def fill_implied_shares(snap: dict, closes: dict) -> None:
+    """國泰(00400A)只揭露權重(%)、無股數；用 weight%×TWSE集保AUM÷收盤價 反推股數。
+    這不是估計值——weight 的定義本就是 shares×price/AUM，只要用同一份 AUM 基準
+    （twse_aum_yi）跟對應日期的收盤價回推，數學上等於精確還原股數。
+    僅有的近似來源：diff 用的是單一天(通常是 d1)抓到的收盤價，d0 若價格已變動，
+    反推股數會有對應誤差，量級遠小於不調整申贖比造成的系統性偏差，可接受。"""
+    aum_yi = snap.get("twse_aum_yi")
+    if not aum_yi:
+        return
+    for c, entry in snap.get("stocks", {}).items():
+        w = entry[2] if len(entry) > 2 else None
+        px = closes.get(c)
+        if w is not None and px:
+            entry[0] = round(w / 100 * aum_yi * 1e8 / px)
 
 
 def load_snapshots() -> dict:
@@ -135,6 +152,9 @@ def main():
             print(f"{code}: 僅 {len(dates)} 個揭露日，跳過", flush=True)
             continue
         d0, d1 = dates[-2], dates[-1]
+        if code in NO_SHARES_ETFS:
+            fill_implied_shares(snaps[d0], closes)
+            fill_implied_shares(snaps[d1], closes)
         rows, summary = diff_one(code, snaps[d1], snaps[d0], closes)
         summary["d0"], summary["d1"] = d0, d1
         out["etfs"][code] = summary

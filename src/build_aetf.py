@@ -1,10 +1,12 @@
 # src/build_aetf.py — 主動式ETF 每日投組快照 → data/aetf/YYYY-MM-DD.json + latest.json
 #
-# 追蹤 5 檔（4 家投信，端點驗證見 memory aetf-tab-plan）：
+# 追蹤 8 檔（6 家投信，端點驗證見 memory aetf-tab-plan 與 docs/aetf-expansion-research.md）：
 #   統一 00981A(49YTW)/00403A(63YTW)：ezmoney 頁面內嵌 JSON（需 cookie session；無單位數→P3 用權重差法）
-#   群益 00982A：POST /CFWeb/api/etf/buyback {"fundId":"399","date":null}（全量+nav+totUnit）
+#   群益 00982A/00992A：POST /CFWeb/api/etf/buyback {"fundId":"399"/"500","date":null}（全量+nav+totUnit）
 #   野村 00980A：正式 POST API（GetFundTradeInfoDate → GetFundTradeInfo）
 #   復華 00991A：GET /api/assets?fundID=ETF23&qDate=...
+#   富邦 00405A：伺服器端渲染HTML表格（無units/aum）
+#   國泰 00400A：正式 API 但僅回權重無股數，diff.py 用權重×AUM÷收盤價反推股數
 # 另抓 TWSE ETFortune 資產規模（集保，全 ETF 統一口徑的 AUM）。
 #
 # 快照格式（每檔）：{date, aum, units, stocks:{code:[股數, 名稱]}, src_date}
@@ -149,6 +151,60 @@ def grab_fh(fund_id: str) -> dict:
             "diff_raw": res.get("diff")}
 
 
+# ---------- 富邦（伺服器端渲染 HTML 表格） ----------
+def grab_fubon(code: str) -> dict:
+    url = f"https://websys.fsit.com.tw/FubonETF/Fund/Assets.aspx?stkId={code}"
+    try:
+        r = requests.get(url, headers=UA, timeout=60)
+    except requests.exceptions.SSLError:
+        # 憑證鏈缺 Subject Key Identifier（同野村的環境相依問題，curl 可過、requests 預設驗證會擋）
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        r = requests.get(url, headers=UA, timeout=60, verify=False)
+    r.raise_for_status()
+    h = r.text
+    m = re.search(r"資料日期[：:]\s*(\d{4}/\d{1,2}/\d{1,2})", h)
+    src_date = m.group(1) if m else None
+    pattern = re.compile(
+        r'<tr>\s*<td class="tac">(\d{4,6})</td>\s*<td>([^<]*)</td>\s*'
+        r'<td class="tac">([\d,]+)</td>\s*<td class="tac">[\d,]+</td>\s*'
+        r'<td class="tac">([\d.]+)</td>\s*</tr>')
+    stocks = {}
+    for c, name, sh, w in pattern.findall(h):
+        sh = fnum(sh)
+        if c and sh:
+            stocks[c] = [round(sh), name.strip(), fnum(w)]
+    if not stocks:
+        raise RuntimeError("持股表格無匹配列（頁面改版?）")
+    return {"stocks": stocks, "src_date": src_date, "units": None, "aum": None}
+
+
+# ---------- 國泰（正式 API，僅回權重無股數） ----------
+def grab_cathay(fund_code: str) -> dict:
+    """GetIndexStockWeights 只回代號/名稱/權重(%)，無股數/units。
+    股數由 build_aetf_diff.py 用 權重%×TWSE集保AUM÷收盤價 反推（見該檔 NO_SHARES_ETFS）。
+    需帶 Referer，否則被 Akamai WAF 擋（bare curl 會 403 Access Denied）。"""
+    headers = dict(UA)
+    headers["Referer"] = "https://www.cathaysite.com.tw/"
+    r = requests.get("https://cwapi.cathaysite.com.tw/api/ETF/GetIndexStockWeights",
+                      params={"fundCode": fund_code}, headers=headers, timeout=60)
+    r.raise_for_status()
+    j = r.json()
+    if not j.get("success"):
+        raise RuntimeError(f"API success=false（returnCode={j.get('returnCode')}）")
+    res = j.get("result") or {}
+    stocks = {}
+    for row in res.get("stockWeights") or []:
+        c = str(row.get("stockCode") or "").strip()
+        w = fnum(row.get("weights"))
+        name = re.sub(r"\s+", "", row.get("stockName") or "")
+        if c and w:
+            stocks[c] = [None, name, w]
+    if not stocks:
+        raise RuntimeError("stockWeights 為空")
+    return {"stocks": stocks, "src_date": res.get("date"), "units": None, "aum": None}
+
+
 # ---------- TWSE ETFortune AUM（集保口徑，全 ETF 通用） ----------
 def grab_twse_aum(code: str):
     try:
@@ -165,6 +221,9 @@ ETFS = [
     ("00982A", "群益台灣強棒", lambda: grab_capital("399")),
     ("00980A", "野村臺灣優選", lambda: grab_nomura("00980A")),
     ("00991A", "復華未來50", lambda: grab_fh("ETF23")),
+    ("00992A", "群益台灣科技創新", lambda: grab_capital("500")),
+    ("00405A", "富邦台灣龍耀", lambda: grab_fubon("00405A")),
+    ("00400A", "國泰台股動能高息", lambda: grab_cathay("EA")),
 ]
 
 
@@ -207,7 +266,7 @@ def main():
     body = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
     (OUTDIR / f"{out['run_date']}.json").write_text(body, encoding="utf-8")
     (OUTDIR / "latest.json").write_text(body, encoding="utf-8")
-    print(f"寫入 data/aetf/{out['run_date']}.json（{len(out['etfs'])}/5 檔成功）")
+    print(f"寫入 data/aetf/{out['run_date']}.json（{len(out['etfs'])}/{len(ETFS)} 檔成功）")
 
 
 if __name__ == "__main__":
