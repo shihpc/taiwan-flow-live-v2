@@ -595,15 +595,15 @@ async function renderAETF(){
       hasDiff:!!(d.buy||d.sell)};});
   ov.sort((a,b)=>(b.aum||0)-(a.aum||0));
   html+=`<div class="crumb"><b>ETF 總覽</b>（規模=集保口徑 · 點名稱看加減碼明細）</div>`;
-  html+=tbl([
-    {h:"ETF",cls:"l",w:118,f:r=>r.hasDiff
+  html+=`<div class="wrap2">`+tbl([
+    {h:"ETF",cls:"l",w:80,f:r=>r.hasDiff
       ?`<span class="sl ${openEtf===r.code?'sel':''}" data-etf="${r.code}"><b>${r.code}</b><span class="nm">${r.name||""}</span></span>`
       :`<b>${r.code}</b><span class="nm">${r.name||""}</span>`},
     {h:"規模(億)",w:70,f:r=>r.aum==null?'<span class="mut">—</span>':r.aum.toLocaleString("en-US")},
     {h:"申贖估",w:70,f:r=>yi2(r.flow)},
     {h:"加碼檔",w:56,f:r=>r.nb==null?'<span class="mut">—</span>':`<span class="up">${r.nb}</span>`},
     {h:"減碼檔",w:56,f:r=>r.ns==null?'<span class="mut">—</span>':`<span class="down">${r.ns}</span>`},
-    {h:"資料日",w:96,f:r=>r.d0?`${r.d0}→${r.d1}`:(r.src||"—")}],ov);
+    {h:"資料日",w:96,f:r=>r.d0?`${r.d0}→${r.d1}`:(r.src||"—")}],ov)+`</div>`;
   if(openEtf&&diff&&diff.etfs&&diff.etfs[openEtf]){
     const de=diff.etfs[openEtf];
     html+=`<div class="crumb"><b>${openEtf} ${de.name||""}</b> 加減碼明細（依金額排序）</div>`;
