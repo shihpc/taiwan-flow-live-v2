@@ -57,6 +57,21 @@ td.ld{background:var(--down)!important;color:#fff}
 .crumb{font-size:12px;color:var(--dim);margin:10px 0 4px}
 .loading{color:var(--dim);padding:20px;text-align:center}
 footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
+/* 摘要分析（框架自 postmkt 搬入；:root 變數對照 v2：--card→--panel、--txt→--fg、--chip→--panel2、--muted→--dim） */
+.insight-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:10px 0;line-height:1.75;font-size:.92rem}
+.insight-md h2{font-size:1.02rem;color:var(--accent);margin:16px 0 6px;font-weight:700}
+.insight-md h2:first-child{margin-top:0}
+.insight-md h3{font-size:.94rem;color:var(--fg);margin:12px 0 4px;font-weight:650}
+.insight-md ul{margin:4px 0 8px;padding-left:20px}
+.insight-md li{margin:3px 0}
+.insight-md p{margin:6px 0}
+.insight-md strong{color:var(--fg)}
+.insight-md code{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-family:Consolas,monospace;font-size:.86rem;color:var(--accent)}
+.insight-md table{border-collapse:collapse;width:100%;margin:8px 0;font-size:.84rem}
+.insight-md th,.insight-md td{border:1px solid var(--line);padding:5px 8px;text-align:left;white-space:normal}
+.insight-md th{background:var(--panel2);color:var(--dim)}
+.insight-note{color:var(--dim);font-size:.74rem;margin:8px 4px;line-height:1.6}
+.insight-meta{color:var(--dim);font-size:.76rem;margin:2px 4px 10px}
 </style>
 </head>
 <body>
@@ -74,6 +89,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
     <div class="tab" data-tab="rank">成交佔比</div>
     <div class="tab" data-tab="flow">資金湧入</div>
     <div class="tab" data-tab="outflow">資金退出</div>
+    <div class="tab" data-tab="insight">摘要分析</div>
   </div>
 </header>
 <div class="card" id="mkcard" style="margin:8px 10px"></div>
@@ -93,7 +109,11 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
                 : isLocal ? "/api/refresh"
                 : "data/live.json?t="+Date.now();
 
-const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null,openEtf:null}}};
+// 摘要分析可選模型（與 postmkt/news 三站共用 localStorage key：insight_model / anthropic_key）
+const INSIGHT_MODELS=[["claude-opus-4-8","Opus 4.8（最佳判讀，約NT$3/次）"],["claude-sonnet-5","Sonnet 5（近Opus、約半價更快）"]];
+const state={tab:"exchange", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null,openEtf:null}},
+  insight:null, insightLoading:false, insightErr:null,
+  insightModel: localStorage.getItem("insight_model")||"claude-opus-4-8"};
 
 // ---- formatters ----
 const yi=v=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:1,maximumFractionDigits:1})+"億";
@@ -653,12 +673,217 @@ document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-asub]")
 document.addEventListener("click",e=>{const s=e.target.closest(".sl[data-etf]");if(!s)return;
   const v=s.dataset.etf;state.sub.aetf.openEtf=state.sub.aetf.openEtf===v?null:v;render();});
 
+// ---- 摘要分析（前端即時呼叫 Claude API；框架 VERBATIM 自 postmkt 搬入） ----
+// key 只存本機 localStorage，只隨查詢送給 Anthropic，不進 repo、不傳第三方。
+const anthKey = () => localStorage.getItem("anthropic_key") || "";
+// 台灣時間 "YYYY-MM-DD HH:MM:SS"（sv-SE locale 給 ISO 樣式，指定 Asia/Taipei 時區）
+const twNow = () => new Date().toLocaleString("sv-SE", { timeZone:"Asia/Taipei" });
+// HTML escape（postmkt 有全域 esc，v2 無同名工具 → 內聯同等實作）
+const escI = s => String(s==null?"":s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// 極簡 markdown→HTML（LLM 輸出用）：標題/清單/粗體/行內碼/表格/段落。夠用即可，不引入外部庫。
+function mdToHtml(md){
+  const esc2 = s => s.replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+  const inline = s => esc2(s).replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
+    .replace(/`([^`]+)`/g,"<code>$1</code>");
+  const lines = String(md||"").split("\n");
+  let html = "", i = 0;
+  while (i < lines.length){
+    const ln = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(ln) && i+1<lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])){
+      const cell = r => r.replace(/^\s*\|/,"").replace(/\|\s*$/,"").split("|").map(c=>c.trim());
+      const head = cell(ln); i += 2;
+      let body = "";
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])){ body += "<tr>"+cell(lines[i]).map(c=>`<td>${inline(c)}</td>`).join("")+"</tr>"; i++; }
+      html += `<table><thead><tr>${head.map(c=>`<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>`;
+      continue;
+    }
+    let m;
+    if ((m = ln.match(/^##\s+(.*)/))) html += `<h2>${inline(m[1])}</h2>`;
+    else if ((m = ln.match(/^###\s+(.*)/))) html += `<h3>${inline(m[1])}</h3>`;
+    else if (/^\s*[-*]\s+/.test(ln)){
+      let items = "";
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])){ items += `<li>${inline(lines[i].replace(/^\s*[-*]\s+/,""))}</li>`; i++; }
+      html += `<ul>${items}</ul>`; continue;
+    }
+    else if (ln.trim()==="") { /* skip */ }
+    else html += `<p>${inline(ln)}</p>`;
+    i++;
+  }
+  return html;
+}
+// 從 state.live 彙整成給 LLM 的精簡文字（不 dump 全量，只取關鍵訊號欄位）。
+// 日期對齊機制照 postmkt：primary=主資料日、各段用 dlabel 標注自己的資料日，
+// 不同日的段落標警告避免跨日直接比較。回傳 {text, primary, dates}。
+function insightGatherContext(){
+  const live = state.live;
+  if(!live) return { text:"", primary:"", dates:{} };
+  const parts = [];
+  // 主資料日：ts 內含日期就用 ts，否則由 generated_at 換算台灣日期
+  const tsm = String(live.ts||"").match(/\d{4}[-\/]\d{2}[-\/]\d{2}/);
+  const primary = tsm ? tsm[0].replace(/\//g,"-")
+    : (live.generated_at ? new Date(live.generated_at).toLocaleDateString("sv-SE",{timeZone:"Asia/Taipei"}) : "");
+  const dates = {};
+  const norm = s => String(s||"").replace(/\//g,"-");
+  const dlabel = (name, secDate) => {
+    dates[name] = secDate || "?";
+    if (!secDate) return `【${name}（資料日不明）】`;
+    if (norm(secDate) === norm(primary)) return `【${name}（資料日 ${secDate}）】`;
+    return `【${name}（⚠資料日 ${secDate}，與主資料日 ${primary} 不同，請勿與其他段落跨日直接比較）】`;
+  };
+  const f1 = v => v==null ? "—" : v.toFixed(1);
+  const f2s = v => v==null ? "—" : (v>0?"+":"")+v.toFixed(2);
+  // a. 大盤：加權/櫃買指數 ＋ 漲跌家數/成交值
+  {
+    const ix = live.index||{}, mk = live.market||{};
+    const one = (label, d, m) => {
+      const l = [];
+      // chgP=漲跌點數、chg=漲跌%（worker idxOut 定義），兩者都給模型
+      if (d && d.val!=null) l.push(`${label}指數 ${d.val.toFixed(2)}（${f2s(d.chgP)}點/${f2s(d.chg)}%）成交${f1(d.amt_yi)}億`);
+      if (m) l.push(`漲${m.up??"—"}(漲停${m.up_lim||0})/跌${m.down??"—"}(跌停${m.down_lim||0})/平${m.flat??"—"}${m.amt_yi!=null?` 分類股總額${f1(m.amt_yi)}億`:""}`);
+      return l.join("，");
+    };
+    const a = one("加權", ix.tse, mk.tse), b = one("櫃買", ix.otc, mk.otc);
+    if (a||b) parts.push(`${dlabel("大盤即時", primary)}\n${[a,b].filter(Boolean).join("\n")}`);
+  }
+  // b. 產業別資金：exchange 依 tse.amt_yi 前8強＋依平均漲跌跌勢前5
+  {
+    const ex = (live.exchange||[]).map(s=>({sector:s.sector, ...(s.tse||{})})).filter(r=>(r.n||0)>0);
+    if (ex.length){
+      const line = r => `${r.sector} 成交${f1(r.amt_yi)}億 平均${f2s(r.avg_chg)}% 貢獻${f2s(r.pts)}點 漲${r.up}/跌${r.down}(${r.n}檔)`;
+      const top = [...ex].sort((a,b)=>(b.amt_yi||0)-(a.amt_yi||0)).slice(0,8);
+      const weak = [...ex].filter(r=>(r.avg_chg||0)<0).sort((a,b)=>(a.avg_chg||0)-(b.avg_chg||0)).slice(0,5);
+      const seg = [`資金前8強：\n${top.map(line).join("\n")}`];
+      if (weak.length) seg.push(`跌勢前5：\n${weak.map(line).join("\n")}`);
+      parts.push(`${dlabel("產業別資金（加權市場）", primary)}\n${seg.join("\n")}`);
+    }
+  }
+  // c. 資金湧入：flow.subs 依集中10分(c1) 前12；盤前 flow=null 明確註明
+  {
+    const fl = live.flow;
+    if (!fl || !(fl.subs||[]).length){
+      parts.push(`${dlabel("次產業盤中資金集中", primary)}\n盤前，無盤中資金集中資料。`);
+    } else {
+      const subs = [...fl.subs].sort((a,b)=>((b.c1!=null?b.c1:(b.d_yi||0))-(a.c1!=null?a.c1:(a.d_yi||0)))).slice(0,12);
+      const line = s => `${cleanSub(s.name)} 近10分${f1(s.d_yi)}億 集中10分${s.c1==null?"—":s.c1.toFixed(2)}× 集中30分${s.c2==null?"—":s.c2.toFixed(2)}× 窗內${f2s(s.ret)}%`;
+      parts.push(`${dlabel("次產業盤中資金集中（依集中10分倍數）", primary)}\n${subs.map(line).join("\n")}`);
+    }
+  }
+  // d. 個股資金集中：sval 解碼，篩有盤中欄位(c10) 者，依 c10 前15；無盤中欄位則整段略過
+  {
+    const rows = Object.keys(live.stocks||{}).map(c=>{const v=sval(c); return v&&v.c10!=null?{c,...v}:null;})
+      .filter(Boolean).sort((a,b)=>((b.c10!=null?b.c10:(b.c30||0))-(a.c10!=null?a.c10:(a.c30||0)))).slice(0,15);
+    if (rows.length){
+      const line = r => {
+        const nm = (state.cl && state.cl[r.c] && state.cl[r.c].n) || "";
+        return `${r.c}${nm} 集中10分${r.c10==null?"—":r.c10.toFixed(2)}×/30分${r.c30==null?"—":r.c30.toFixed(2)}× 漲跌${f2s(r.chg)}% 投信連買${r.it||0}日/外資連買${r.fi||0}日 法人強度${r.ints==null?"—":f2s(r.ints)}%`;
+      };
+      parts.push(`${dlabel("個股盤中資金集中 前15（依集中10分倍數）", primary)}\n${rows.map(line).join("\n")}`);
+    }
+  }
+  return { text: parts.join("\n\n"), primary, dates };
+}
+// 打開 adaptive thinking：Opus 4.8 省略 thinking=不思考，故明確指定；effort medium 平衡
+// 深度與延遲；只取 text block(thinking display 預設 omitted，不渲染思考)。max_tokens 拉高
+// 給思考+輸出留空間。
+async function callClaude(key, model, system, userMsg){
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{ "content-type":"application/json", "x-api-key":key,
+      "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" },
+    body: JSON.stringify({ model, max_tokens:8000,
+      thinking:{ type:"adaptive" }, output_config:{ effort:"medium" },
+      system, messages:[{role:"user",content:userMsg}] })
+  });
+  const j = await r.json();
+  if (!r.ok || (j.type==="error")) throw new Error((j.error && j.error.message) || ("HTTP "+r.status));
+  if (j.stop_reason === "refusal") throw new Error("模型基於安全政策婉拒本次請求");
+  const text = (j.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+  return { text, usage: j.usage || null };
+}
+async function runInsight(){
+  if (!anthKey()){ alert("請先輸入並儲存 Anthropic API token"); return; }
+  state.insightLoading = true; state.insightErr = null; render();
+  try{
+    const g = insightGatherContext();
+    if (!g.text.trim()) throw new Error("即時資料尚未載入完成，請稍候再試");
+    const SYS = "你是積極的台股盤中即時資金流分析師。任務：彙整本頁即時類股資金動態，產出以「找出盤中 alpha 標的」為核心的洞見與可操作建議。"
+      + "要求：(1) 進出建議一律以『同向共振』為基礎——多個即時訊號指向同一方向才算有效（例：個股資金集中度飆升＋所屬產業資金同步湧入＋外資或投信連買＝資金共識偏多；多源同步偏空亦然）。"
+      + "(2) 只聚焦同向共振訊號；背離（多源方向不一致）不適合作為進出參考，一律略過、不呈現、不描述、不列背離段落。"
+      + "(3) 依即時資料呈現的資金傾向做方向性判斷，對共振標的給偏多／偏空看法與明確進出建議。"
+      + "(4) 每條洞見／建議必須點名個股代號＋可追溯的具體數據依據(集中倍數/貢獻點/連買日/漲跌%等)，禁止空泛臆測。"
+      + "(5) 洞見與建議合計不超過 10 條，挑共振最強、依據最紮實的。"
+      + "(6) 建議個股以 alpha 為首要考量，優先納入中小型標的；大型權值股(台灣50成分、2330台積電/2317鴻海/2454聯發科、金控股等)合計不得超過清單一半——這是上限而非目標，不必硬湊，中小型訊號更強就多放中小型甚至大型不放。"
+      + "(7) 資料為盤中準即時快照(約分鐘級、20秒輪詢)，僅反映當下資金分布、非全日定論，判讀須註明時效性。"
+      + "(8) 繁體中文、markdown(## 標題、- 清單、**粗體**、可用表格)。"
+      + "結構：## 核心洞見與操作建議(≤10 條，每條＝個股代號名稱 ｜ 共振訊號 ｜ 數據依據 ｜ 方向與進出建議；大型股≤一半)／## 訊號邏輯(簡述同向共振推論)。不要有背離段落。"
+      + "最後一行附免責：以上為盤中即時資金結構的模型研判、資料為準即時快照、未經歷史回測、非投資建議、非保證獲利，僅供你自行參考。";
+    const USER = `主資料日：${g.primary}\n各段資料日：${JSON.stringify(g.dates)}\n（凡標注與主資料日不同的段落僅可單獨解讀，勿跨日比較）\n\n${g.text}`;
+    const res = await callClaude(anthKey(), state.insightModel, SYS, USER);
+    state.insight = { text: res.text, usage: res.usage, at: twNow(), date: g.primary, model: state.insightModel };
+  }catch(e){
+    state.insightErr = String(e.message || e);
+  }
+  state.insightLoading = false; render();
+}
+function insightHtml(){
+  let h = `<div class="crumb"><b>摘要分析</b>${state.live&&state.live.ts?` <span class="mut">資料時間 ${escI(state.live.ts)}</span>`:""}</div>`;
+  // token 輸入區（postmkt 的 mcard/qrow/qbtn → v2 等價 card/flex/btn）
+  const inStyle="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 8px;font-size:13px;flex:1;min-width:0";
+  if (!anthKey()){
+    h += `<div class="card" style="font-size:13px;line-height:1.6">此功能會用你自己的 Anthropic API token 即時呼叫 Claude 產生分析。`
+      + `token 只存在你這台瀏覽器的 localStorage，不會寫入網站或傳給 Anthropic 以外的任何地方。`
+      + `<div style="display:flex;gap:6px;margin-top:8px;align-items:center"><input id="anthTok" type="password" placeholder="貼上 Anthropic API token（sk-ant-…）" style="${inStyle}">`
+      + `<button class="btn" data-anth-save>儲存</button></div></div>`;
+  }
+  const modelOpts = INSIGHT_MODELS.map(([v,l])=>`<option value="${v}"${state.insightModel===v?" selected":""}>${escI(l)}</option>`).join("");
+  h += `<div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">`
+    + `<button class="btn" data-insight-run>${state.insight?"🔄 重新分析":"🔍 產生 AI 摘要分析"}</button>`
+    + `<select id="insightModelSel" style="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 10px;font-size:13px;outline:none;cursor:pointer">${modelOpts}</select>`
+    + (anthKey()?`<span class="mut" style="font-size:11px;cursor:pointer" data-anth-clear>Anthropic token已設定（點此清除）</span>`:"")
+    + `</div><div class="insight-note">分析範圍：大盤（加權/櫃買指數、漲跌家數）、產業別資金強弱、次產業資金湧入/退出、個股即時資金集中與投信/外資連買。`
+    + `資料為盤中即時、約每 20 秒更新的快照（盤前無盤中集中資料，該段自動略過）。`
+    + `已開啟 adaptive thinking（模型先推理再輸出，命中率較高、略慢）。每次分析約消耗數千 token（費用計入你的 Anthropic 帳戶）。</div></div>`;
+  if (state.insightLoading){ h += `<div class="loading">Claude 分析中…（依資料量約需 10-30 秒）</div>`; return h; }
+  if (state.insightErr){ h += `<div class="card" style="font-size:13px">分析失敗：${escI(state.insightErr)}</div>`; return h; }
+  if (state.insight){
+    const u = state.insight.usage;
+    const tok = u ? `輸入 ${num((u.input_tokens||0)+(u.cache_read_input_tokens||0)+(u.cache_creation_input_tokens||0))}／輸出 ${num(u.output_tokens||0)} token` : "token數不明";
+    h += `<div class="insight-meta">生成時間 ${escI(state.insight.at)}（台灣）· 資料日 ${escI(state.insight.date||"—")} · 模型 ${escI(state.insight.model||state.insightModel)} · 本次 ${tok}</div>`;
+    h += `<div class="insight-card insight-md">${mdToHtml(state.insight.text)}</div>`;
+  }
+  return h;
+}
+function renderInsight(){
+  // v2 有 20 秒自動刷新會重繪 main：使用者正在輸入 token 時跳過重繪，避免清空輸入
+  const act=document.activeElement;
+  if(act&&act.id==="anthTok"&&act.value)return;
+  document.getElementById("main").innerHTML = insightHtml();
+  document.querySelectorAll("#main .scrollbox").forEach(b=>b.style.maxHeight="none");
+}
+document.addEventListener("click", e => {
+  const rn = e.target.closest("[data-insight-run]");
+  if (rn){ runInsight(); return; }
+  const sv2 = e.target.closest("[data-anth-save]");
+  if (sv2){ const i=document.getElementById("anthTok"); if(i&&i.value.trim()){ localStorage.setItem("anthropic_key", i.value.trim()); render(); } return; }
+  const cl2 = e.target.closest("[data-anth-clear]");
+  if (cl2){ localStorage.removeItem("anthropic_key"); render(); return; }
+});
+document.addEventListener("change", e => {
+  if (e.target.id === "insightModelSel"){ state.insightModel = e.target.value; localStorage.setItem("insight_model", e.target.value); }
+});
+document.addEventListener("keydown", e => {
+  if (e.key==="Enter" && e.target.id==="anthTok"){ const b=document.querySelector("[data-anth-save]"); if(b) b.click(); }
+});
+
 function render(){
   for(const k in T)delete T[k];
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===state.tab));
   // 美股 tab：隱藏加權/櫃買卡（其它 tab 照舊），主區改盤勢分析+速覽
   document.getElementById("mkcard").style.display=(state.tab==="us")?"none":"";
   if(state.tab==="us"){renderUS();return;}
+  // 摘要分析：未載入 live 也要能顯示 key 輸入 UI（比照 aetf 的安全通過方式）
+  if(state.tab==="insight"){if(state.live&&state.cl)renderMarket();renderInsight();return;}
   if(state.tab==="aetf"){if(state.live&&state.cl)renderMarket();renderAETF();return;}
   if(!state.live||!state.cl){document.getElementById("main").innerHTML='<div class="loading">載入中…</div>';return;}
   renderMarket();

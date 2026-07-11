@@ -1,12 +1,22 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-11（四站架構大重組後的狀態快照）
+最後更新：2026-07-12（摘要分析 AI tab 上線）
 
 ## 快速接手
 
-- 現況：v2 已收斂為「純即時看盤站＋跨站資料中樞」。前端只剩 5 個即時 tab；
+- 現況：v2 已收斂為「純即時看盤站＋跨站資料中樞」。前端為 5 個即時 tab＋1 個摘要分析 tab；
   晨報、主動ETF 的**前端**已拆到「新聞晨報」「盤後分析」兩個姊妹站，
   但兩者的**資料管線仍在本 repo**，下游站跨 repo 讀 `data/`。
+- 摘要分析 tab（2026-07-12 新增，第 6 個 tab）：前端直呼 Claude，框架與 postmkt 逐字同源
+  （callClaude adaptive thinking/effort medium/max_tokens 8000、mdToHtml、token 用量與
+  台灣時間顯示、Opus 4.8/Sonnet 5 模型切換）。insightGatherContext 彙整：大盤即時
+  （指數點/%/漲跌家數）、產業別資金前8強＋跌勢前5、資金湧入 flow.subs 前12、
+  個股資金集中 c10 前15（含投信/外資連買、法人強度）；盤前 flow=null 會註明略過。
+  SYS 為盤中即時資金流語境（同向共振、背離不呈現、大型股≤一半、20秒快照時效性、免責）。
+  特有防護：20秒自動刷新時若使用者正在輸入 token 則跳過重繪。驗收後已修一 bug：
+  大盤段原誤把 chgP（漲跌點數）當 % 顯示，已改「±X點/±Y%」雙顯示。
+  localStorage key `anthropic_key`/`insight_model` 與 postmkt、taiwan-stock-news
+  同 origin 共用（設一次三站通用）。
 - 未解問題：各投信 PCF 解析器是脆弱依賴（改版要手動修）；復華端點 `diff` 欄位含義未完全確認。
 - 改 `data/morning.json` 或 `data/aetf/*` 輸出格式前，**必讀**工作區
   `Harness/site-architecture-20260710.md`（下游讀取點清單），否則會弄壞姊妹站。
@@ -42,7 +52,7 @@
   └─ /live 端點：即時聚合 + 資金湧入/退出指標，stale-while-revalidate 快取15s
   └─ /uswatch、/usersync：美股自選清單同步（新聞晨報站沿用）
 
-【前端】純 HTML/JS 單檔（index.html），5 個純即時 tab
+【前端】純 HTML/JS 單檔（index.html），5 個純即時 tab＋1 個摘要分析 AI tab（前端直呼 Claude）
 ```
 
 **核心設計原則**：重且不常變的資料（分類表、歷史統計）留在 GitHub Python 夜間跑；
