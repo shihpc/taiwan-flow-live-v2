@@ -1,6 +1,6 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-12（摘要分析 AI tab 上線）
+最後更新：2026-07-12（摘要分析 AI tab 上線＋個股外連/雲端儲存）
 
 ## 快速接手
 
@@ -17,6 +17,12 @@
   大盤段原誤把 chgP（漲跌點數）當 % 顯示，已改「±X點/±Y%」雙顯示。
   localStorage key `anthropic_key`/`insight_model` 與 postmkt、taiwan-stock-news
   同 origin 共用（設一次三站通用）。
+- 個股外連＋雲端儲存（2026-07-12）：insight 渲染中個股代號自動變連結，外開 Yahoo 技術分析頁
+  （`linkifyStocks(html, knownSet)`，三站逐字一致、改動需三站同步）。分析結果自動存
+  **postmkt repo** `data/analyses/insight-live-YYYYMMDD.json`（當日陣列、單日上限10筆、
+  保留近3日），寫入用 localStorage `gh_token`（GitHub Fine-grained PAT，三站同 origin 共用、
+  未設靜默跳過）；tab 內「雲端歷史（近3日）」免 token 列本站檔、點擊展開（raw CDN 約 5 分快取）。
+  PAT 建法與維護細節見 postmkt `README.md`。
 - 未解問題：各投信 PCF 解析器是脆弱依賴（改版要手動修）；復華端點 `diff` 欄位含義未完全確認。
 - 改 `data/morning.json` 或 `data/aetf/*` 輸出格式前，**必讀**工作區
   `Harness/site-architecture-20260710.md`（下游讀取點清單），否則會弄壞姊妹站。

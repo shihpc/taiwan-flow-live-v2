@@ -59,6 +59,7 @@ td.ld{background:var(--down)!important;color:#fff}
 footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 /* 摘要分析（框架自 postmkt 搬入；:root 變數對照 v2：--card→--panel、--txt→--fg、--chip→--panel2、--muted→--dim） */
 .insight-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:10px 0;line-height:1.75;font-size:.92rem}
+.slink{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
 .insight-md h2{font-size:1.02rem;color:var(--accent);margin:16px 0 6px;font-weight:700}
 .insight-md h2:first-child{margin-top:0}
 .insight-md h3{font-size:.94rem;color:var(--fg);margin:12px 0 4px;font-weight:650}
@@ -681,6 +682,64 @@ const twNow = () => new Date().toLocaleString("sv-SE", { timeZone:"Asia/Taipei" 
 // HTML escape（postmkt 有全域 esc，v2 無同名工具 → 內聯同等實作）
 const escI = s => String(s==null?"":s).replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+// ---------- 雲端儲存共用（GitHub Contents API；三站逐字相同：postmkt /
+// taiwan-flow-live-v2 / taiwan-stock-news，修改請三站同步）----------
+// PAT 只存本機 localStorage（gh_token），只隨請求送給 GitHub API 本身，不進 repo、不傳第三方。
+const ghToken = () => localStorage.getItem("gh_token") || "";
+// 台北日 YYYYMMDD（檔名用）
+const twDay8 = () => twNow().slice(0, 10).replace(/-/g, "");
+// base64 ⇄ UTF-8：btoa/atob 只吃 Latin-1，中文要先過 TextEncoder/TextDecoder
+const b64EncodeUtf8 = s => { const b = new TextEncoder().encode(s); let r = ""; for (let i = 0; i < b.length; i += 0x8000) r += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(r); };
+const b64DecodeUtf8 = s => { const bin = atob(String(s || "").replace(/\s+/g, "")); const b = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i); return new TextDecoder().decode(b); };
+// 分析結果存 GitHub（shihpc/postmkt main 的 data/analyses/{fileName}）：
+// GET 現檔（404=新檔）→ 解出當日陣列 → push entry → 超過 10 筆丟最舊 → PUT（帶 sha 防蓋寫）。
+// 409/422（寫入衝突）→ 重新 GET 再試一次。回傳 {ok, err}；呼叫端自行決定怎麼呈現。
+async function ghSaveAnalysis(fileName, entry){
+  const token = ghToken();
+  if (!token) return { ok: false, err: "未設定 GitHub token" };
+  const api = "https://api.github.com/repos/shihpc/postmkt/contents/data/analyses/" + fileName;
+  const headers = { "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json" };
+  const attempt = async () => {
+    let sha = null, arr = [];
+    const g = await fetch(api + "?ref=main", { headers });
+    if (g.status === 200){
+      const j = await g.json();
+      sha = j.sha || null;
+      try { const cur = JSON.parse(b64DecodeUtf8(j.content || "")); if (Array.isArray(cur)) arr = cur; } catch (e) {}
+    } else if (g.status !== 404){
+      throw new Error("讀取現檔失敗 HTTP " + g.status);
+    }
+    arr.push(entry);
+    while (arr.length > 10) arr.shift();
+    const body = { message: "analysis: " + fileName.replace(/-\d{8}\.json$/, "") + " " + String(entry.at || "").slice(0, 16),
+      content: b64EncodeUtf8(JSON.stringify(arr)), branch: "main" };
+    if (sha) body.sha = sha;
+    const p = await fetch(api, { method: "PUT", headers, body: JSON.stringify(body) });
+    if (p.status === 409 || p.status === 422) return { conflict: true };
+    if (!p.ok){ const j = await p.json().catch(() => ({})); throw new Error("PUT HTTP " + p.status + (j.message ? "：" + j.message : "")); }
+    return { conflict: false };
+  };
+  try {
+    let r = await attempt();
+    if (r.conflict) r = await attempt();
+    if (r.conflict) throw new Error("寫入衝突（重試一次仍失敗）");
+    return { ok: true, err: null };
+  } catch (e) {
+    return { ok: false, err: String(e.message || e) };
+  }
+}
+// runInsight／runSummary 成功後自動存雲端：PAT 未設→靜默跳過；async 不阻塞渲染，
+// 存完把結果寫回 rec.cloud（"ok"／"err:原因"）再由呼叫端 rerender 補 meta 行。
+function saveAnalysisCloud(rec, kind, entry, rerender){
+  if (!ghToken()) return;
+  rec.cloud = "saving";
+  ghSaveAnalysis(kind + "-" + twDay8() + ".json", entry)
+    .then(r => { rec.cloud = r.ok ? "ok" : "err:" + (r.err || "未知錯誤"); rerender(); });
+}
+// ---------- 雲端儲存共用結束 ----------
+// 雲端儲存狀態 → meta 補充行（saving 中不顯示；成功/失敗各一行）
+const cloudLineHtml = c => c === "ok" ? `<div class="insight-meta">☁已存雲端（其他裝置約 5 分鐘後可見）</div>`
+  : (typeof c === "string" && c.indexOf("err:") === 0) ? `<div class="insight-meta">⚠雲端儲存失敗：${escI(c.slice(4))}</div>` : "";
 // 極簡 markdown→HTML（LLM 輸出用）：標題/清單/粗體/行內碼/表格/段落。夠用即可，不引入外部庫。
 function mdToHtml(md){
   const esc2 = s => s.replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
@@ -711,6 +770,39 @@ function mdToHtml(md){
     i++;
   }
   return html;
+}
+// 個股代號→Yahoo 技術分析連結（三站逐字相同：postmkt / taiwan-flow-live-v2 /
+// taiwan-stock-news，修改請三站同步）。在 mdToHtml 輸出後呼叫；用 tag 切分法只處理
+// 標籤外的文字片段，不破壞既有 HTML、也天然不會重包已在 <a> 內的文字。
+// 防誤連雙層：①候選 ∈ knownSet（頁面記憶體已知代號）②兜底＝代號後緊跟中文股名
+// （首字不在單位黑名單）。緊鄰英數/小數點、或後接 -、/（日期 2026-07-11）皆不連。
+function linkifyStocks(html, knownSet){
+  const BLACK = "年月日時分點張口億萬元筆家檔次倍天週股"; // 單位/時間字：後接這些多半不是股名
+  const CJK = ch => !!ch && /[一-鿿]/.test(ch);
+  const link = c => `<a href="https://tw.stock.yahoo.com/quote/${c}/technical-analysis" target="_blank" rel="noopener" class="slink">${c}</a>`;
+  return String(html||"").split(/(<[^>]*>)/).map(seg => {
+    if (seg.charAt(0) === "<") return seg;
+    return seg.replace(/(00[0-9]{3,4}[A-Z]?|[0-9]{4}[A-Z]?)/g, (m, _g, off) => {
+      const prev = seg.charAt(off-1), next = seg.charAt(off+m.length);
+      const n2 = seg.charAt(off+m.length+1), n3 = seg.charAt(off+m.length+2);
+      if (/[0-9A-Za-z.]/.test(prev) || /[0-9.\-\/]/.test(next)) return m;
+      if (CJK(next)){
+        // 兜底：後緊跟中文股名。首字在黑名單→不連（含集合內代號，防「2026年」誤連）；
+        // 「元」例外：元+中文次字視為元大/元太等股名，但「元大關」（千元大關）除外。
+        const ok = next === "元" ? (CJK(n2) && !(n2 === "大" && n3 === "關"))
+                                 : !BLACK.includes(next);
+        return ok ? link(m) : m;
+      }
+      return (knownSet && knownSet.has(m)) ? link(m) : m;
+    });
+  }).join("");
+}
+// 已知個股代號集合（linkifyStocks 主驗證用）：state.cl 分類表 key 即全部上市櫃代號；
+// 資料未載入時回空 Set（此時只剩兜底規則，行為仍安全）。
+function stockCodeSet(){
+  const set = new Set();
+  if (state.cl) for (const c in state.cl) set.add(String(c));
+  return set;
 }
 // 從 state.live 彙整成給 LLM 的精簡文字（不 dump 全量，只取關鍵訊號欄位）。
 // 日期對齊機制照 postmkt：primary=主資料日、各段用 dlabel 標注自己的資料日，
@@ -821,6 +913,9 @@ async function runInsight(){
     const USER = `主資料日：${g.primary}\n各段資料日：${JSON.stringify(g.dates)}\n（凡標注與主資料日不同的段落僅可單獨解讀，勿跨日比較）\n\n${g.text}`;
     const res = await callClaude(anthKey(), state.insightModel, SYS, USER);
     state.insight = { text: res.text, usage: res.usage, at: twNow(), date: g.primary, model: state.insightModel };
+    saveAnalysisCloud(state.insight, "insight-live",
+      { at: state.insight.at, model: state.insight.model, text: state.insight.text, usage: state.insight.usage, date: state.insight.date },
+      () => { if (state.tab === "insight") renderInsight(); });
   }catch(e){
     state.insightErr = String(e.message || e);
   }
@@ -836,11 +931,17 @@ function insightHtml(){
       + `<div style="display:flex;gap:6px;margin-top:8px;align-items:center"><input id="anthTok" type="password" placeholder="貼上 Anthropic API token（sk-ant-…）" style="${inStyle}">`
       + `<button class="btn" data-anth-save>儲存</button></div></div>`;
   }
+  if (!ghToken()){
+    h += `<div class="card" style="font-size:13px;line-height:1.6">選填：GitHub Fine-grained PAT（只勾 postmkt repo、Contents Read/write）→ 分析結果自動存雲端跨裝置讀取；不設定則只存本機。讀取歷史不需要 token。`
+      + `<div style="display:flex;gap:6px;margin-top:8px;align-items:center"><input id="ghTok" type="password" placeholder="貼上 GitHub PAT（github_pat_…）" style="${inStyle}">`
+      + `<button class="btn" data-gh-save>儲存</button></div></div>`;
+  }
   const modelOpts = INSIGHT_MODELS.map(([v,l])=>`<option value="${v}"${state.insightModel===v?" selected":""}>${escI(l)}</option>`).join("");
   h += `<div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">`
     + `<button class="btn" data-insight-run>${state.insight?"🔄 重新分析":"🔍 產生 AI 摘要分析"}</button>`
     + `<select id="insightModelSel" style="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 10px;font-size:13px;outline:none;cursor:pointer">${modelOpts}</select>`
     + (anthKey()?`<span class="mut" style="font-size:11px;cursor:pointer" data-anth-clear>Anthropic token已設定（點此清除）</span>`:"")
+    + (ghToken()?`<span class="mut" style="font-size:11px;cursor:pointer" data-gh-clear>GitHub token已設定（點此清除）</span>`:"")
     + `</div><div class="insight-note">分析範圍：大盤（加權/櫃買指數、漲跌家數）、產業別資金強弱、次產業資金湧入/退出、個股即時資金集中與投信/外資連買。`
     + `資料為盤中即時、約每 20 秒更新的快照（盤前無盤中集中資料，該段自動略過）。`
     + `已開啟 adaptive thinking（模型先推理再輸出，命中率較高、略慢）。每次分析約消耗數千 token（費用計入你的 Anthropic 帳戶）。</div></div>`;
@@ -850,14 +951,56 @@ function insightHtml(){
     const u = state.insight.usage;
     const tok = u ? `輸入 ${num((u.input_tokens||0)+(u.cache_read_input_tokens||0)+(u.cache_creation_input_tokens||0))}／輸出 ${num(u.output_tokens||0)} token` : "token數不明";
     h += `<div class="insight-meta">生成時間 ${escI(state.insight.at)}（台灣）· 資料日 ${escI(state.insight.date||"—")} · 模型 ${escI(state.insight.model||state.insightModel)} · 本次 ${tok}</div>`;
-    h += `<div class="insight-card insight-md">${mdToHtml(state.insight.text)}</div>`;
+    h += cloudLineHtml(state.insight.cloud);
+    h += `<div class="insight-card insight-md">${linkifyStocks(mdToHtml(state.insight.text), stockCodeSet())}</div>`;
+  }
+  h += cloudHistSectionHtml();
+  return h;
+}
+// ---------- 雲端歷史（近3日；只列本站 insight-live，讀取免 token） ----------
+const CLOUD_RAW = "https://raw.githubusercontent.com/shihpc/postmkt/main/data/analyses/";
+const CLOUD_KIND = "insight-live";
+// 近 n 個台北日 YYYYMMDD（今日在前；休市日檔案不存在→404 靜默略過）
+const twDayList = n => Array.from({length:n}, (_,i) =>
+  new Date(Date.now()-i*864e5).toLocaleDateString("sv-SE",{timeZone:"Asia/Taipei"}).replace(/-/g,""));
+let CLOUD_HIST; // undefined=未載入、"loading"=載入中、陣列=完成
+let cloudOpen = null;
+function cloudLoadHist(){
+  CLOUD_HIST = "loading";
+  const files = twDayList(3).map(d => ({ file:`${CLOUD_KIND}-${d}.json`, day:d }));
+  Promise.all(files.map(f => fetch(CLOUD_RAW + f.file + "?t=" + Date.now())
+      .then(r => r.ok ? r.json() : null).catch(() => null)))
+    .then(res => {
+      const items = [];
+      res.forEach((arr,i) => { if (Array.isArray(arr)) arr.forEach(e => items.push({ ...files[i], entry:e })); });
+      items.sort((a,b) => String(b.entry.at||"").localeCompare(String(a.entry.at||"")));
+      CLOUD_HIST = items;
+    })
+    .then(() => { if (state.tab === "insight") renderInsight(); });
+}
+function cloudHistSectionHtml(){
+  let h = `<div class="crumb"><b>雲端歷史（近3日）</b> <span class="mut">本站摘要，存於 GitHub postmkt repo · 點列展開閱讀</span></div>`;
+  if (CLOUD_HIST === undefined){ cloudLoadHist(); return h + `<div class="loading">載入雲端歷史…</div>`; }
+  if (CLOUD_HIST === "loading") return h + `<div class="loading">載入雲端歷史…</div>`;
+  if (!CLOUD_HIST.length) return h + `<div class="loading">尚無雲端儲存（設定 GitHub token 後自動儲存）</div>`;
+  h += `<div class="card" style="padding:8px 12px">` + CLOUD_HIST.map((it,i) => {
+    const dd = it.day.slice(0,4)+"-"+it.day.slice(4,6)+"-"+it.day.slice(6);
+    return `<div class="clk" data-cloud-open="${i}" style="padding:4px 0${cloudOpen===i?";font-weight:700":""}">`
+      + `${dd} 即時摘要 <span class="mut" style="font-size:11px">${escI(String(it.entry.at||"").slice(11,16))}${it.entry.model?` · ${escI(it.entry.model)}`:""}</span></div>`;
+  }).join("") + `</div>`;
+  const cur = cloudOpen != null ? CLOUD_HIST[cloudOpen] : null;
+  if (cur){
+    const u = cur.entry.usage;
+    const tok = u ? `輸入 ${num((u.input_tokens||0)+(u.cache_read_input_tokens||0)+(u.cache_creation_input_tokens||0))}／輸出 ${num(u.output_tokens||0)} token` : "token數不明";
+    h += `<div class="insight-meta">雲端 即時摘要 · 生成時間 ${escI(cur.entry.at||"")}（台灣）· 資料日 ${escI(cur.entry.date||"—")} · 模型 ${escI(cur.entry.model||"—")} · ${tok}</div>`;
+    h += `<div class="insight-card insight-md">${linkifyStocks(mdToHtml(cur.entry.text||""), stockCodeSet())}</div>`;
   }
   return h;
 }
 function renderInsight(){
   // v2 有 20 秒自動刷新會重繪 main：使用者正在輸入 token 時跳過重繪，避免清空輸入
   const act=document.activeElement;
-  if(act&&act.id==="anthTok"&&act.value)return;
+  if(act&&(act.id==="anthTok"||act.id==="ghTok")&&act.value)return;
   document.getElementById("main").innerHTML = insightHtml();
   document.querySelectorAll("#main .scrollbox").forEach(b=>b.style.maxHeight="none");
 }
@@ -868,12 +1011,19 @@ document.addEventListener("click", e => {
   if (sv2){ const i=document.getElementById("anthTok"); if(i&&i.value.trim()){ localStorage.setItem("anthropic_key", i.value.trim()); render(); } return; }
   const cl2 = e.target.closest("[data-anth-clear]");
   if (cl2){ localStorage.removeItem("anthropic_key"); render(); return; }
+  const gs2 = e.target.closest("[data-gh-save]");
+  if (gs2){ const i=document.getElementById("ghTok"); if(i&&i.value.trim()){ localStorage.setItem("gh_token", i.value.trim()); render(); } return; }
+  const gc2 = e.target.closest("[data-gh-clear]");
+  if (gc2){ localStorage.removeItem("gh_token"); render(); return; }
+  const co2 = e.target.closest("[data-cloud-open]");
+  if (co2){ const i=+co2.dataset.cloudOpen; cloudOpen = cloudOpen===i?null:i; renderInsight(); return; }
 });
 document.addEventListener("change", e => {
   if (e.target.id === "insightModelSel"){ state.insightModel = e.target.value; localStorage.setItem("insight_model", e.target.value); }
 });
 document.addEventListener("keydown", e => {
   if (e.key==="Enter" && e.target.id==="anthTok"){ const b=document.querySelector("[data-anth-save]"); if(b) b.click(); }
+  if (e.key==="Enter" && e.target.id==="ghTok"){ const b=document.querySelector("[data-gh-save]"); if(b) b.click(); }
 });
 
 function render(){
