@@ -877,21 +877,29 @@ function insightGatherContext(){
 }
 // 打開 adaptive thinking：Opus 4.8 省略 thinking=不思考，故明確指定；effort medium 平衡
 // 深度與延遲；只取 text block(thinking display 預設 omitted，不渲染思考)。max_tokens 拉高
-// 給思考+輸出留空間。
-async function callClaude(key, model, system, userMsg){
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST",
-    headers:{ "content-type":"application/json", "x-api-key":key,
-      "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" },
-    body: JSON.stringify({ model, max_tokens:8000,
-      thinking:{ type:"adaptive" }, output_config:{ effort:"medium" },
-      system, messages:[{role:"user",content:userMsg}] })
-  });
-  const j = await r.json();
-  if (!r.ok || (j.type==="error")) throw new Error((j.error && j.error.message) || ("HTTP "+r.status));
-  if (j.stop_reason === "refusal") throw new Error("模型基於安全政策婉拒本次請求");
-  const text = (j.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
-  return { text, usage: j.usage || null };
+// 給思考+輸出留空間。signal 為可選 AbortSignal（中斷用），不傳＝行為不變；
+// 中斷時把 AbortError 轉成好讀的「已手動中斷」。
+// 【三站同步】本函式在 postmkt／taiwan-flow-live-v2／taiwan-stock-news 逐字一致，改動需同步三站。
+async function callClaude(key, model, system, userMsg, signal){
+  try{
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method:"POST",
+      headers:{ "content-type":"application/json", "x-api-key":key,
+        "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" },
+      body: JSON.stringify({ model, max_tokens:8000,
+        thinking:{ type:"adaptive" }, output_config:{ effort:"medium" },
+        system, messages:[{role:"user",content:userMsg}] }),
+      signal
+    });
+    const j = await r.json();
+    if (!r.ok || (j.type==="error")) throw new Error((j.error && j.error.message) || ("HTTP "+r.status));
+    if (j.stop_reason === "refusal") throw new Error("模型基於安全政策婉拒本次請求");
+    const text = (j.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    return { text, usage: j.usage || null };
+  }catch(e){
+    if (e && e.name === "AbortError") throw new Error("已手動中斷");
+    throw e;
+  }
 }
 async function runInsight(){
   if (!anthKey()){ alert("請先輸入並儲存 Anthropic API token"); return; }
