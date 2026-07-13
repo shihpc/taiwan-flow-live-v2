@@ -20,6 +20,7 @@
 from __future__ import annotations
 import json
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -109,6 +110,14 @@ def main():
     members = {k: v for k, v in members.items() if len(v) >= SUB_MIN_MEM}
 
     # 收集最近 NDAYS 個交易日（新→舊），每日 {c:(amt,close,high,low)}
+    def day_prices(ds: str) -> dict:
+        m = {}
+        for r in fin.api_get("TaiwanStockPrice", start_date=ds, end_date=ds):
+            c = str(r.get("stock_id") or "")
+            if c in keep:
+                m[c] = (fv(r.get("Trading_money")) or 0, fv(r.get("close")), fv(r.get("max")), fv(r.get("min")))
+        return m
+
     days, pd = [], []
     d = date.today()
     probe = 0
@@ -118,19 +127,56 @@ def main():
         probe += 1
         if date.fromisoformat(ds).weekday() >= 5:
             continue
-        rows = fin.api_get("TaiwanStockPrice", start_date=ds, end_date=ds)
-        if not rows:
+        m = day_prices(ds)
+        if not m:
             continue
-        m = {}
-        for r in rows:
-            c = str(r.get("stock_id") or "")
-            if c in keep:
-                m[c] = (fv(r.get("Trading_money")) or 0, fv(r.get("close")), fv(r.get("max")), fv(r.get("min")))
         days.append(ds)
         pd.append(m)
         print(f"price {ds} ok ({len(m)})", flush=True)
     if len(days) < NDAYS:
         raise RuntimeError(f"僅找到 {len(days)} 個交易日（需 {NDAYS}）")
+
+    # freshness 重試（2026-07-14 依審計新增）：三大法人買賣超官方 20:00 台北更新、
+    # FinMind 入庫時間不定，排程 20:41 起跑仍可能撲空（法人最新資料日 < 今日），
+    # 導致連買日數整組往前錯一天。若今天是週一~五且最新資料不含今日 → 每 10 分
+    # 重試、最多 40 分；逾時照原邏輯繼續（連買日數少算今日一天，但不中斷產出）。
+    # 假日考量：今天可能是「平日的休市日」（國定假日），資料日永遠不會推進——
+    # 重試僅在週一~五啟用且逾時必定放行，最多多等 40 分、不會無限空等；
+    # 週末不啟用（抓回最近日=上一交易日屬正常，不空等）。
+    today_iso = date.today().isoformat()
+    if date.today().weekday() < 5:
+        deadline = time.time() + 40 * 60   # 價格＋法人兩項共用同一個 40 分預算
+        while True:
+            # 檢查呼叫是新增的額外查詢，任何暫時性失敗只視為「未就緒」續等，
+            # 不讓 freshness 機制反而引入新的崩潰路徑
+            price_ok = days[0] == today_iso
+            try:
+                inst_ok = price_ok and bool(fin.api_get("TaiwanStockInstitutionalInvestorsBuySell",
+                                                        start_date=today_iso, end_date=today_iso))
+            except Exception as e:
+                print(f"freshness 檢查失敗（視為未就緒）：{e}", flush=True)
+                inst_ok = False
+            if inst_ok:
+                break
+            if time.time() >= deadline:
+                print(f"freshness 重試逾時（40 分），照原邏輯繼續：最新價格日 {days[0]}"
+                      f"{'、法人買賣超未入庫（連買日數少算今日）' if price_ok else ''}", flush=True)
+                break
+            miss = "價格" if not price_ok else "法人買賣超"
+            print(f"今日 {today_iso} 的{miss}資料尚未入庫，10 分鐘後重試…", flush=True)
+            time.sleep(600)
+            if not price_ok:
+                try:
+                    m = day_prices(today_iso)
+                except Exception as e:
+                    print(f"今日價格重查失敗（下一輪再試）：{e}", flush=True)
+                    m = {}
+                if m:
+                    # 今日價格已入庫 → 插到最前（days/pd 均為新→舊；後續各指標都以
+                    # 索引取相對日，前面多一天不影響既有窗口計算）
+                    days.insert(0, today_iso)
+                    pd.insert(0, m)
+                    print(f"price {today_iso} ok ({len(m)})", flush=True)
 
     # 投信/外資近 3 交易日買超日數 + 最近一日淨買股數（法人強度用）
     it, fi, its, net0 = {}, {}, {}, {}
