@@ -31,6 +31,56 @@ ADIR = ROOT / "data" / "aetf"
 NOISE_SH = 1000          # 股
 NO_UNITS_ETFS = {"00981A", "00403A", "00400A"}   # 無 units → 申贖比由持股股數比中位數推估
 NO_SHARES_ETFS = {"00400A"}   # 國泰：連個股股數都不揭露，只有權重，股數用 fill_implied_shares() 反推
+# 這三檔 src_date 語意為「次一營業日 T+1」（群益 buyback pcf.date1、野村 CPcfdate 皆為次一交易日），
+# 其餘 5 檔（統一 00981A/00403A、復華 00991A、富邦 00405A、國泰 00400A）為持股基準日 T。
+# → A1：把 T+1 折回 T（減一台股交易日），8 檔才落同一持股基準日。
+TPLUS1_ETFS = {"00982A", "00992A", "00980A"}
+
+
+def trading_calendar(days_back: int = 45) -> list:
+    """FinMind TAIEX 交易日曆（升冪 YYYY/MM/DD）；無 token/失敗回 []（改用週末退算）。"""
+    try:
+        import fin
+        from datetime import date, timedelta
+        rows = fin.api_get("TaiwanStockPrice", data_id="TAIEX",
+                           start_date=(date.today() - timedelta(days=days_back)).isoformat())
+        return sorted({str(r["date"]).replace("-", "/") for r in rows if r.get("date")})
+    except Exception as e:
+        print(f"trading_calendar 不可用（{e}）→ T+1 折算改用週末退算（無法處理國定假日）", flush=True)
+        return []
+
+
+def prev_trading_day(date_str: str, trading_days: list) -> str:
+    """回 date_str 的前一台股交易日（YYYY/MM/DD）。
+    優先用 trading_days 日曆（正確處理週末＋連假）；日曆缺該區間時退回減一天跳週末。"""
+    from datetime import date as _date, timedelta
+    ds = (date_str or "").replace("-", "/")
+    earlier = [d for d in trading_days if d < ds]
+    if earlier:
+        return earlier[-1]
+    try:
+        d = _date.fromisoformat(ds.replace("/", "-")) - timedelta(days=1)
+    except ValueError:
+        return ds
+    while d.weekday() >= 5:   # 5=週六 6=週日（無日曆時只能跳週末，國定連假無法處理）
+        d -= timedelta(days=1)
+    return d.strftime("%Y/%m/%d")
+
+
+def fold_tplus1(by: dict, trading_days: list) -> None:
+    """三檔 T+1 語意 ETF 的 src_date 折回持股基準日（減一交易日），原地改 by。
+    key 與 entry['src_date'] 同步折算，下游配對/聚合/generated_dates 一致。"""
+    for code in TPLUS1_ETFS:
+        snaps = by.get(code)
+        if not snaps:
+            continue
+        folded = {}
+        for sd in sorted(snaps):          # 升冪：同折算日時較新 run（原始日較大者）覆蓋
+            e = snaps[sd]
+            nd = prev_trading_day(sd, trading_days)
+            e["src_date"] = nd
+            folded[nd] = e
+        by[code] = folded
 
 
 def fill_implied_shares(snap: dict, closes: dict) -> None:
@@ -134,30 +184,43 @@ def prv_date_of(e):
 
 def main():
     by = load_snapshots()
+    # A1：先把三檔 T+1 語意 ETF 的 src_date 折回持股基準日，之後配對/聚合都用折算日
+    cal = trading_calendar()
+    fold_tplus1(by, cal)
     cl = json.loads((ROOT / "data" / "classify.json").read_text(encoding="utf-8"))["map"]
     out = {"etfs": {}, "stocks": {}, "subs": {}}
     latest_dates = []
     closes = {}
-    # 先決定要用哪天的收盤價（最新 src_date）
-    # 收盤價：從最新往回找有交易資料的一天（野村/群益 PCF 日=次一營業日，可能還沒開盤）
+    # 先決定要用哪天的收盤價（最新基準日；折算後即真實交易日，收盤價必存在）
     all_dates = sorted({d for m in by.values() for d in m})
     for d in reversed(all_dates[-4:]):
         closes = close_map(d)
         if closes:
             break
 
+    # 每檔取最後兩個揭露日 → d1=最新基準日；主基準日=各檔 d1 的最大值（最新交易日）
+    prepared = {}
     for code, snaps in by.items():
         dates = sorted(snaps)
         if len(dates) < 2:
             print(f"{code}: 僅 {len(dates)} 個揭露日，跳過", flush=True)
             continue
-        d0, d1 = dates[-2], dates[-1]
+        prepared[code] = (dates[-2], dates[-1], snaps)
+    primary = max((d1 for (_, d1, _) in prepared.values()), default=None)
+
+    laggards = []
+    for code, (d0, d1, snaps) in prepared.items():
         if code in NO_SHARES_ETFS:
             fill_implied_shares(snaps[d0], closes)
             fill_implied_shares(snaps[d1], closes)
         rows, summary = diff_one(code, snaps[d1], snaps[d0], closes)
         summary["d0"], summary["d1"] = d0, d1
-        out["etfs"][code] = summary
+        out["etfs"][code] = summary          # 每檔明細照存（前端總覽逐檔顯示）
+        # A4 誠實分組：基準日落後主基準日的檔不併入 stocks/subs 聚合，另列 laggards
+        if d1 != primary:
+            laggards.append({"etf": code, "src_date": d1})
+            print(f"{code}: 基準日 {d1} 落後主基準日 {primary}，列 laggard 不併入聚合", flush=True)
+            continue
         latest_dates.append(d1)
         for r in rows:
             zh = r["zh"]
@@ -184,11 +247,13 @@ def main():
     for s in subs:
         s["val"] = round(s["val"])
         s["detail"].sort(key=lambda x: -abs(x["val"] or 0))
-    final = {"generated_dates": sorted(set(latest_dates)), "etfs": out["etfs"],
-             "stocks": stocks, "subs": subs}
+    final = {"generated_dates": sorted(set(latest_dates)), "primary_date": primary,
+             "laggards": sorted(laggards, key=lambda x: x["etf"]),
+             "etfs": out["etfs"], "stocks": stocks, "subs": subs}
     (ADIR / "diff.json").write_text(json.dumps(final, ensure_ascii=False, separators=(",", ":")),
                                     encoding="utf-8")
-    print(f"diff.json：{len(out['etfs'])} 檔ETF、個股異動 {len(stocks)}、次產業 {len(subs)}")
+    print(f"diff.json：主基準日 {primary}、聚合 {len(latest_dates)} 檔、落後 {len(laggards)} 檔、"
+          f"個股異動 {len(stocks)}、次產業 {len(subs)}")
 
 
 if __name__ == "__main__":

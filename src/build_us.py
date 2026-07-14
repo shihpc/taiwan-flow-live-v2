@@ -204,8 +204,9 @@ def main():
             print(f"{tic} {m['date']} {m['chg']:+.2f}%", flush=True)
         groups.append({"g": gname, "rows": rows})
     from datetime import datetime, timezone
+    TPE = timezone(timedelta(hours=8))
     out = {"date": us_date, "fx": round(fx, 3) if fx else None,
-           "generated_at": datetime.now(timezone.utc).isoformat(),
+           "generated_at": datetime.now(TPE).isoformat(),   # P4：統一台北 ISO(+08:00)
            "brief": brief(groups, us_date), "session": session_brief(us_date) if us_date else "",
            "groups": groups}
     OUT.write_text(json.dumps(out, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")

@@ -639,9 +639,12 @@ async function renderAETF(){
     html+=`<div class="loading">主動加減碼需累積 2 個揭露日的快照，資料累積中（最快下一個交易日 18:30 後生效）。</div>`;
     main.innerHTML=html;return;
   }
-  // ② 進出個股（含各ETF張數明細）
-  const dates=(diff.generated_dates||[]).join("、");
-  html+=`<div class="crumb"><b>進出個股</b>（主動加減碼，${dates}）</div>`;
+  // ② 進出個股（含各ETF張數明細）— 聚合僅納入主基準日的檔，落後檔另列警示
+  const primaryD=diff.primary_date||(diff.generated_dates||[]).join("、");
+  const lag=diff.laggards||[];
+  html+=`<div class="crumb"><b>進出個股</b>（主動加減碼 · 基準日 ${primaryD}）</div>`;
+  if(lag.length)html+=`<div class="note">⚠ 下列 ETF 資料日落後、未併入本頁聚合：`+
+    lag.map(l=>`${l.etf}(${(l.src_date||"").slice(5)})`).join("、")+`</div>`;
   html+=tbl([
     {h:"個股",cls:"l",w:110,f:r=>`${yahoo(r.c)}<span class="nm">${r.n||""}</span>`},
     {h:"合計",w:78,f:r=>zh2(r.zh)},

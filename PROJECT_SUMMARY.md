@@ -23,6 +23,13 @@
   保留近3日），寫入用 localStorage `gh_token`（GitHub Fine-grained PAT，三站同 origin 共用、
   未設靜默跳過）；tab 內「雲端歷史（近3日）」免 token 列本站檔、點擊展開（raw CDN 約 5 分快取）。
   PAT 建法與維護細節見 postmkt `README.md`。
+- 日期修正批次（2026-07-14）：①主動ETF 三檔 T+1（群益00982A/00992A、野村00980A）的 src_date
+  在 build_aetf_diff.py 折回持股基準日（`fold_tplus1`/`prev_trading_day`，用 FinMind TAIEX 日曆，
+  正確處理連假；07/10 為非交易日已驗）→ 8 檔同基準、diff.json 加 `primary_date`/`laggards`。
+  ②build_aetf.py 抓取成功但 src_date 未前進標 `not_advanced`。③aetf.yml 加補抓班 21:37 台北
+  （同日重跑覆蓋同名日檔，冪等）。④build_morning.py chips 加 `aetf_date`（P1 也把 :68/:220 的
+  date.today() 改台北日）。⑤build_us.py generated_at 改台北 ISO。**news 站晨報顯示端若要帶出
+  aetf_date 需另在 taiwan-stock-news 改（本批未動該 repo）**。前端 renderAETF 聚合表已帶主基準日＋落後檔警示。
 - 未解問題：各投信 PCF 解析器是脆弱依賴（改版要手動修）；復華端點 `diff` 欄位含義未完全確認。
 - 改 `data/morning.json` 或 `data/aetf/*` 輸出格式前，**必讀**工作區
   `Harness/site-architecture-20260710.md`（下游讀取點清單），否則會弄壞姊妹站。

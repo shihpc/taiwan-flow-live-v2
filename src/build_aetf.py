@@ -245,9 +245,17 @@ def main():
                 d = fn()
                 d["name"] = name
                 d["twse_aum_yi"] = grab_twse_aum(code)
+                # A2 未更新偵測：抓取成功但 src_date 未較上一份快照前進 → 標 not_advanced
+                # （投信 16:30 常回前一日資料，成功但沒更新；下游/補抓班據此辨識）
+                pe = prev.get(code) or {}
+                ps = str(pe.get("src_date") or "").replace("-", "/")
+                cs = str(d.get("src_date") or "").replace("-", "/")
+                if ps and cs and cs <= ps:
+                    d["not_advanced"] = True
                 out["etfs"][code] = d
                 print(f"{code} {name}: {len(d['stocks'])}檔 src={d.get('src_date')} "
-                      f"units={d.get('units')} aum={d.get('aum')} twse_aum={d.get('twse_aum_yi')}億", flush=True)
+                      f"units={d.get('units')} aum={d.get('aum')} twse_aum={d.get('twse_aum_yi')}億"
+                      f"{' [未更新]' if d.get('not_advanced') else ''}", flush=True)
                 last = None
                 break
             except Exception as e:

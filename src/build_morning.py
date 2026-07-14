@@ -41,7 +41,7 @@ def fv(v):
 
 def taiex_last2():
     rows = fin.api_get("TaiwanStockPrice", data_id="TAIEX",
-                       start_date=(date.today() - timedelta(days=10)).isoformat())
+                       start_date=(datetime.now(TPE).date() - timedelta(days=10)).isoformat())
     rows = [r for r in rows if fv(r.get("close"))]
     return rows[-2:] if len(rows) >= 2 else rows
 
@@ -50,7 +50,7 @@ def night_gap(spot_close: float):
     """夜盤(標記次一交易日)近月合約自身漲跌點數（spread，即FinMind回傳的夜盤自身漲跌），
     非夜盤收盤減現貨收盤（後者混雜了現貨與期貨的價差，不是市場常用的「夜盤漲跌」定義）。"""
     rows = fin.api_get("TaiwanFuturesDaily", data_id="TX",
-                       start_date=(date.today() - timedelta(days=5)).isoformat())
+                       start_date=(datetime.now(TPE).date() - timedelta(days=5)).isoformat())
     am = [r for r in rows if r.get("trading_session") == "after_market"
           and "/" not in str(r.get("contract_date", "")) and fv(r.get("close"))]
     if not am:
@@ -65,7 +65,7 @@ def night_gap(spot_close: float):
 
 
 def exdiv_today(cl: dict, a5map: dict):
-    today = date.today().isoformat()
+    today = datetime.now(TPE).date().isoformat()   # P1：台北日（UTC runner 的 datetime.now(TPE).date() 會早一天）
     try:
         rows = fin.api_get("TaiwanStockDividendResult", start_date=today, end_date=today)
     except Exception:
@@ -84,7 +84,7 @@ def exdiv_today(cl: dict, a5map: dict):
 
 def inst_total():
     rows = fin.api_get("TaiwanStockTotalInstitutionalInvestors",
-                       start_date=(date.today() - timedelta(days=7)).isoformat())
+                       start_date=(datetime.now(TPE).date() - timedelta(days=7)).isoformat())
     if not rows:
         return None
     last = max(r["date"] for r in rows)
@@ -107,7 +107,7 @@ def overnight_news(targets: list, cl: dict, since_dt: datetime):
     週一視窗涵蓋五六日一、連假比照延伸（上限8天防呆）。"""
     seen_t, seen_u, out = set(), set(), []
     days, d = [], since_dt.date()
-    while d <= date.today() and len(days) < 8:
+    while d <= datetime.now(TPE).date() and len(days) < 8:
         days.append(d.isoformat())
         d += timedelta(days=1)
     cutoff = since_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -178,6 +178,8 @@ def main():
     it3_sell = [{"c": c, "n": cl.get(c, {}).get("n", "")} for c in it3_sell]
     aetf_lines = []
     co_buy = []
+    # A5：主動ETF 主基準日（供晨報顯示端帶出資料日；折算後 8 檔同基準日）
+    aetf_date = (diff.get("primary_date") or (diff.get("generated_dates") or [None])[-1]) if diff else None
     if diff:
         st = diff.get("stocks") or []
         co_buy = [s for s in st if sum(1 for v in (s.get("by") or {}).values() if v > 0) >= 2][:3]
@@ -212,18 +214,19 @@ def main():
             tg.append((c, "權值")); used.add(c)
     # 視窗起點：上一個有效交易日 14:00（收盤後）。TAIEX 最近收盤日即上一交易日，
     # 週末/連假自動跳過非交易日；TAIEX 取不到時退回 3 天前保底。
-    prev_trade = t2[-1]["date"] if t2 else (date.today() - timedelta(days=3)).isoformat()
+    prev_trade = t2[-1]["date"] if t2 else (datetime.now(TPE).date() - timedelta(days=3)).isoformat()
     since_dt = datetime.strptime(str(prev_trade)[:10], "%Y-%m-%d").replace(hour=14)
     news = overnight_news(tg[:12], cl, since_dt)
 
-    out = {"date": date.today().isoformat(),
+    out = {"date": datetime.now(TPE).date().isoformat(),   # P1：台北日
            "generated_at": datetime.now(TPE).isoformat(),
            "gap": gap,
            "spot": {"close": spot, "chg_pct": spot_chg, "date": t2[-1]["date"] if t2 else None},
            "exdiv": exdiv_today(cl, a5map),
            "recap": {"up_subs": up_subs[:8], "down_subs": dn_subs[:8], "y1_up": y1n, "y1_dn": y1d,
                      "baseline_date": bl.get("date")},
-           "chips": {"inst": inst, "it3": it3, "it3_sell": it3_sell, "aetf": aetf_lines},
+           "chips": {"inst": inst, "it3": it3, "it3_sell": it3_sell, "aetf": aetf_lines,
+                     "aetf_date": aetf_date},
            "signals": {"cont_subs": cont, "new_subs": [s for s in up_subs if s not in cont][:6],
                        "dual": dual},
            "news": news}
