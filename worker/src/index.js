@@ -356,7 +356,7 @@ function computeFlow(cl, items, baseline, frames) {
 
 // ---- FinMind 哨兵（傍晚探測盤後資料落地 → GitHub workflow 兩段式觸發）----
 // 目的：FinMind 盤後資料（法人買賣超/外資持股/融資券/當沖）落地時間不定，
-//   固定 cron 只能保守晚跑。哨兵在台北平日 19:00–23:00 每 5 分探一次（單檔 2330、
+//   固定 cron 只能保守晚跑。哨兵在台北平日 17:00–23:00 每 5 分探一次（單檔 2330、
 //   單日，最便宜的請求），哪個訊號落地就立刻 workflow_dispatch 對應 repo，
 //   讓「盤後法人動態」與「盤後分析」在資料可得後 10 分鐘內更新。
 // 備援（雙觸發機制）：taiwan-flows daily.yml（台北 21:19）與 postmkt build.yml
@@ -385,9 +385,18 @@ export function taipeiParts(d = new Date()) {
   return { date: t.toISOString().slice(0, 10), hour: t.getUTCHours(),
     minute: t.getUTCMinutes(), dow: t.getUTCDay() };
 }
-// 這次 cron 醒來該做什麼：平日 19:00–22:59 台北 = 哨兵窗口（每 5 分一輪探測，
-// 其餘分鐘 idle 不耗資源）；窗口外維持原本的盤中 frame 工作。週六日永不進哨兵。
-export function scheduledRole(tp) {
+// 這次 cron 醒來該做什麼（依台北時間＋觸發它的 cron 字串分流）：
+// - news：每天（含週末）06:07–22:07 每小時 :07 → dispatch taiwan-stock-news。
+//   例外：盤中 frame cron（* 1-5 * * 1-5）在 9:07–13:07 也會於 :07 醒來（兩條 cron
+//   同分重疊、各發一個 scheduled 事件），frame cron 醒來的那個要照存 frame，
+//   否則會重複 dispatch news 且掉一格分鐘 frame——所以用 event.cron 排除它。
+//   17:07–22:07 落在哨兵窗口內但 7 不是 %5==0（原本是 idle），改判 news 不衝突。
+// - sentinel：平日 17:00–22:59 台北每 5 分一輪盤後落地探測，其餘分鐘 idle。
+// - frame：其餘（實際上只有盤中 cron 會打到）。週六日永不進哨兵。
+export const FRAME_CRON = "* 1-5 * * 1-5";   // 需與 wrangler.toml crons[0] 完全一致
+export function scheduledRole(tp, cron) {
+  if (tp.minute === 7 && tp.hour >= 6 && tp.hour <= 22 && cron !== FRAME_CRON)
+    return "news";
   const weekday = tp.dow >= 1 && tp.dow <= 5;
   if (weekday && tp.hour >= 17 && tp.hour < 23)
     return tp.minute % 5 === 0 ? "sentinel" : "idle";
@@ -453,6 +462,19 @@ async function runSentinel(env, tp) {
   }
 }
 
+// ---- 新聞定點班（每天台北 06:07–22:07 每小時 :07 → dispatch taiwan-stock-news）----
+// 與哨兵不同：新聞週末也收（抓的是日曆日新聞，不分交易日），且採定點制——
+// 每個時點只有新聞 cron 一次醒來，不需 KV 去重。dispatch 失敗只 log 不重試：
+// 下一小時自然再觸發，且 news repo 保留 22:37 台北 GitHub cron 當備援兜底。
+const NEWS_REPO = "taiwan-stock-news";
+const NEWS_WF = "build-news.yml";
+export async function dispatchNews(env, fetchFn = fetch) {
+  if (!env.GH_DISPATCH_TOKEN) return false;   // secret 未設 → 安靜跳過（同哨兵）
+  await ghDispatch(env, NEWS_REPO, NEWS_WF, fetchFn);
+  console.log(`news: dispatched ${NEWS_REPO}/${NEWS_WF}`);
+  return true;
+}
+
 // ---- 美股自選（/uswatch?t=PLTR,ARM）----
 // 前端自選清單存 localStorage，這裡代抓 USStockPrice 並算與 build_us.py 相同的指標。
 // 每檔 FinMind 回應以 cf cacheTtl 1800s 邊緣快取（日線資料，30 分綽綽有餘）。
@@ -493,12 +515,18 @@ const json = (obj, extra) => new Response(JSON.stringify(obj), {
 });
 
 export default {
-  // Cron 兩個時段共用同一個 handler（見 wrangler.toml [triggers]）：
-  //   盤中每分鐘 → 存分鐘 frame；傍晚哨兵窗口 → FinMind 落地探測（每 5 分一輪）
+  // Cron 三個時段共用同一個 handler（見 wrangler.toml [triggers]）：
+  //   盤中每分鐘 → 存分鐘 frame；傍晚哨兵窗口 → FinMind 落地探測（每 5 分一輪）；
+  //   每天每小時 :07（台北 06–22 時）→ dispatch taiwan-stock-news 新聞管線
   async scheduled(event, env, ctx) {
     const tp = taipeiParts(new Date(event.scheduledTime));
-    const role = scheduledRole(tp);
+    const role = scheduledRole(tp, event.cron);
     if (role === "idle") return;   // 哨兵窗口內的非 %5 分鐘：直接省下
+    if (role === "news") {
+      // 失敗只 log（22:37 GitHub cron 備援＋下一小時自然重試），不影響既有功能
+      ctx.waitUntil(dispatchNews(env).catch((e) => console.log("news dispatch:", e && e.message)));
+      return;
+    }
     if (role === "sentinel") {
       // 哨兵整段獨立 try/catch（runSentinel 內部已逐步吞錯），不影響既有功能
       ctx.waitUntil(runSentinel(env, tp).catch((e) => console.log("sentinel:", e && e.message)));

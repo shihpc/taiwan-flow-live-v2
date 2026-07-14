@@ -1,6 +1,7 @@
 // FinMind 哨兵離線單元測試（無需 token、不打網路）
 // 執行：cd worker && node test/sentinel.mjs
-import { taipeiParts, scheduledRole, sentinelKey, signalLanded, ghDispatchRequest }
+import { taipeiParts, scheduledRole, sentinelKey, signalLanded, ghDispatchRequest,
+  FRAME_CRON, dispatchNews }
   from "../src/index.js";
 
 let pass = 0, fail = 0;
@@ -37,6 +38,26 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
   chk("盤中10:30 → frame", role("2026-07-14T10:30:00") === "frame");
   chk("週六20:00 → 不進哨兵", role("2026-07-18T20:00:00") === "frame");
   chk("週日20:00 → 不進哨兵", role("2026-07-19T20:00:00") === "frame");
+}
+
+// ---- scheduledRole：新聞定點班（每天 :07，台北 06–22 時；含 event.cron 分流）----
+{
+  const role = (iso, cron) => scheduledRole(taipeiParts(tpe(iso)), cron);
+  const NEWS_CRON = "7 0-14,22-23 * * *";   // 與 wrangler.toml crons[2] 一致
+  chk("平日06:07 → news", role("2026-07-14T06:07:00", NEWS_CRON) === "news");
+  chk("平日22:07 → news", role("2026-07-14T22:07:00", NEWS_CRON) === "news");
+  chk("平日23:07 → 非news", role("2026-07-14T23:07:00", NEWS_CRON) !== "news");
+  chk("平日05:07 → 非news", role("2026-07-14T05:07:00", NEWS_CRON) !== "news");
+  chk("平日17:07 哨兵窗口內:07 → news（非sentinel/idle）",
+    role("2026-07-14T17:07:00", NEWS_CRON) === "news");
+  chk("平日17:05 → sentinel 照舊", role("2026-07-14T17:05:00", NEWS_CRON) === "sentinel");
+  chk("週六10:07 → news（週末也收新聞）", role("2026-07-18T10:07:00", NEWS_CRON) === "news");
+  chk("週六20:05 → 非sentinel", role("2026-07-18T20:05:00", NEWS_CRON) !== "sentinel");
+  // 9:07-13:07 兩條 cron 同分重疊：frame cron 醒來的照存 frame、新聞 cron 醒來的才 news
+  chk("平日09:07 frame cron 醒來 → frame（不搶 news）",
+    role("2026-07-14T09:07:00", FRAME_CRON) === "frame");
+  chk("平日09:07 新聞 cron 醒來 → news", role("2026-07-14T09:07:00", NEWS_CRON) === "news");
+  chk("cron 未帶（防禦性）:07 → 仍判 news", role("2026-07-14T10:07:00") === "news");
 }
 
 // ---- sentinelKey：去重 key 格式 ----
@@ -91,6 +112,28 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
   chk("mock 401 視為失敗", bad.status !== 204);
   chk("mock fetch 收到正確 URL", calls[0].url.endsWith("/daily.yml/dispatches"));
   chk("mock fetch 收到 Bearer", calls[0].init.headers["Authorization"] === "Bearer TOK");
+}
+
+// ---- dispatchNews：mock fetch 驗 URL/headers/失敗行為 ----
+{
+  const calls = [];
+  const mock204 = async (url, init) => { calls.push({ url, init }); return { status: 204 }; };
+  const ok = await dispatchNews({ GH_DISPATCH_TOKEN: "TOK" }, mock204);
+  chk("dispatchNews 有 token → 觸發", ok === true && calls.length === 1);
+  chk("dispatchNews URL 正確", calls[0] && calls[0].url ===
+    "https://api.github.com/repos/shihpc/taiwan-stock-news/actions/workflows/build-news.yml/dispatches",
+    calls[0] && calls[0].url);
+  chk("dispatchNews method POST", calls[0].init.method === "POST");
+  chk("dispatchNews Bearer", calls[0].init.headers["Authorization"] === "Bearer TOK");
+  chk("dispatchNews body ref=main", JSON.parse(calls[0].init.body).ref === "main");
+  // 無 token → 安靜跳過、不打網路
+  const skipped = await dispatchNews({}, mock204);
+  chk("dispatchNews 無 token → 跳過不打網路", skipped === false && calls.length === 1);
+  // 非 204 → 丟錯（scheduled handler 端只 log，備援 cron 兜底）
+  let threw = false;
+  try { await dispatchNews({ GH_DISPATCH_TOKEN: "T" }, async () => ({ status: 401 })); }
+  catch { threw = true; }
+  chk("dispatchNews 401 → 丟錯", threw);
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

@@ -2,15 +2,23 @@ name = "taiwan-flow-v2"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
-# 兩個 cron 共用同一個 scheduled handler（依台北時間分流，見 src/index.js scheduledRole）：
+# 三個 cron 共用同一個 scheduled handler（依台北時間＋event.cron 分流，
+# 見 src/index.js scheduledRole）：
 # 1) 盤中每分鐘存「分鐘快照 frame」到 KV（資金湧入偵測的盤中序列）
 #    01:00-05:59 UTC = 09:00-13:59 台北，週一~五；收盤後 frame 值不再變、冪等
+#    ※ 此字串需與 src/index.js 的 FRAME_CRON 完全一致（scheduledRole 用它
+#      區分 9:07-13:07 的 :07 分重疊：frame cron 醒來的照存 frame，不搶去 dispatch news）
 # 2) FinMind 哨兵：09:00-14:55 UTC = 17:00-22:55 台北每 5 分，探測盤後資料落地
 #    → workflow_dispatch 觸發 taiwan-flows / postmkt（雙觸發：兩 repo 的 cron 保留當備援）
 #    （2026-07-14 由 19:00 提早到 17:00：官方最早訊號為法人 20:00，17-20 點多為空轉，
 #      但 FinMind 偶有提早入庫，早盯當免費保險；成本每晚約多 100 個探測請求）
+# 3) 新聞定點班：每天（含週末）UTC 22:07/23:07（前一日）與 00:07-14:07
+#    = 台北 06:07-22:07 每小時 :07（共 17 個時點）
+#    → workflow_dispatch 觸發 taiwan-stock-news build-news.yml（該 repo 保留
+#    22:37 台北 GitHub cron 當備援兜底）。實際哪些時點 dispatch 由程式判斷
+#    （台北 hour 6-22 且 minute==7 才觸發），cron 只負責喚醒
 [triggers]
-crons = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5"]
+crons = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5", "7 0-14,22-23 * * *"]
 
 [[kv_namespaces]]
 binding = "FLOW_KV"
@@ -26,5 +34,5 @@ LIVE_TTL = "15"   # /live 聚合結果快取秒數
 # Secrets（不寫進檔）：
 #   npx wrangler secret put FINMIND_TOKEN      # FinMind API token
 #   npx wrangler secret put GH_DISPATCH_TOKEN  # GitHub PAT（fine-grained，
-#     對 taiwan-flows + postmkt 兩 repo 給 Actions: Read and write），
-#     哨兵用來 workflow_dispatch；未設時哨兵整段跳過、其餘功能不受影響
+#     對 taiwan-flows + postmkt + taiwan-stock-news 三 repo 給 Actions: Read and write），
+#     哨兵與新聞定點班用來 workflow_dispatch；未設時兩者整段跳過、其餘功能不受影響
