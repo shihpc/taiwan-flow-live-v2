@@ -354,6 +354,105 @@ function computeFlow(cl, items, baseline, frames) {
   return { flow, per: stockFlow };
 }
 
+// ---- FinMind 哨兵（傍晚探測盤後資料落地 → GitHub workflow 兩段式觸發）----
+// 目的：FinMind 盤後資料（法人買賣超/外資持股/融資券/當沖）落地時間不定，
+//   固定 cron 只能保守晚跑。哨兵在台北平日 19:00–23:00 每 5 分探一次（單檔 2330、
+//   單日，最便宜的請求），哪個訊號落地就立刻 workflow_dispatch 對應 repo，
+//   讓「盤後法人動態」與「盤後分析」在資料可得後 10 分鐘內更新。
+// 備援（雙觸發機制）：taiwan-flows daily.yml（台北 21:19）與 postmkt build.yml
+//   （21:53）的 GitHub cron 保留不動；兩條管線冪等，哨兵先觸發後 cron 再跑一次
+//   只是重算相同結果，無害。
+// 去重：KV `sentinel:<YYYYMMDD>:<signal>` = dispatched → 當晚該訊號不再探測；
+//   四個訊號都觸發完，整個哨兵當晚短路（只剩 KV 讀，不打 FinMind）。
+// 安全：env.GH_DISPATCH_TOKEN（wrangler secret，GitHub PAT 需 repo 的 actions:write）
+//   未設定時整段直接 return，不影響 worker 既有功能。
+
+const GH_OWNER = "shihpc";
+const SENTINEL_SIGNALS = [
+  // 第一波：法人買賣超落地 → flows 主排行可算
+  { name: "inst",     dataset: "TaiwanStockInstitutionalInvestorsBuySell", repo: "taiwan-flows", wf: "daily.yml" },
+  // 第二波：外資持股% 落地（官方約 21:00 後）→ flows 冪等重跑補持股欄位
+  { name: "holding",  dataset: "TaiwanStockShareholding",                  repo: "taiwan-flows", wf: "daily.yml" },
+  // 第一波：融資券落地 → postmkt 融借券/鉅額/零股/分點可算
+  { name: "margin",   dataset: "TaiwanStockMarginPurchaseShortSale",       repo: "postmkt",      wf: "build.yml" },
+  // 第二波：當沖量值落地（約 21:30 後才非零）→ postmkt 冪等重跑補當沖
+  { name: "daytrade", dataset: "TaiwanStockDayTrading",                    repo: "postmkt",      wf: "build.yml", needVolume: true },
+];
+
+// 台北時間拆解（UTC+8、無夏令時間；可離線測試）
+export function taipeiParts(d = new Date()) {
+  const t = new Date(d.getTime() + 8 * 3600e3);
+  return { date: t.toISOString().slice(0, 10), hour: t.getUTCHours(),
+    minute: t.getUTCMinutes(), dow: t.getUTCDay() };
+}
+// 這次 cron 醒來該做什麼：平日 19:00–22:59 台北 = 哨兵窗口（每 5 分一輪探測，
+// 其餘分鐘 idle 不耗資源）；窗口外維持原本的盤中 frame 工作。週六日永不進哨兵。
+export function scheduledRole(tp) {
+  const weekday = tp.dow >= 1 && tp.dow <= 5;
+  if (weekday && tp.hour >= 19 && tp.hour < 23)
+    return tp.minute % 5 === 0 ? "sentinel" : "idle";
+  return "frame";
+}
+export const sentinelKey = (dateISO, signal) => `sentinel:${dateISO.replaceAll("-", "")}:${signal}`;
+// 訊號落地判定：今日資料非空；daytrade 另要求 Volume>0（FinMind 先出空殼列、量值晚到）
+export function signalLanded(sig, rows) {
+  if (!rows || !rows.length) return false;
+  return sig.needVolume ? rows.some((r) => num(r.Volume) > 0) : true;
+}
+// GitHub workflow_dispatch 請求（純建構、可離線驗 URL/headers/body）
+export function ghDispatchRequest(repo, wf, token) {
+  return {
+    url: `https://api.github.com/repos/${GH_OWNER}/${repo}/actions/workflows/${wf}/dispatches`,
+    init: {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "taiwan-flow-v2-sentinel",   // GitHub API 必填
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ref: "main" }),
+    },
+  };
+}
+async function ghDispatch(env, repo, wf, fetchFn = fetch) {
+  const { url, init } = ghDispatchRequest(repo, wf, env.GH_DISPATCH_TOKEN);
+  const r = await fetchFn(url, init);
+  if (r.status !== 204) throw new Error(`dispatch ${repo}/${wf} HTTP ${r.status}`);
+}
+async function probeSignal(env, sig, date) {
+  // 最便宜探測：data_id=2330、start=end=今日。不掛 cf 快取——要看的是「剛剛落地了沒」
+  const u = `${FIN_BASE}?dataset=${sig.dataset}&data_id=2330&start_date=${date}&end_date=${date}&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
+  const r = await fetch(u);
+  if (!r.ok) throw new Error(`${sig.dataset} HTTP ${r.status}`);
+  const j = await r.json();
+  if (j.status !== 200) throw new Error(`${sig.dataset}: ${j.msg}`);
+  return signalLanded(sig, j.data || []);
+}
+async function runSentinel(env, tp) {
+  if (!env.GH_DISPATCH_TOKEN || !env.FINMIND_TOKEN) return;   // secret 未設 → 安靜跳過（部署順序安全）
+  const keys = SENTINEL_SIGNALS.map((s) => sentinelKey(tp.date, s.name));
+  const done = await Promise.all(keys.map((k) => env.FLOW_KV.get(k)));
+  if (done.every(Boolean)) return;                            // 四訊號都觸發過 → 當晚短路
+  for (let i = 0; i < SENTINEL_SIGNALS.length; i++) {
+    if (done[i]) continue;                                    // 已觸發過的訊號跳過探測（省請求）
+    const sig = SENTINEL_SIGNALS[i];
+    let landed;
+    try { landed = await probeSignal(env, sig, tp.date); }
+    catch (e) { console.log(`sentinel probe ${sig.name}:`, e && e.message); continue; }
+    if (!landed) continue;                                    // 未落地 → 下輪再探
+    try {
+      await ghDispatch(env, sig.repo, sig.wf);
+      await env.FLOW_KV.put(keys[i], "dispatched", { expirationTtl: 172800 });
+      console.log(`sentinel: ${sig.name} 落地 → dispatched ${sig.repo}/${sig.wf}`);
+    } catch (e) {
+      // dispatch 失敗（token 權限不足等）→ log 後放棄該輪，KV 不記，下輪自動重試
+      console.log(`sentinel dispatch ${sig.name}:`, e && e.message);
+    }
+  }
+}
+
 // ---- 美股自選（/uswatch?t=PLTR,ARM）----
 // 前端自選清單存 localStorage，這裡代抓 USStockPrice 並算與 build_us.py 相同的指標。
 // 每檔 FinMind 回應以 cf cacheTtl 1800s 邊緣快取（日線資料，30 分綽綽有餘）。
@@ -394,8 +493,17 @@ const json = (obj, extra) => new Response(JSON.stringify(obj), {
 });
 
 export default {
-  // Cron（盤中每分鐘）：存分鐘 frame
+  // Cron 兩個時段共用同一個 handler（見 wrangler.toml [triggers]）：
+  //   盤中每分鐘 → 存分鐘 frame；傍晚哨兵窗口 → FinMind 落地探測（每 5 分一輪）
   async scheduled(event, env, ctx) {
+    const tp = taipeiParts(new Date(event.scheduledTime));
+    const role = scheduledRole(tp);
+    if (role === "idle") return;   // 哨兵窗口內的非 %5 分鐘：直接省下
+    if (role === "sentinel") {
+      // 哨兵整段獨立 try/catch（runSentinel 內部已逐步吞錯），不影響既有功能
+      ctx.waitUntil(runSentinel(env, tp).catch((e) => console.log("sentinel:", e && e.message)));
+      return;
+    }
     ctx.waitUntil(storeFrame(env).catch((e) => console.log("storeFrame:", e.message)));
   },
   async fetch(request, env, ctx) {

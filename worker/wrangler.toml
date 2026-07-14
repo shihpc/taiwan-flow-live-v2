@@ -2,10 +2,13 @@ name = "taiwan-flow-v2"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
-# 盤中每分鐘存一格「分鐘快照 frame」到 KV（資金湧入偵測的盤中序列）
-# 01:00-05:59 UTC = 09:00-13:59 台北，週一~五；收盤後 frame 值不再變、冪等
+# 兩個 cron 共用同一個 scheduled handler（依台北時間分流，見 src/index.js scheduledRole）：
+# 1) 盤中每分鐘存「分鐘快照 frame」到 KV（資金湧入偵測的盤中序列）
+#    01:00-05:59 UTC = 09:00-13:59 台北，週一~五；收盤後 frame 值不再變、冪等
+# 2) FinMind 哨兵：11:00-14:55 UTC = 19:00-22:55 台北每 5 分，探測盤後資料落地
+#    → workflow_dispatch 觸發 taiwan-flows / postmkt（雙觸發：兩 repo 的 cron 保留當備援）
 [triggers]
-crons = ["* 1-5 * * 1-5"]
+crons = ["* 1-5 * * 1-5", "*/5 11-14 * * 1-5"]
 
 [[kv_namespaces]]
 binding = "FLOW_KV"
@@ -18,5 +21,8 @@ id = "71ed931c80b045fc80529c265e089f15"
 DATA_BASE = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data"
 LIVE_TTL = "15"   # /live 聚合結果快取秒數
 
-# FINMIND token 用 secret（不寫進檔）：
-#   npx wrangler secret put FINMIND_TOKEN
+# Secrets（不寫進檔）：
+#   npx wrangler secret put FINMIND_TOKEN      # FinMind API token
+#   npx wrangler secret put GH_DISPATCH_TOKEN  # GitHub PAT（fine-grained，
+#     對 taiwan-flows + postmkt 兩 repo 給 Actions: Read and write），
+#     哨兵用來 workflow_dispatch；未設時哨兵整段跳過、其餘功能不受影響
