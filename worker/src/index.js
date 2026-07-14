@@ -391,12 +391,19 @@ export function taipeiParts(d = new Date()) {
 //   同分重疊、各發一個 scheduled 事件），frame cron 醒來的那個要照存 frame，
 //   否則會重複 dispatch news 且掉一格分鐘 frame——所以用 event.cron 排除它。
 //   17:07–22:07 落在哨兵窗口內但 7 不是 %5==0（原本是 idle），改判 news 不衝突。
+// - morning：平日 06:47 → dispatch 本 repo morning.yml（晨報準點產出；夜盤 05:00
+//   收盤後留 ~1.5 小時給 FinMind 入庫。GitHub cron 06:00 保留當備援，冪等多跑無害）。
 // - sentinel：平日 17:00–22:59 台北每 5 分一輪盤後落地探測，其餘分鐘 idle。
 // - frame：其餘（實際上只有盤中 cron 會打到）。週六日永不進哨兵。
 export const FRAME_CRON = "* 1-5 * * 1-5";   // 需與 wrangler.toml crons[0] 完全一致
 export function scheduledRole(tp, cron) {
   if (tp.minute === 7 && tp.hour >= 6 && tp.hour <= 22 && cron !== FRAME_CRON)
     return "news";
+  if (tp.minute === 47 && tp.hour === 6 && tp.dow >= 1 && tp.dow <= 5)
+    return "morning";
+  // 新聞/晨報共用 cron 也會在其他小時的 :47 醒來（CF 免費方案 3 條 cron 上限，
+  // 無法為晨報開第四條）——非 06:47 的 :47 且非盤中 cron 一律 idle，不能落到 frame
+  if (tp.minute === 47 && cron !== FRAME_CRON) return "idle";
   const weekday = tp.dow >= 1 && tp.dow <= 5;
   if (weekday && tp.hour >= 17 && tp.hour < 23)
     return tp.minute % 5 === 0 ? "sentinel" : "idle";
@@ -474,6 +481,16 @@ export async function dispatchNews(env, fetchFn = fetch) {
   console.log(`news: dispatched ${NEWS_REPO}/${NEWS_WF}`);
   return true;
 }
+// 晨報準點班（平日 06:47）：dispatch 本 repo 的 morning.yml。
+// GitHub cron 06:00（延遲後 ~07:00 跑）保留當備援，晨報建置冪等、多跑無害。
+const MORNING_REPO = "taiwan-flow-live-v2";
+const MORNING_WF = "morning.yml";
+export async function dispatchMorning(env, fetchFn = fetch) {
+  if (!env.GH_DISPATCH_TOKEN) return false;
+  await ghDispatch(env, MORNING_REPO, MORNING_WF, fetchFn);
+  console.log(`morning: dispatched ${MORNING_REPO}/${MORNING_WF}`);
+  return true;
+}
 
 // ---- 美股自選（/uswatch?t=PLTR,ARM）----
 // 前端自選清單存 localStorage，這裡代抓 USStockPrice 並算與 build_us.py 相同的指標。
@@ -525,6 +542,10 @@ export default {
     if (role === "news") {
       // 失敗只 log（22:37 GitHub cron 備援＋下一小時自然重試），不影響既有功能
       ctx.waitUntil(dispatchNews(env).catch((e) => console.log("news dispatch:", e && e.message)));
+      return;
+    }
+    if (role === "morning") {
+      ctx.waitUntil(dispatchMorning(env).catch((e) => console.log("morning dispatch:", e && e.message)));
       return;
     }
     if (role === "sentinel") {

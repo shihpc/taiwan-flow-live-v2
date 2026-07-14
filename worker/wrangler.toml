@@ -2,7 +2,7 @@ name = "taiwan-flow-v2"
 main = "src/index.js"
 compatibility_date = "2024-11-01"
 
-# 三個 cron 共用同一個 scheduled handler（依台北時間＋event.cron 分流，
+# 四個 cron 共用同一個 scheduled handler（依台北時間＋event.cron 分流，
 # 見 src/index.js scheduledRole）：
 # 1) 盤中每分鐘存「分鐘快照 frame」到 KV（資金湧入偵測的盤中序列）
 #    01:00-05:59 UTC = 09:00-13:59 台北，週一~五；收盤後 frame 值不再變、冪等
@@ -17,8 +17,13 @@ compatibility_date = "2024-11-01"
 #    → workflow_dispatch 觸發 taiwan-stock-news build-news.yml（該 repo 保留
 #    22:37 台北 GitHub cron 當備援兜底）。實際哪些時點 dispatch 由程式判斷
 #    （台北 hour 6-22 且 minute==7 才觸發），cron 只負責喚醒
+# 4) 晨報準點班（與 3 共用同一條 cron 的 :47 分）：台北平日 06:47
+#    → workflow_dispatch 觸發本 repo morning.yml（GitHub cron 06:00 保留當備援，
+#    夜盤 05:00 收盤後留 ~1.5 小時給 FinMind 入庫；晨報建置冪等、多跑無害）。
+#    其他小時的 :47 喚醒一律 idle（見 scheduledRole）
 [triggers]
-crons = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5", "7 0-14,22-23 * * *"]
+# ※ CF 免費方案每 Worker 上限 3 條 cron——新聞(:07)與晨報(:47)共用第三條，程式內分流
+crons = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5", "7,47 0-14,22-23 * * *"]
 
 [[kv_namespaces]]
 binding = "FLOW_KV"

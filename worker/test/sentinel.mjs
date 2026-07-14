@@ -58,6 +58,14 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
     role("2026-07-14T09:07:00", FRAME_CRON) === "frame");
   chk("平日09:07 新聞 cron 醒來 → news", role("2026-07-14T09:07:00", NEWS_CRON) === "news");
   chk("cron 未帶（防禦性）:07 → 仍判 news", role("2026-07-14T10:07:00") === "news");
+  // 晨報準點班（平日 06:47）
+  chk("平日06:47 → morning", role("2026-07-14T06:47:00", "47 22 * * 0-4") === "morning");
+  chk("週六06:47 → 非morning", role("2026-07-18T06:47:00") !== "morning");
+  chk("平日06:46 → frame（非morning）", role("2026-07-14T06:46:00") === "frame");
+  chk("平日07:47 → 非morning", role("2026-07-14T07:47:00") !== "morning");
+  chk("平日07:47 共用cron醒來 → idle（不落frame）",
+    role("2026-07-14T07:47:00", "7,47 0-14,22-23 * * *") === "idle");
+  chk("平日17:47 → idle", role("2026-07-14T17:47:00", "7,47 0-14,22-23 * * *") === "idle");
 }
 
 // ---- sentinelKey：去重 key 格式 ----
