@@ -5,10 +5,12 @@ compatibility_date = "2024-11-01"
 # 兩個 cron 共用同一個 scheduled handler（依台北時間分流，見 src/index.js scheduledRole）：
 # 1) 盤中每分鐘存「分鐘快照 frame」到 KV（資金湧入偵測的盤中序列）
 #    01:00-05:59 UTC = 09:00-13:59 台北，週一~五；收盤後 frame 值不再變、冪等
-# 2) FinMind 哨兵：11:00-14:55 UTC = 19:00-22:55 台北每 5 分，探測盤後資料落地
+# 2) FinMind 哨兵：09:00-14:55 UTC = 17:00-22:55 台北每 5 分，探測盤後資料落地
 #    → workflow_dispatch 觸發 taiwan-flows / postmkt（雙觸發：兩 repo 的 cron 保留當備援）
+#    （2026-07-14 由 19:00 提早到 17:00：官方最早訊號為法人 20:00，17-20 點多為空轉，
+#      但 FinMind 偶有提早入庫，早盯當免費保險；成本每晚約多 100 個探測請求）
 [triggers]
-crons = ["* 1-5 * * 1-5", "*/5 11-14 * * 1-5"]
+crons = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5"]
 
 [[kv_namespaces]]
 binding = "FLOW_KV"

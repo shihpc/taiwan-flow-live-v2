@@ -389,7 +389,7 @@ export function taipeiParts(d = new Date()) {
 // 其餘分鐘 idle 不耗資源）；窗口外維持原本的盤中 frame 工作。週六日永不進哨兵。
 export function scheduledRole(tp) {
   const weekday = tp.dow >= 1 && tp.dow <= 5;
-  if (weekday && tp.hour >= 19 && tp.hour < 23)
+  if (weekday && tp.hour >= 17 && tp.hour < 23)
     return tp.minute % 5 === 0 ? "sentinel" : "idle";
   return "frame";
 }
