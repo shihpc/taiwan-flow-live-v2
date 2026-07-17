@@ -87,6 +87,27 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 .ovdiv .ovbarneg{position:absolute;right:50%;height:100%;background:var(--down);border-radius:3px 0 0 3px;opacity:.85}
 .ovdiv .ovbarpos{position:absolute;left:50%;height:100%;background:var(--up);border-radius:0 3px 3px 0;opacity:.85}
 .ovdiv .ovval{width:60px;flex:0 0 60px;font-size:11px}
+/* 即時一覽 tab（第二期：資金地圖 treemap/30分動能/收盤定格） */
+.ovphase{display:inline-block;font-size:11px;color:var(--dim);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 8px;margin-bottom:6px}
+.ovsparkwrap{margin-top:4px;line-height:0}
+.ovspark{display:block}
+.ovtree{display:flex;margin:4px 0 2px;height:300px}
+/* 欄寬/格高一律用百分比寫死（不用 flex-grow 分配）：flex item 對內容有隱性最小尺寸，
+   會把小格撐大、擠壓大格，破壞「面積=佔比」；格線用 inset box-shadow（不佔幾何空間） */
+.ovtcol{min-width:0;height:100%}
+.ovtcell{position:relative;box-sizing:border-box;padding:4px 8px;cursor:pointer;overflow:hidden;box-shadow:inset 0 0 0 1px var(--bg);border-radius:3px}
+.ovtcell.novtclick{cursor:default}
+.ovtname{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:16px}
+.ovtpct{font-size:11px;opacity:.85}
+.ovtchg{font-size:11px;font-weight:700}
+.ovtbadge{position:absolute;top:5px;right:7px;font-size:12px;font-weight:800}
+.ovt-uph{background:rgba(255,90,90,.88);color:#2a0808}
+.ovt-upl{background:rgba(255,90,90,.32);color:var(--fg)}
+.ovt-dnh{background:rgba(63,208,127,.88);color:#062412}
+.ovt-dnl{background:rgba(63,208,127,.32);color:var(--fg)}
+.ovt-flat{background:var(--panel2);color:var(--fg)}
+.ovtfoot{font-size:11px;color:var(--dim);margin:2px 0 6px}
+.ovmom{font-size:11px;font-weight:700}
 </style>
 </head>
 <body>
@@ -127,7 +148,7 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
 
 // 摘要分析可選模型（與 postmkt/news 三站共用 localStorage key：insight_model / anthropic_key）
 const INSIGHT_MODELS=[["claude-opus-4-8","Opus 4.8（最佳判讀，約NT$3/次）"],["claude-sonnet-5","Sonnet 5（近Opus、約半價更快）"]];
-const state={tab:"ov", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{ov:{open:null,view:"sub",expandAll:false}, exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null,openEtf:null}},
+const state={tab:"ov", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{ov:{open:null,view:"sub",expandAll:false,treeChain:null,treeSub:null}, exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null,openEtf:null}},
   insight:null, insightLoading:false, insightErr:null,
   insightModel: localStorage.getItem("insight_model")||"claude-opus-4-8"};
 
@@ -1074,8 +1095,8 @@ function ovComputeSubAgg(){
     const v=sval(c); if(!v)continue;
     const names=new Set(info.p.map(p=>p[1]));
     for(const name of names){
-      const o=out[name]||(out[name]={name,amt:0,pts:0,f30:0,up:0,down:0,n:0,codes:[],leaderCode:null,leaderPts:0});
-      o.amt+=v.amt||0; o.pts+=v.pts||0; o.f30+=(v.f30||0); o.n++; o.codes.push(c);
+      const o=out[name]||(out[name]={name,amt:0,pts:0,f30:0,f10:0,up:0,down:0,n:0,codes:[],leaderCode:null,leaderPts:0});
+      o.amt+=v.amt||0; o.pts+=v.pts||0; o.f30+=(v.f30||0); o.f10+=(v.f10||0); o.n++; o.codes.push(c);
       if(v.chg>0)o.up++; else if(v.chg<0)o.down++;
       if(Math.abs(v.pts||0)>Math.abs(o.leaderPts)){o.leaderPts=v.pts||0; o.leaderCode=c;}
     }
@@ -1089,14 +1110,159 @@ function ovConcentration(pIdx){
   const ratio=pIdx?top5/Math.abs(pIdx)*100:0;
   return ratio>=60?"偏集中":ratio<30?"普遍":"中度集中";
 }
+// ---- 第二期：收盤定格判斷（台北時間，UTC+8 位移計算，不用本機時區）----
+function ovTaipeiNowMin(){
+  const t=new Date(Date.now()+8*3600e3);
+  return t.getUTCHours()*60+t.getUTCMinutes();
+}
+function ovMarketPhase(){
+  const min=ovTaipeiNowMin();
+  let staleSec=null;
+  try{staleSec=(Date.now()-Date.parse(state.live.generated_at))/1000;}catch(e){}
+  const afterClose = min>=13*60+35 || (min>=13*60+30 && staleSec!=null && staleSec>180);
+  if(afterClose)return {badge:"收盤定格 13:30", closed:true};
+  if(min<9*60)return {badge:"盤前", closed:false};
+  return null;
+}
+// series 太短時 sparkline 顯示的替代文字：收盤後（今日已無盤可等）用「明日」；盤前/盤中用「盤中累積後」
+function ovSparkFallback(){
+  const p=ovMarketPhase();
+  return (p&&p.closed) ? "明日盤中生效" : "盤中累積後生效";
+}
+// 大盤指數 sparkline（純 SVG 折線，series 近60分的 idx 欄）：<2 個有效值回 null 由呼叫端顯示替代文字
+function ovSparkline(series,key,w,h){
+  const pts=(series||[]).map(p=>p&&p[key]).filter(v=>v!=null);
+  if(pts.length<2)return null;
+  const min=Math.min(...pts), max=Math.max(...pts), span=(max-min)||1, n=pts.length;
+  const stepX=w/(n-1);
+  const path=pts.map((v,i)=>`${i===0?"M":"L"}${(i*stepX).toFixed(1)},${(h-((v-min)/span*h)).toFixed(1)}`).join(" ");
+  const color=pts[n-1]>=pts[0]?"var(--up)":"var(--down)";
+  return `<svg class="ovspark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" preserveAspectRatio="none">`+
+    `<path d="${path}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+}
+// ---- 第二期：資金地圖 treemap 用的通用聚合（只計上市 twse，同 OV_SUB_CACHE 原則）----
+// filterFn(code,info)→是否納入；groupByFn(info)→該股歸屬的群組名稱陣列（多對多時可回傳多個）
+function ovAggBy(filterFn,groupByFn){
+  const out={};
+  for(const c in state.live.stocks){
+    const info=state.cl[c]; if(!info||info.t!=="twse")continue;
+    if(filterFn&&!filterFn(c,info))continue;
+    const v=sval(c); if(!v)continue;
+    const names=groupByFn(info)||[];
+    for(const name of new Set(names)){
+      const o=out[name]||(out[name]={name,amt:0,wchg:0,f30:0,up:0,down:0,n:0,codes:[]});
+      o.amt+=v.amt||0; o.wchg+=(v.chg||0)*(v.amt||0); o.f30+=(v.f30||0); o.n++; o.codes.push(c);
+      if(v.chg>0)o.up++; else if(v.chg<0)o.down++;
+    }
+  }
+  for(const k in out){const o=out[k]; o.chg=o.amt?o.wchg/o.amt:0;}
+  return out;
+}
+// 兩欄近似 treemap：依 amt 由大到小貪婪分兩欄（各欄加總盡量平衡）。
+// 欄寬=欄加總/總amt、格高=amt/欄加總，皆為明確百分比（面積=寬%×高%=佔比，恆等式），
+// 不用 flex-grow 分配——含文字的 flex item 有隱性最小尺寸，會把小格撐大、擠壓大格（驗收實測誤差達 33%）。
+function ovTreemapSplit(items){
+  const sorted=[...items].sort((a,b)=>b.amt-a.amt);
+  const cols=[[],[]], sums=[0,0];
+  for(const it of sorted){ const ci=sums[0]<=sums[1]?0:1; cols[ci].push(it); sums[ci]+=Math.max(it.amt,0); }
+  return {cols,sums};
+}
+// 角標：群組近30分成交佔比 vs 全日成交佔比（f30聚合÷flow.mkt.d30_yi 對比 amt÷market.tse.amt_yi）
+function ovTreemapBadge(amtRaw,f30Raw){
+  const mktAmt=(state.live.market&&state.live.market.tse&&state.live.market.tse.amt_yi)||0;
+  const fl=state.live.flow, d30=fl&&fl.mkt?fl.mkt.d30_yi:null;
+  if(!mktAmt||d30==null)return "";
+  const fullShr=(amtRaw/1e8)/mktAmt*100, now30=(f30Raw/1e8)/d30*100, diff=now30-fullShr;
+  return diff>0.3?'<span class="ovtbadge up">↑</span>':diff<-0.3?'<span class="ovtbadge down">↓</span>':"";
+}
+function ovTreemapCellCls(chg){
+  return chg==null?"ovt-flat":chg>=1?"ovt-uph":chg>0?"ovt-upl":chg<=-1?"ovt-dnh":chg<0?"ovt-dnl":"ovt-flat";
+}
+// 佔比<minShare 的尾項合併為「其他N項」：避免 .ovtcell 8px padding 渲染下限把極小格撐大（面積失真），
+// 也避免不可讀的碎格。輸入須為 amt 降冪排序。
+function ovMergeSmall(arr,minShare){
+  const total=arr.reduce((a,r)=>a+Math.max(r.amt,0),0)||1;
+  const keep=[],rest=[];
+  for(const it of arr){(Math.max(it.amt,0)/total<minShare?rest:keep).push(it);}
+  if(rest.length===1)keep.push(rest[0]);
+  else if(rest.length>1){
+    const rAmt=rest.reduce((a,r)=>a+r.amt,0),rF30=rest.reduce((a,r)=>a+(r.f30||0),0);
+    keep.push({name:`其他${rest.length}項`,amt:rAmt,f30:rF30,
+      chg:rAmt?rest.reduce((a,r)=>a+(r.chg||0)*r.amt,0)/rAmt:null,isRest:true});
+  }
+  return keep;
+}
+function ovTreemapHtml(){
+  const st=state.sub.ov;
+  let crumbHtml=`<span class="clk" data-ovtree-crumb="root">全部產業鏈</span>`;
+  if(st.treeChain)crumbHtml+=` › <span class="clk" data-ovtree-crumb="chain">${escI(cleanSub(st.treeChain))}</span>`;
+  if(st.treeSub)crumbHtml+=` › <span>${escI(cleanSub(st.treeSub))}</span>`;
+  const head=`<div class="crumb"><b>資金地圖</b> ${crumbHtml} <span class="mut">面積=成交值佔比 · 顏色=漲跌(深淺) · 角標=近30分資金升降</span></div>`;
+
+  let items, mkAttr, footNote="";
+  if(!st.treeChain){
+    const agg=ovAggBy(null, info=>info.c||[]);
+    const arr=Object.values(agg).sort((a,b)=>b.amt-a.amt);
+    const top=arr.slice(0,9), rest=arr.slice(9);
+    if(rest.length){
+      const rAmt=rest.reduce((a,r)=>a+r.amt,0), rF30=rest.reduce((a,r)=>a+r.f30,0);
+      top.push({name:`其他${rest.length}項`, amt:rAmt, f30:rF30, chg:rAmt?rest.reduce((a,r)=>a+r.chg*r.amt,0)/rAmt:0, isRest:true});
+    }
+    items=top;
+    mkAttr=it=>it.isRest?"":`data-ovtree-chain="${encodeURIComponent(it.name)}"`;
+  }else if(!st.treeSub){
+    const agg=ovAggBy(null, info=>(info.p||[]).filter(p=>p[0]===st.treeChain).map(p=>p[1]));
+    items=ovMergeSmall(Object.values(agg).sort((a,b)=>b.amt-a.amt),0.02);
+    mkAttr=it=>it.isRest?"":`data-ovtree-sub="${encodeURIComponent(it.name)}"`;
+  }else{
+    const codes=Object.keys(state.live.stocks).filter(c=>{
+      const info=state.cl[c]; return info&&info.t==="twse"&&info.p&&info.p.some(p=>p[0]===st.treeChain&&p[1]===st.treeSub);
+    });
+    let all=codes.map(c=>{const v=sval(c),info=state.cl[c]||{};
+      return {name:info.n||c, amt:v.amt||0, f30:v.f30||0, chg:v.chg};}).sort((a,b)=>b.amt-a.amt);
+    if(all.length>24){footNote=`<div class="ovtfoot">另有 ${all.length-24} 檔成交值較小未顯示。</div>`; all=all.slice(0,24);}
+    items=ovMergeSmall(all,0.02);
+    mkAttr=()=>"";
+  }
+  if(!items.length)return head+`<div class="loading">此分類暫無資料。</div>`;
+  const total=items.reduce((a,r)=>a+r.amt,0)||1;
+  const {cols}=ovTreemapSplit(items);
+  const cellHtml=(it,colSum)=>{
+    const attr=mkAttr(it), clickable=attr!=="";
+    const h=Math.max(it.amt,0)/colSum*100;
+    return `<div class="ovtcell ${ovTreemapCellCls(it.chg)}${clickable?"":" novtclick"}" style="height:${h.toFixed(3)}%" ${attr}>`+
+      `<div class="ovtname">${escI(cleanSub(it.name))}</div>`+
+      `<div class="ovtpct">${(it.amt/total*100).toFixed(1)}%</div>`+
+      `<div class="ovtchg">${it.chg==null?"—":pctTxt(it.chg)}</div>`+
+      ovTreemapBadge(it.amt,it.f30)+
+    `</div>`;
+  };
+  const colsHtml=cols.filter(col=>col.length).map(col=>{
+    const colSum=Math.max(col.reduce((a,r)=>a+Math.max(r.amt,0),0),1e-9);
+    return `<div class="ovtcol" style="flex:0 0 ${(colSum/total*100).toFixed(3)}%">${col.map(it=>cellHtml(it,colSum)).join("")}</div>`;
+  }).join("");
+  return head+`<div class="ovtree">${colsHtml}</div>`+footNote;
+}
+// ---- 第二期：30分動能（次產業近10分 vs 前20分斜率比）----
+function ovMomentum(f10,f30){
+  if(f10==null||f30==null)return {label:"—",cls:"mut"};
+  const r10=f10/10, prior=(f30-f10)/20;
+  if(prior<=0)return r10>0?{label:"加速",cls:"up"}:{label:"持平",cls:"mut"};
+  const ratio=r10/prior;
+  if(ratio>1.2)return {label:"加速",cls:"up"};
+  if(ratio<0.8)return {label:"走弱",cls:"down"};
+  return {label:"持平",cls:"mut"};
+}
 function ovDashboard(){
   const ix=state.live.index||{}, m=state.live.market||{};
   const t=ix.tse||{}, o=ix.otc||{};
   const idxV=d=>d.val!=null?d.val.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}):"—";
+  const spark=ovSparkline(state.live.series,"idx",130,26);
   const idxCard=`<div class="ovcard"><div class="h">加權指數</div>`+
     `<div class="v">${idxV(t)}</div>`+
     `<div>${t.chgP!=null?sgn(t.chgP,sgnTxt(t.chgP)+"（"+pctTxt(t.chg)+"）"):'<span class="mut">—</span>'}</div>`+
-    `<div class="sub">櫃買 ${idxV(o)} ${o.chgP!=null?sgn(o.chgP,sgnTxt(o.chgP)+"（"+pctTxt(o.chg)+"）"):""}</div></div>`;
+    `<div class="sub">櫃買 ${idxV(o)} ${o.chgP!=null?sgn(o.chgP,sgnTxt(o.chgP)+"（"+pctTxt(o.chg)+"）"):""}</div>`+
+    `<div class="ovsparkwrap">${spark||`<span class="mut" style="font-size:10px">${ovSparkFallback()}</span>`}</div></div>`;
   const totalAmt=(t.amt_yi||0)+(o.amt_yi||0);
   const fl=state.live.flow, mkt=fl&&fl.mkt;
   let rateHtml;
@@ -1113,7 +1279,9 @@ function ovDashboard(){
     `<div class="ovbreadth"><div style="width:${up/total*100}%;background:var(--up)"></div>`+
     `<div style="width:${flat/total*100}%;background:var(--muted)"></div>`+
     `<div style="width:${down/total*100}%;background:var(--down)"></div></div></div>`;
-  return `<div class="ovcards">${idxCard}${amtCard}${breadthCard}</div>`;
+  const phase=ovMarketPhase();
+  const phaseHtml=phase?`<div class="ovphase">${escI(phase.badge)}</div>`:"";
+  return phaseHtml+`<div class="ovcards">${idxCard}${amtCard}${breadthCard}</div>`;
 }
 // 規則式定調句：素材＝貢獻第一群組＋領頭股、貢獻集中度、近30分佔比升幅最大次產業、拖累前1-2群組。
 // |指數漲跌點|<15 → 多空拉鋸語序；跌盤時整段鏡像（拖累/助漲互換）。
@@ -1201,13 +1369,16 @@ function ovDivergingBar(view){
 const ovArrow=diff=>diff==null?"":diff>0.3?' <span class="up">▲</span>':diff<-0.3?' <span class="down">▼</span>':"";
 function ovStrengthRows(){
   const mktAmt=(state.live.market&&state.live.market.tse&&state.live.market.tse.amt_yi)||0;
-  const d30=state.live.flow&&state.live.flow.mkt?state.live.flow.mkt.d30_yi:null;
+  const fl=state.live.flow, mkt=fl&&fl.mkt;
+  const d30=mkt?mkt.d30_yi:null;
+  const flowOk=!!(mkt&&mkt.d10_yi!=null&&mkt.d30_yi!=null);
   return Object.values(OV_SUB_CACHE).map(s=>{
     const amt_yi=s.amt/1e8, shr=mktAmt?amt_yi/mktAmt*100:0;
     const shr30=d30?(s.f30/1e8)/d30*100:null;
     const leaderName=(state.cl[s.leaderCode]&&state.cl[s.leaderCode].n)||s.leaderCode||"—";
     return {name:s.name, pts:s.pts, amt_yi, shr, shr30, diff:shr30!=null?shr30-shr:null,
-      up:s.up, n:s.n, leader:s.leaderCode?`${leaderName} ${sgnTxt(s.leaderPts)}`:"—"};
+      up:s.up, n:s.n, leader:s.leaderCode?`${leaderName} ${sgnTxt(s.leaderPts)}`:"—",
+      mom:flowOk?ovMomentum(s.f10,s.f30):{label:"—",cls:"mut"}};
   }).sort((a,b)=>Math.abs(b.pts)-Math.abs(a.pts));
 }
 function renderOvTable(){
@@ -1218,6 +1389,7 @@ function renderOvTable(){
     {h:"貢獻點",w:60,f:r=>sgn(r.pts,sgnTxt(r.pts))},
     {h:"成交佔比",w:64,f:r=>r.shr.toFixed(2)+"%"},
     {h:"近30分佔比",w:100,f:r=>r.shr30==null?'<span class="mut">盤中生效</span>':`${r.shr30.toFixed(1)}%${ovArrow(r.diff)}`},
+    {h:"30分動能",w:64,f:r=>`<span class="ovmom ${r.mom.cls}">${r.mom.label}</span>`},
     {h:"廣度",w:60,f:r=>`<span class="up">${r.up}</span>/${r.n}`},
     {h:"領頭股",cls:"l",w:110,f:r=>r.leader}];
   let html=`<div class="crumb"><b>次產業強弱總表</b> <span class="mut">依|貢獻點|排序${openState.expandAll?`（全部${rows.length}）`:"（前10）"}</span> `+
@@ -1242,6 +1414,7 @@ function renderOverview(){
   let html=ovDashboard();
   html+=ovHeadline();
   html+=`<div class="crumb"><b>貢獻點發散</b>（拉抬前6＋拖累前4）</div>`+ovViewPills()+ovDivergingBar(state.sub.ov.view);
+  html+=ovTreemapHtml();
   html+=renderOvTable();
   document.getElementById("main").innerHTML=html;
   const open=state.sub.ov.open;
@@ -1249,6 +1422,24 @@ function renderOverview(){
 }
 document.addEventListener("click",e=>{const b=e.target.closest("#ovExpand");if(!b)return;state.sub.ov.expandAll=!state.sub.ov.expandAll;render();});
 document.addEventListener("click",e=>{const b=e.target.closest("[data-ovview]");if(!b)return;state.sub.ov.view=b.dataset.ovview;render();});
+// 資金地圖 treemap 下鑽/回退：產業鏈→次產業→個股，點麵包屑逐層回退
+document.addEventListener("click",e=>{
+  const c=e.target.closest("[data-ovtree-chain]");
+  if(!c)return;
+  state.sub.ov.treeChain=decodeURIComponent(c.dataset.ovtreeChain); state.sub.ov.treeSub=null; render();
+});
+document.addEventListener("click",e=>{
+  const s=e.target.closest("[data-ovtree-sub]");
+  if(!s)return;
+  state.sub.ov.treeSub=decodeURIComponent(s.dataset.ovtreeSub); render();
+});
+document.addEventListener("click",e=>{
+  const cr=e.target.closest("[data-ovtree-crumb]");
+  if(!cr)return;
+  if(cr.dataset.ovtreeCrumb==="root"){state.sub.ov.treeChain=null; state.sub.ov.treeSub=null;}
+  else{state.sub.ov.treeSub=null;}
+  render();
+});
 
 function render(){
   for(const k in T)delete T[k];

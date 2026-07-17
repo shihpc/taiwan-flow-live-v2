@@ -151,6 +151,16 @@ async function buildLive(env) {
     live.flow = null;
     live.flow_err = String(e && e.message || e);
   }
+
+  // 分鐘動能序列（即時一覽 tab 第二期 sparkline）：1 次 get，附近 60 分；失敗不影響 /live 主體
+  try {
+    const ts = String(live.ts || "");
+    const sd = ts.slice(0, 10);
+    const arr = env.FLOW_KV && sd ? await env.FLOW_KV.get(`series:${sd}`, "json") : null;
+    live.series = seriesTail(arr);
+  } catch (e) {
+    live.series = [];
+  }
   return live;
 }
 
@@ -229,12 +239,16 @@ async function storeFrame(env) {
   const rows = await finSnapshot(env.FINMIND_TOKEN);
   let ts = null;
   const fr = {};   // {code: [累計成交額, 現價]}
+  let mktAmt = 0;  // 全市場累計成交額（原始值，個股加總，含001/101外的所有列）
+  let idxRow = null;   // 加權指數(001)當筆快照，供分鐘序列存指數值/漲跌點
   for (const r of rows) {
     const c = String(r.stock_id || "");
-    if (!c || c === "001" || c === "101") continue;
+    if (!c) continue;
+    if (c === "001") { idxRow = r; continue; }
+    if (c === "101") continue;
     ts = ts || String(r.date || "");
     const a = num(r.total_amount);
-    if (a > 0) fr[c] = [Math.round(a), orNull(r.close)];
+    if (a > 0) { fr[c] = [Math.round(a), orNull(r.close)]; mktAmt += a; }
   }
   if (!ts) throw new Error("snapshot 無資料");
   const d = ts.slice(0, 10), hm = ts.slice(11, 16);
@@ -246,7 +260,35 @@ async function storeFrame(env) {
     idx.push(hm);
     await env.FLOW_KV.put(idxKey, JSON.stringify(idx.sort()), { expirationTtl: 172800 });
   }
+  // 分鐘動能序列（即時一覽 tab 第二期）：單一 rolling key，繞開 fi 索引最終一致性偶爾漏筆的問題
+  // （fi 用 get-modify-put 也會漏，但 series 只需「近60分連續走勢」，單筆漏格不影響判讀；
+  // 用同一支 key 而非 list 掃描，讀寫成本固定 1 get + 1 put/分鐘）。失敗不影響 storeFrame 主體。
+  try {
+    await appendSeries(env, d, hm, mktAmt, idxRow);
+  } catch (e) {
+    console.log("appendSeries:", e && e.message);
+  }
   return { key: `f:${d}:${hm}`, stocks: Object.keys(fr).length };
+}
+// series:<date> = [{t:"HH:MM", amt:市場總成交額(億), idx:加權指數值|null, chg:漲跌點|null}, ...]
+// 保留當日全部（盤中每分鐘一筆，≤270 筆，遠低於 KV 單值 25MB 上限）；同一分鐘重跑覆寫最後一筆（冪等）。
+export async function appendSeries(env, d, hm, mktAmtRaw, idxRow) {
+  const key = `series:${d}`;
+  const arr = (await env.FLOW_KV.get(key, "json")) || [];
+  const point = {
+    t: hm,
+    amt: r1(mktAmtRaw / 1e8),
+    idx: idxRow ? orNull(idxRow.close) : null,
+    chg: idxRow ? orNull(idxRow.change_price) : null,
+  };
+  if (arr.length && arr[arr.length - 1].t === hm) arr[arr.length - 1] = point;
+  else arr.push(point);
+  await env.FLOW_KV.put(key, JSON.stringify(arr), { expirationTtl: 172800 });
+  return arr;
+}
+// /live 回應只帶近 60 分（前端 sparkline 用），KV 內仍保留當日全部
+export function seriesTail(arr, n = 60) {
+  return (arr || []).slice(-n);
 }
 
 // ---- 資金湧入指標（P3）----
