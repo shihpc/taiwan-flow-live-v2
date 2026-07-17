@@ -138,11 +138,14 @@ async function buildLive(env) {
     const { flow, per } = computeFlow(cl, items, baseline, frames);
     const blst = baseline.stocks || {};
     for (const code in live.stocks) {
-      const s = per[code] || [null, null, null, null];
+      const s = per[code] || [null, null, null, null, null];
       const b = blst[code] || [0, 0, 0, 0, 0, 0, 0];
-      live.stocks[code].push(s[0], s[1], s[2], s[3], b[1], b[2], b[3] || 0, b[4] || 0, b[5] || 0, b[6] || 0);
+      live.stocks[code].push(s[0], s[1], s[2], s[3], b[1], b[2], b[3] || 0, b[4] || 0, b[5] || 0, b[6] || 0, s[4]);
     }
-    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "r10", "it", "fi", "y1", "y2", "ints", "nl"];
+    // f30＝個股原始30分Δ成交額（同 f10 無 5 日基準正規化，純即時，追加於尾端不動既有欄序）：
+    // 即時一覽 tab 用來算次產業「近30分佔比」= 次產業 f30 加總 ÷ flow.mkt.d30_yi（c30 無法拿來反推，
+    // 因它已除以基準佔比且基準本身不外送前端）。
+    live.stock_cols = [...live.stock_cols, "f10", "c10", "c30", "r10", "it", "fi", "y1", "y2", "ints", "nl", "f30"];
     live.flow = flow;
   } catch (e) {
     live.flow = null;
@@ -276,7 +279,7 @@ async function pickFrames(env, d, nowMin, wins) {
 const frAmt = (v) => (v == null ? null : Array.isArray(v) ? v[0] : v);
 const frClose = (v) => (v == null || !Array.isArray(v) ? null : v[1]);
 
-function computeFlow(cl, items, baseline, frames) {
+export function computeFlow(cl, items, baseline, frames) {
   const bl = baseline.stocks || {}, tot5 = baseline.tot5 || 0;
   if (!tot5) return { flow: null, per: {} };
   const wins = Object.keys(frames).map(Number).sort((a, b) => a - b);
@@ -312,7 +315,7 @@ function computeFlow(cl, items, baseline, frames) {
       ? Math.round((o.d[w] / mktD[w]) / base * 100) / 100 : null;
     const p1 = o["p" + W1];
     const r10 = (p1 && o.close != null) ? Math.round((o.close / p1 - 1) * 10000) / 100 : null;
-    stockFlow[code] = [o.d[W1] != null ? o.d[W1] : null, cx(W1), cx(W2), r10];
+    stockFlow[code] = [o.d[W1] != null ? o.d[W1] : null, cx(W1), cx(W2), r10, o.d[W2] != null ? o.d[W2] : null];
   }
 
   // 次產業聚合（classify.p 第二層）
@@ -345,11 +348,17 @@ function computeFlow(cl, items, baseline, frames) {
       y: subsY[k] || null });
   }
   subList.sort((a, b) => b.d_yi - a.d_yi);
+  // 市場級短窗成交增量（即時一覽儀表列用）：沿用上面已算好的 mktD（全股 Δ 加總），
+  // 換算億元，不新增任何 KV 讀寫。10/30 分窗長對應 buildLive 呼叫 pickFrames 的 [10, 30]；
+  // 若某窗當下沒有可比對的 frame（例如開盤剛滿10分還沒有30分窗）該欄位回 null。
+  const toYi = (v) => (v == null ? null : Math.round(v / 1e6) / 100);
+  const mkt = { d10_yi: toYi(mktD[10]), d30_yi: toYi(mktD[30]) };
   const flow = {
     wins: { w1: W1, w2: W2 },
     frames: Object.fromEntries(wins.map((w) => [w, frames[w].name.slice(-5)])),
     baseline_date: baseline.date,
     subs: subList,
+    mkt,
   };
   return { flow, per: stockFlow };
 }
