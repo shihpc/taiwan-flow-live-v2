@@ -918,6 +918,42 @@ function insightGatherContext(){
       parts.push(`${dlabel("個股盤中資金集中 前15（依集中10分倍數）", primary)}\n${rows.map(line).join("\n")}`);
     }
   }
+  // e. 即時一覽快照（第三期 additive）：重用 ovComputeSubAgg 的次產業聚合，只讀即時欄位
+  //    （amt/pts/f30/chg/up/down/n 與 index.chgP、market 漲跌家數），不碰 c1/c2/y/it/fi/y1/y2/ints/nl/lw。
+  //    此段加在既有語境之後，失敗時靜默略過、不影響前面段落。
+  if (state.cl && live.stocks){
+    try{
+      const agg = Object.values(ovComputeSubAgg());
+      if (agg.length){
+        const seg = [];
+        const fmt = s => `${cleanSub(s.name)} ${(s.pts>0?"+":"")+s.pts.toFixed(1)}點`;
+        const lift = [...agg].filter(s=>s.pts>0).sort((a,b)=>b.pts-a.pts).slice(0,5);
+        const drag = [...agg].filter(s=>s.pts<0).sort((a,b)=>a.pts-b.pts).slice(0,3);
+        if (lift.length) seg.push(`貢獻拉抬前5（次產業）：${lift.map(fmt).join("、")}`);
+        if (drag.length) seg.push(`貢獻拖累前3（次產業）：${drag.map(fmt).join("、")}`);
+        const ix = (live.index&&live.index.tse)||{};
+        if (ix.chgP){
+          const top5 = Object.keys(live.stocks).filter(c=>(state.cl[c]||{}).t==="twse")
+            .map(c=>Math.abs((sval(c)||{}).pts||0)).sort((a,b)=>b-a).slice(0,5).reduce((a,b)=>a+b,0);
+          seg.push(`貢獻集中度：|貢獻點|前5個股合計 ${top5.toFixed(1)} 點，佔指數漲跌 ${(top5/Math.abs(ix.chgP)*100).toFixed(0)}%`);
+        }
+        const mkt30 = live.flow && live.flow.mkt && live.flow.mkt.d30_yi;
+        const mktAmt = (live.market&&live.market.tse&&live.market.tse.amt_yi)||0;
+        if (mkt30 && mktAmt){
+          const rising = agg.map(s=>{
+            const fullDay=(s.amt/1e8)/mktAmt*100, now30=(s.f30/1e8)/mkt30*100;
+            return {name:s.name, fullDay, now30, diff:now30-fullDay};
+          }).sort((a,b)=>b.diff-a.diff).slice(0,3);
+          seg.push(`近30分成交佔比升幅前3（次產業，全日→近30分）：${rising.map(r=>`${cleanSub(r.name)} ${r.fullDay.toFixed(1)}%→${r.now30.toFixed(1)}%`).join("、")}`);
+        } else seg.push(`近30分成交佔比升幅：盤中短窗資金未生效，此項略過。`);
+        const m = live.market||{};
+        const up=((m.tse&&m.tse.up)||0)+((m.otc&&m.otc.up)||0), down=((m.tse&&m.tse.down)||0)+((m.otc&&m.otc.down)||0);
+        const flat=((m.tse&&m.tse.flat)||0)+((m.otc&&m.otc.flat)||0);
+        if (up+down+flat>0) seg.push(`漲跌家數廣度：漲${up}／平${flat}／跌${down}`);
+        if (seg.length) parts.push(`${dlabel("即時一覽快照", primary)}\n${seg.join("\n")}`);
+      }
+    }catch(e){ /* 快照段組裝失敗不影響既有語境 */ }
+  }
   return { text: parts.join("\n\n"), primary, dates };
 }
 // 打開 adaptive thinking：Opus 4.8 省略 thinking=不思考，故明確指定；effort medium 平衡
@@ -1288,6 +1324,8 @@ function ovDashboard(){
 function ovHeadline(){
   const ix=(state.live.index&&state.live.index.tse)||{};
   if(ix.chgP==null)return `<div class="ovsent mut">大盤資料載入中…</div>`;
+  // 第三期：定調句框右緣「AI 深入解讀」→ 切到摘要分析 tab（不自動呼叫 Claude，沿用該 tab 既有按鈕流程）
+  const aiBtn=`<button class="seg2" data-ov-insight style="float:right;margin-left:8px">AI 深入解讀 →</button>`;
   const pIdx=ix.chgP;
   const subs=Object.values(OV_SUB_CACHE).filter(s=>s.n>=3);
   const flowOk=!!(state.live.flow&&state.live.flow.mkt&&state.live.flow.mkt.d30_yi);
@@ -1303,7 +1341,7 @@ function ovHeadline(){
     const parts=[];
     if(up1&&up1.pts>0)parts.push(`上有${cleanSub(up1.name)}（${sgnTxt(up1.pts)}點）`);
     if(dn1&&dn1.pts<0)parts.push(`下有${cleanSub(dn1.name)}（${sgnTxt(dn1.pts)}點）`);
-    return `<div class="ovsent">多空拉鋸：大盤${sgnTxt(pIdx)}點（${pctTxt(ix.chg)}）。${parts.join("，")}${parts.length?"。":""}`+
+    return `<div class="ovsent">${aiBtn}多空拉鋸：大盤${sgnTxt(pIdx)}點（${pctTxt(ix.chg)}）。${parts.join("，")}${parts.length?"。":""}`+
       `${flowOk?"":`<span class="mut">${flowSuffix}</span>`}</div>`;
   }
   const isUp=pIdx>0;
@@ -1327,7 +1365,7 @@ function ovHeadline(){
     .sort((a,b)=>isUp?a.pts-b.pts:b.pts-a.pts).slice(0,2);
   let dragClause="";
   if(dragCandidates.length)dragClause=`；${dragCandidates.map(s=>cleanSub(s.name)).join("、")}小幅${isUp?"拖累":"助漲"}`;
-  return `<div class="ovsent">大盤 ${sgnTxt(pIdx)} 點：${topClause||"資料不足"}${shareClause}${dragClause}。</div>`;
+  return `<div class="ovsent">${aiBtn}大盤 ${sgnTxt(pIdx)} 點：${topClause||"資料不足"}${shareClause}${dragClause}。</div>`;
 }
 // 貢獻點發散長條三視角：次產業(自聚合)／產業鏈(直接用 live.chain 既有加總)／個股(+其他合計殘差)
 function ovContribItems(view){
@@ -1421,6 +1459,8 @@ function renderOverview(){
   if(open){const dd=document.getElementById("ddOv");if(dd)dd.scrollIntoView({behavior:"smooth",block:"start"});}
 }
 document.addEventListener("click",e=>{const b=e.target.closest("#ovExpand");if(!b)return;state.sub.ov.expandAll=!state.sub.ov.expandAll;render();});
+// 第三期：定調句旁「AI 深入解讀」→ 切到摘要分析 tab（render() 會同步 nav 高亮；不自動觸發分析）
+document.addEventListener("click",e=>{const b=e.target.closest("[data-ov-insight]");if(!b)return;state.tab="insight";state.pool=null;render();});
 document.addEventListener("click",e=>{const b=e.target.closest("[data-ovview]");if(!b)return;state.sub.ov.view=b.dataset.ovview;render();});
 // 資金地圖 treemap 下鑽/回退：產業鏈→次產業→個股，點麵包屑逐層回退
 document.addEventListener("click",e=>{
