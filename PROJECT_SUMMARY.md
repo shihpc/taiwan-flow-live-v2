@@ -13,7 +13,7 @@
   欄位（flow.subs 的 c1/c2/y、個股 it/fi/y1/y2/ints/nl/lw）；唯二非即時參數＝昨收基準與
   發行股數。Worker 為此 additive 新增：`flow.mkt{d10_yi,d30_yi}`、個股尾欄 `f30`、
   `series:<date>` rolling key（每分鐘 append 市場總額/指數，繞開 fi 索引漏筆缺陷）＋
-  /live 頂層 `series`（近 60 筆）。前端新函式群 ov*（index.html ~1053-1500）。
+  /live 頂層 `series`（近 60 筆）。前端新函式群 ov*（index.html ~1113-1500）。
   **未解/待觀察**：全部功能僅在週末盤外驗證（定格/降級路徑），下一交易日開盤需實測
   series 累積、flow.mkt 生效、sparkline 與 treemap 角標；第四期（異動雷達＋提醒）、
   第五期（當日回放＋收盤總結）已規劃未實作，規劃在主對話 2026-07-18 紀錄。
