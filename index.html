@@ -309,7 +309,13 @@ function renderFlow(){
      `「法人強度」＝法人淨買額佔成交額，<span class="up">≥+5%</span>湧入股不再追高吃虧；`+
      `<span class="db">土洋同買</span>（投信外資皆≥2日，紅底）為湧入唯一翻正組合(+0.55%)。</div>`;
   if(!fl){
-    main.innerHTML=html+`<div class="loading">盤中每分鐘累積後生效（約 09:10 起）。目前無盤中序列資料。</div>`;
+    // flow=null 有兩種截然不同的原因：盤前正常累積中 vs Worker 端出錯（baseline 抓不到、
+    // frame cron 沒寫 KV…）。後者藏在 live.flow_err，不顯示的話壞了很難發現——一併亮出來。
+    const err=state.live&&state.live.flow_err;
+    main.innerHTML=html+`<div class="loading">盤中每分鐘累積後生效（約 09:10 起）。目前無盤中序列資料。`+
+      (err?`<br><span class="down">流向計算失敗（flow_err）：${escI(String(err))}</span><br>`+
+        `<span class="mut">非盤前時段看到此訊息＝Worker 端異常（baseline / KV frame cron），請檢查部署。</span>`:"")+
+      `</div>`;
     return;
   }
   html+=`<div class="note mut">窗口：10分(自${fl.frames["10"]||"—"}) / 30分(自${fl.frames["30"]||"—"}) · 基準日 ${fl.baseline_date}</div>`;
