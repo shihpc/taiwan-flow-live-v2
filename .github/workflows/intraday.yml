@@ -1,0 +1,55 @@
+name: intraday
+# 第七期 7a：盤中資料歸檔。KV frame TTL 僅 2 天，收盤後把「次產業 × 5分鐘時點」
+# 累積成交額矩陣＋全日市場分鐘序列落到 data/intraday/YYYY-MM-DD.json，
+# 給 8 月初的盤中訊號回測（7b）當原料。
+# 排 14:10 台北（06:10 UTC）：13:30 收盤、13:33 最後一格 frame 之後留緩衝，
+# frame 皆在當日 TTL 內。非交易日腳本自動優雅退出（無 frame → 不寫檔、不 commit）。
+# KV 讀量：54 時點 × ≤6 get ＋ series 1 get ≈ ≤325 讀/日，遠低於免費 10 萬/日。
+on:
+  schedule:
+    - cron: '10 6 * * 1-5'   # 週一~五 06:10 UTC = 14:10 台北
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '歸檔日期 YYYY-MM-DD（留空＝台北今日；KV TTL 2 天，僅近兩日有料）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  # 不 dispatch pages：data/intraday/ 是回測原料（raw 讀取），前端不讀，不需部署
+
+concurrency:
+  group: intraday
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: archive intraday
+        run: |
+          d="${{ github.event.inputs.date }}"
+          if [ -n "$d" ]; then
+            python src/archive_intraday.py --date "$d"
+          else
+            python src/archive_intraday.py
+          fi
+      - name: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/intraday/
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "intraday archive $(date -u +%FT%TZ)"
+          pushed=0
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push; then pushed=1; break; fi
+            sleep 4
+          done
+          if [ "$pushed" != "1" ]; then echo "::error::push failed after 5 retries"; exit 1; fi

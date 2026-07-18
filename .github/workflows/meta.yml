@@ -1,0 +1,77 @@
+name: meta
+# 第七期 7a：發行股數（貢獻點權重）月更。data/classify.json 是 v2 前端
+# （index.html 讀 .map）與 postmkt build_diag.py（跨 repo raw 讀）的共同上游，
+# 之前靠偶爾手動跑 src/meta.py，sh（發行張數）會悄悄過期。
+# 排每月第一個週六 08:00 台北（00:00 UTC 週六；cron 無法直接表達「第一個週六」，
+# 用每週六觸發＋日期 ≤7 守門）。手動 dispatch 不受守門限制。
+# schema 守門：commit 前驗 map[code] 鍵集合恆為 {n,e,c,p,t,sh}——下游兩站依賴，不得變。
+on:
+  schedule:
+    - cron: '0 0 * * 6'   # 每週六 00:00 UTC = 08:00 台北；下方 step 只放行每月第一個週六
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write   # 提交後 dispatch pages 部署（前端讀 data/classify.json）
+
+concurrency:
+  group: meta
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: first-Saturday gate
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%-d)" -gt 7 ]; then
+            echo "run=no" >> "$GITHUB_OUTPUT"; echo "非本月第一個週六，跳過"
+          else
+            echo "run=yes" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'yes'
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'yes'
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+        if: steps.gate.outputs.run == 'yes'
+      - name: rebuild classify.json
+        if: steps.gate.outputs.run == 'yes'
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python src/meta.py
+      - name: schema gate
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          python - <<'EOF'
+          import json
+          d = json.load(open("data/classify.json", encoding="utf-8"))
+          assert set(d) == {"generated_at", "count", "map"}, f"頂層鍵變了：{set(d)}"
+          assert d["count"] > 2500, f"count 異常偏低：{d['count']}"
+          keys = {k for v in d["map"].values() for k in v}
+          assert keys == {"n", "e", "c", "p", "t", "sh"}, f"map 值鍵集合變了：{keys}"
+          tsm = d["map"].get("2330")
+          assert tsm and tsm["sh"] > 20000000, f"2330 異常：{tsm}"
+          print(f"schema OK：count={d['count']}")
+          EOF
+      - name: commit
+        if: steps.gate.outputs.run == 'yes'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/classify.json
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "classify.json monthly rebuild $(date -u +%FT%TZ)"
+          pushed=0
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push; then pushed=1; break; fi
+            sleep 4
+          done
+          if [ "$pushed" != "1" ]; then echo "::error::push failed after 5 retries"; exit 1; fi
+          # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch 才會部署到網站
+          gh workflow run pages.yml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}
