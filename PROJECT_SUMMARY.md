@@ -1,9 +1,37 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-18（「即時一覽」tab 五期完工＋7a 盤中歸檔/權重月更＋第八期收盤總結落檔上線）
+最後更新：2026-07-18（「即時一覽」tab 五期完工＋7a 盤中歸檔/權重月更＋第八期收盤總結落檔＋第九期離線提醒基礎設施上線）
 
 ## 快速接手
 
+- **第九期 離線提醒基礎設施**（2026-07-18 完工部署；頁面關著也能收盤中重大事件通知）：
+  - **機制**：事件偵測併入既有每分鐘 frame 班（cron 上限 3 條已滿，不新增），storeFrame
+    成功後跑 `runAlerts()`（worker/src/index.js「第九期」段）；偵測失敗只 log 不影響 frame。
+    保守事件集兩種（訊號擴充等 8 月 7b 回測）：①加權指數 5 分變動 ≥40 點（`detectIdxEvent`，
+    用 series 判定，斷檔>8分不判）②晨報連湧次產業（morning.json `signals.cont_subs`，
+    raw fetch＋cf 快取 1h，零 KV 額度）近30分佔比−全日佔比 ≥3pp（`detectSubEvents`，
+    沿用 _ts 停滯/stale 降級防護）。同 id 事件 30 分去重（`dedupAlerts`）。
+    門檻 KV 可調：`npx wrangler kv key put --binding FLOW_KV alerts:cfg '{"idx5":40,"subpp":3}' --remote`。
+    KV 額度：讀 ≤6 get/分（盤中 ~1,600/日 vs 免費 10 萬）；**寫僅去重後有新事件時 put
+    `alerts:log` 單 key 一次**（典型 0~10 次/日，不吃緊繃的 write 1000/日）。
+  - **端點**：`/alerts/test` 手動驗通道（未設 secret 回 `{ok:false,reason:"未設定通道…"}`，
+    不觸外部請求）；`/alerts/log` 回近 24h 事件（單 key 1 get；KV 內留 48h/200 筆）。
+  - **通道可行性結論**：Cloudflare **Email Sending 不可行**——需先 onboard 自有網域 zone
+    （SPF/DKIM DNS 驗證，`wrangler email sending enable <domain>`），本帳戶（fed2df6b…）
+    無自有網域（全系統站點皆 GitHub Pages / workers.dev；`wrangler email sending list`
+    回 Unauthorized），不為此動帳戶層設定。主通道＝**通用 webhook**：Discord 格式
+    `{content}`；URL host 為 api.telegram.org 時自動改 `{chat_id,text}`（chat_id 取自 URL query）。
+  - **使用者要做的一個動作（外送最後一哩）**：建一個 Discord webhook——Discord 任一伺服器
+    →頻道設定→整合→Webhook→新增→複製 URL（形如 `https://discord.com/api/webhooks/…`），
+    然後在 `worker/` 下執行 `npx wrangler secret put ALERT_WEBHOOK` 貼上該 URL；
+    完成後開 `https://taiwan-flow-v2.shihpc.workers.dev/alerts/test` 應收到測試訊息。
+    （Telegram 替代：BotFather 建 bot 取 token，secret 填
+    `https://api.telegram.org/bot<token>/sendMessage?chat_id=<你的chat_id>`。）
+    未設定前偵測照跑、事件照記 `/alerts/log`（sent=0），只是不外送。
+  - 單元測試 worker/test/alerts.mjs（31 項：兩事件情境/門檻可調/30分去重/無 secret 靜默/
+    Discord・Telegram 格式/runAlerts 整合）。前端零改動、/live 舊欄位零改動（部署前後欄位
+    集 diff 為空）。**待觀察**：盤中實際觸發尚未發生過（部署於收盤後），下一交易日看
+    `/alerts/log`；事件②依賴 morning.json 晨報班正常產出。
 - **第八期 收盤總結落檔**（2026-07-18 完工，commit 3ba8586）：`src/build_daysummary.py`＋
   `daysummary.yml`（平日 14:05 台北＋dispatch 帶 date）——收盤後拉 Worker /live 定格重算
   收盤總結卡（ovSummaryCard）同口徑全日總結 → `data/daysummary/YYYY-MM-DD.json`＋

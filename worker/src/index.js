@@ -611,6 +611,159 @@ export async function dispatchMorning(env, fetchFn = fetch) {
   return true;
 }
 
+// ---- 第九期：離線提醒（盤中事件偵測 → webhook 外送；頁面關著也能收到）----
+// 誠實前提：只推「有依據」的保守事件集，訊號擴充等 8 月 7b 回測結果。
+//   ①加權指數 5 分變動 ≥ 門檻（預設 40 點）——大盤大幅波動，門檻 KV 可調（alerts:cfg）
+//   ②晨報「連湧」次產業（morning.json signals.cont_subs，已驗證多日連湧訊號打底）
+//     近30分佔比 − 全日佔比 ≥ 門檻（預設 3pp）——已在湧清單上的次產業盤中再度放量
+// 排程：併入既有每分鐘 frame 班（cron 上限 3 條已滿，不新增 cron），storeFrame 成功後跑，
+//   偵測失敗不影響 frame 主體。無 ALERT_WEBHOOK secret 時偵測照跑、只記 log 不外送（靜默）。
+// KV 額度（免費 write 1000/日 精打細算）：
+//   讀：cfg+series 每分鐘 2 get；連湧清單非空時另 fi+cur+old 3 get；有候選事件才讀 log 1 get
+//       → 盤中 ~270 分 × ≤6 get ≈ 1,600/日，遠低於免費 10 萬/日
+//   寫：僅「去重後有新事件」才 put alerts:log 一次（30 分去重 → 典型 0~10 次/日）
+// 通道：(a) Email——不可行（Cloudflare Email Sending 需 onboard 自有網域 zone 配 SPF/DKIM，
+//   本帳戶無自有網域，全系統站點皆 GitHub Pages / workers.dev；不為此動帳戶層設定）。
+//   (b) 通用 webhook（主通道）：secret ALERT_WEBHOOK，Discord 格式 {content}；
+//   URL host 為 api.telegram.org 時自動改 Telegram sendMessage 格式 {chat_id, text}。
+
+const ALERTS_LOG_KEY = "alerts:log";
+const ALERTS_CFG_KEY = "alerts:cfg";
+const ALERTS_DEFAULT_CFG = { idx5: 40, subpp: 3 };
+const ALERTS_DEDUP_MIN = 30;
+
+// 事件①：加權指數 5 分變動（純函式；series = [{t,amt,idx,chg}...]，hm = 當前分鐘）
+export function detectIdxEvent(series, hm, cfg) {
+  const arr = series || [];
+  if (!arr.length) return [];
+  const nowP = arr[arr.length - 1];
+  if (!nowP || nowP.t !== hm || nowP.idx == null) return [];   // 最新點不是本分鐘 → 不判（避免斷檔誤判）
+  const nowMin = hm2min(hm);
+  let ref = null;   // 取「最接近 now-5 且不早於 now-8」的點（容忍偶發漏格，斷檔過久不判）
+  for (const p of arr) {
+    const m = hm2min(p.t);
+    if (m <= nowMin - 5 && m >= nowMin - 8 && p.idx != null) ref = p;
+  }
+  if (!ref) return [];
+  const diff = r1(nowP.idx - ref.idx);
+  if (Math.abs(diff) < (cfg.idx5 || ALERTS_DEFAULT_CFG.idx5)) return [];
+  const up = diff > 0;
+  return [{ id: up ? "idx5-up" : "idx5-dn",
+    msg: `加權指數 5 分${up ? "急漲" : "急跌"} ${Math.abs(diff)} 點（${ref.t} ${ref.idx} → ${nowP.t} ${nowP.idx}）` }];
+}
+// 事件②：連湧次產業近30分佔比 − 全日佔比 ≥ subpp（純函式）
+// cur/old = frame 物件 {code:[累計額,價], _ts, _stale?}；cl = classify map；surge = 連湧清單
+export function detectSubEvents(cur, old, cl, surge, cfg) {
+  if (!cur || !old || !surge || !surge.length) return [];
+  if (cur._stale || old._stale) return [];
+  if (cur._ts && old._ts && cur._ts === old._ts) return [];   // 上游時戳停滯 → Δ 全 0，不判（07-16 教訓）
+  const want = new Set(surge);
+  const subCum = {}, subD = {};
+  let mktCum = 0, mktD = 0;
+  for (const code in cur) {
+    if (code.startsWith("_")) continue;                        // 保留 meta 鍵
+    const a1 = frAmt(cur[code]);
+    if (a1 == null) continue;
+    mktCum += a1;
+    const a0 = frAmt(old[code]);
+    const d = a0 != null && a1 >= a0 ? a1 - a0 : null;
+    if (d != null) mktD += d;
+    const info = cl[code];
+    if (!info || !info.p) continue;
+    for (const s of new Set(info.p.map((p) => p[1]))) {
+      if (!want.has(s)) continue;
+      subCum[s] = (subCum[s] || 0) + a1;
+      if (d != null) subD[s] = (subD[s] || 0) + d;
+    }
+  }
+  if (!(mktCum > 0) || !(mktD > 0)) return [];
+  const out = [];
+  const thr = cfg.subpp || ALERTS_DEFAULT_CFG.subpp;
+  for (const s of surge) {
+    const s30 = ((subD[s] || 0) / mktD) * 100;
+    const sDay = ((subCum[s] || 0) / mktCum) * 100;
+    if (s30 - sDay >= thr)
+      out.push({ id: `sub-${s}`,
+        msg: `連湧次產業「${s}」近30分佔比 ${r1(s30)}%，高於全日 ${r1(sDay)}%（+${r1(s30 - sDay)}pp）` });
+  }
+  return out;
+}
+// 30 分去重（純函式）：同 id 事件 30 分內只發一次；logArr = [{ts(epoch ms), id, ...}]
+export function dedupAlerts(events, logArr, nowMs) {
+  const last = {};
+  for (const e of logArr || []) if (e.id) last[e.id] = Math.max(last[e.id] || 0, e.ts || 0);
+  return (events || []).filter((e) => !(last[e.id] && nowMs - last[e.id] < ALERTS_DEDUP_MIN * 60e3));
+}
+// webhook 請求建構（純函式，可離線驗格式）：Discord {content}；Telegram {chat_id,text}
+export function webhookRequest(urlStr, text) {
+  let body = { content: text };
+  try {
+    const u = new URL(urlStr);
+    if (u.hostname === "api.telegram.org")
+      body = { chat_id: u.searchParams.get("chat_id"), text };
+  } catch { /* URL 異常照 Discord 格式送，由對端回錯 */ }
+  return { url: urlStr, init: { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } };
+}
+// 外送：無 secret → {sent:false}（靜默，不打任何外部請求）；失敗 throw 由呼叫端記 log
+export async function sendAlert(env, text, fetchFn = fetch) {
+  if (!env.ALERT_WEBHOOK) return { sent: false, reason: "未設定通道（wrangler secret put ALERT_WEBHOOK）" };
+  const { url, init } = webhookRequest(env.ALERT_WEBHOOK, text);
+  const r = await fetchFn(url, init);
+  if (!r.ok) throw new Error(`webhook HTTP ${r.status}`);
+  return { sent: true, channel: "webhook" };
+}
+// I/O 協調器：每分鐘 frame 班 storeFrame 成功後呼叫（scheduled 端已 catch，不影響主體）
+export async function runAlerts(env, tp, frameKey, fetchFn = fetch) {
+  const wallMin = tp.hour * 60 + tp.minute;
+  if (wallMin < 9 * 60 + 6 || wallMin > 13 * 60 + 31) return { skipped: true };   // 開盤滿 5 分後才有窗
+  const d = tp.date;
+  const hm = `${String(tp.hour).padStart(2, "0")}:${String(tp.minute).padStart(2, "0")}`;
+  const [cfgKV, series] = await Promise.all([
+    env.FLOW_KV.get(ALERTS_CFG_KEY, "json"),
+    env.FLOW_KV.get(`series:${d}`, "json"),
+  ]);
+  const cfg = { ...ALERTS_DEFAULT_CFG, ...(cfgKV || {}) };
+  let events = detectIdxEvent(series, hm, cfg);
+  // 事件②：連湧清單非空且已過 09:35（湊得出 30 分窗）才讀 frame（省 KV get）
+  let surge = [];
+  try {
+    const mj = await fetchJSON(`${env.DATA_BASE}/morning.json`, 3600);
+    surge = (mj.signals && mj.signals.cont_subs) || [];
+  } catch { /* 晨報缺檔 → 事件②跳過，事件①不受影響 */ }
+  if (surge.length && wallMin >= 9 * 60 + 35 && frameKey) {
+    try {
+      const times = (await env.FLOW_KV.get(`fi:${d}`, "json")) || [];
+      let oldHm = null;   // 最接近 now-30 的既有 frame（同 pickFrames 邏輯，不用 list）
+      for (const t of times) { const m = hm2min(t); if (m <= wallMin - 30 && m < wallMin - 2) oldHm = t; }
+      if (oldHm) {
+        const [cur, old, cls] = await Promise.all([
+          env.FLOW_KV.get(frameKey, "json"),
+          env.FLOW_KV.get(`f:${d}:${oldHm}`, "json"),
+          fetchJSON(`${env.DATA_BASE}/classify.json`, 86400),
+        ]);
+        events = events.concat(detectSubEvents(cur, old, (cls && cls.map) || {}, surge, cfg));
+      }
+    } catch (e) { console.log("alerts sub:", e && e.message); }
+  }
+  if (!events.length) return { events: 0 };
+  // 有候選才讀 log（去重）；有新事件才寫（KV write 精打細算）
+  const logObj = (await env.FLOW_KV.get(ALERTS_LOG_KEY, "json")) || { ev: [] };
+  const nowMs = Date.now();
+  const fresh = dedupAlerts(events, logObj.ev, nowMs);
+  if (!fresh.length) return { events: 0, deduped: events.length };
+  let sent = false;
+  try {
+    const r = await sendAlert(env, fresh.map((e) => `[台股提醒 ${hm}] ${e.msg}`).join("\n"), fetchFn);
+    sent = r.sent;
+  } catch (e) { console.log("alerts send:", e && e.message); }
+  const ev = logObj.ev.concat(fresh.map((e) => ({ ts: nowMs, id: e.id, msg: e.msg, sent: sent ? 1 : 0 })));
+  // 只留近 48h 且至多 200 筆（單 key 防膨脹；/alerts/log 只回近 24h）
+  const trimmed = ev.filter((e) => nowMs - e.ts < 48 * 3600e3).slice(-200);
+  await env.FLOW_KV.put(ALERTS_LOG_KEY, JSON.stringify({ ev: trimmed }), { expirationTtl: 172800 });
+  return { events: fresh.length, sent };
+}
+
 // ---- 美股自選（/uswatch?t=PLTR,ARM）----
 // 前端自選清單存 localStorage，這裡代抓 USStockPrice 並算與 build_us.py 相同的指標。
 // 每檔 FinMind 回應以 cf cacheTtl 1800s 邊緣快取（日線資料，30 分綽綽有餘）。
@@ -673,10 +826,15 @@ export default {
       return;
     }
     // frame key 由喚醒時間決定（scheduledTime）；失敗除 log 外寫 err:<date> 可見化（不再靜默斷檔）
-    ctx.waitUntil(storeFrame(env, event.scheduledTime).catch(async (e) => {
-      console.log("storeFrame:", e && e.message);
-      await recordFrameErr(env, tp.date, e);
-    }));
+    // 第九期：frame 存成功後接離線提醒偵測（同一班、不加 cron）；偵測失敗只 log，不影響 frame
+    ctx.waitUntil(storeFrame(env, event.scheduledTime)
+      .then((res) => (res && res.key)
+        ? runAlerts(env, tp, res.key).catch((e) => console.log("alerts:", e && e.message))
+        : null)
+      .catch(async (e) => {
+        console.log("storeFrame:", e && e.message);
+        await recordFrameErr(env, tp.date, e);
+      }));
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -721,8 +879,27 @@ export default {
         return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
       }
     }
+    if (url.pathname === "/alerts/test") {  // 第九期：手動驗證外送通道（未設 secret 回明確 JSON，不觸外部請求）
+      try {
+        const r = await sendAlert(env, `[台股提醒 測試] 通道驗證訊息（${taipeiParts().date}），收到代表 ALERT_WEBHOOK 設定成功`);
+        return json({ ok: r.sent, ...r }, { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ ok: false, sent: false, error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
+    if (url.pathname === "/alerts/log") {  // 第九期：近 24h 事件紀錄（單 key 1 get，無 list）
+      try {
+        const lg = (await env.FLOW_KV.get(ALERTS_LOG_KEY, "json")) || { ev: [] };
+        const now = Date.now();
+        const events = lg.ev.filter((e) => now - e.ts < 24 * 3600e3)
+          .map((e) => ({ at: new Date(e.ts).toISOString(), id: e.id, msg: e.msg, sent: e.sent }));
+        return json({ events }, { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
     if (url.pathname !== "/live") {
-      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/replay"] };
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/replay", "/alerts/test", "/alerts/log"] };
       // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
       // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
       if (url.pathname === "/" && env.FLOW_KV) {
