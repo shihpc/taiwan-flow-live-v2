@@ -19,18 +19,34 @@
   - **通道可行性結論**：Cloudflare **Email Sending 不可行**——需先 onboard 自有網域 zone
     （SPF/DKIM DNS 驗證，`wrangler email sending enable <domain>`），本帳戶（fed2df6b…）
     無自有網域（全系統站點皆 GitHub Pages / workers.dev；`wrangler email sending list`
-    回 Unauthorized），不為此動帳戶層設定。主通道＝**通用 webhook**：Discord 格式
-    `{content}`；URL host 為 api.telegram.org 時自動改 `{chat_id,text}`（chat_id 取自 URL query）。
-  - **使用者要做的一個動作（外送最後一哩）**：建一個 Discord webhook——Discord 任一伺服器
-    →頻道設定→整合→Webhook→新增→複製 URL（形如 `https://discord.com/api/webhooks/…`），
-    然後在 `worker/` 下執行 `npx wrangler secret put ALERT_WEBHOOK` 貼上該 URL；
-    完成後開 `https://taiwan-flow-v2.shihpc.workers.dev/alerts/test` 應收到測試訊息。
-    （Telegram 替代：BotFather 建 bot 取 token，secret 填
-    `https://api.telegram.org/bot<token>/sendMessage?chat_id=<你的chat_id>`。）
+    回 Unauthorized），不為此動帳戶層設定。可用通道兩種、**可並存（都設就都發）**：
+    ①通用 webhook（secret `ALERT_WEBHOOK`）：Discord 格式 `{content}`；URL host 為
+    api.telegram.org 時自動改 `{chat_id,text}`（chat_id 取自 URL query）。
+    ②LINE（LINE Notify 已於 2025-03 終止 → 走 Messaging API bot push）：secrets
+    `LINE_TOKEN`＋`LINE_USER_ID` 兩者齊全才發；userId 靠 `/line/webhook` 一次性擷取
+    （KV `line:uid` 變化才寫；**該端點不驗 x-line-signature**——簽章需 channel secret、
+    為降低設定步驟省略，僅用於一次性取 userId，取得後可關閉 LINE 平台 webhook）。
+    單通道失敗不擋另一通道（/alerts/test 回應 errors 可見）。
+  - **使用者要做的動作（外送最後一哩，擇一即可）**：
+    - Discord（最快）：任一伺服器→頻道設定→整合→Webhook→新增→複製 URL，
+      在 `worker/` 下 `npx wrangler secret put ALERT_WEBHOOK` 貼上；
+      開 `https://taiwan-flow-v2.shihpc.workers.dev/alerts/test` 應收到測試訊息。
+    - LINE：①建 LINE 官方帳號並到 developers.line.biz console 對該帳號開 Messaging API
+      channel ②Messaging API 分頁發 channel access token（long-lived）→
+      `npx wrangler secret put LINE_TOKEN` ③LINE 平台 Webhook URL 填
+      `https://taiwan-flow-v2.shihpc.workers.dev/line/webhook` 並開啟 Use webhook
+      ④手機加該 bot 好友、傳任意一則訊息 ⑤開 `/alerts/test`，回應的 `line_uid` 就是你的
+      userId（U 開頭）→ `npx wrangler secret put LINE_USER_ID` 貼上 ⑥再開 `/alerts/test`
+      應收到 LINE 測試訊息 ⑦（可選）回 console 關閉 webhook。
+      **額度**：Messaging API 免費 500 則/月；本事件集保守（30 分去重、兩事件型）
+      典型 0~10 則/日 ≈ 月上限 ~220 則，在額度內；若日後 7b 擴充訊號需重估。
+    - Telegram 替代：BotFather 建 bot 取 token，`ALERT_WEBHOOK` 填
+      `https://api.telegram.org/bot<token>/sendMessage?chat_id=<你的chat_id>`。
     未設定前偵測照跑、事件照記 `/alerts/log`（sent=0），只是不外送。
-  - 單元測試 worker/test/alerts.mjs（31 項：兩事件情境/門檻可調/30分去重/無 secret 靜默/
-    Discord・Telegram 格式/runAlerts 整合）。前端零改動、/live 舊欄位零改動（部署前後欄位
-    集 diff 為空）。**待觀察**：盤中實際觸發尚未發生過（部署於收盤後），下一交易日看
+  - 單元測試 worker/test/alerts.mjs（43 項：兩事件情境/門檻可調/30分去重/無 secret 靜默/
+    Discord・Telegram 格式/LINE 兩secret齊全才發・payload・並存雙發・單通道失敗不擋/
+    /line/webhook uid 變化才寫/runAlerts 整合）。前端零改動、/live 舊欄位零改動（部署前後
+    欄位集 diff 為空）。**待觀察**：盤中實際觸發尚未發生過（部署於收盤後），下一交易日看
     `/alerts/log`；事件②依賴 morning.json 晨報班正常產出。
 - **第八期 收盤總結落檔**（2026-07-18 完工，commit 3ba8586）：`src/build_daysummary.py`＋
   `daysummary.yml`（平日 14:05 台北＋dispatch 帶 date）——收盤後拉 Worker /live 定格重算

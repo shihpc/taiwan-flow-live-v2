@@ -624,8 +624,11 @@ export async function dispatchMorning(env, fetchFn = fetch) {
 //   寫：僅「去重後有新事件」才 put alerts:log 一次（30 分去重 → 典型 0~10 次/日）
 // 通道：(a) Email——不可行（Cloudflare Email Sending 需 onboard 自有網域 zone 配 SPF/DKIM，
 //   本帳戶無自有網域，全系統站點皆 GitHub Pages / workers.dev；不為此動帳戶層設定）。
-//   (b) 通用 webhook（主通道）：secret ALERT_WEBHOOK，Discord 格式 {content}；
+//   (b) 通用 webhook：secret ALERT_WEBHOOK，Discord 格式 {content}；
 //   URL host 為 api.telegram.org 時自動改 Telegram sendMessage 格式 {chat_id, text}。
+//   (c) LINE（LINE Notify 已於 2025-03 終止 → 走 Messaging API bot push）：
+//   secrets LINE_TOKEN（channel access token）＋LINE_USER_ID 兩者齊全才發；
+//   userId 靠 /line/webhook 一次性擷取（KV line:uid，變化才寫）。通道可並存（都設就都發）。
 
 const ALERTS_LOG_KEY = "alerts:log";
 const ALERTS_CFG_KEY = "alerts:cfg";
@@ -705,13 +708,44 @@ export function webhookRequest(urlStr, text) {
   return { url: urlStr, init: { method: "POST",
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } };
 }
-// 外送：無 secret → {sent:false}（靜默，不打任何外部請求）；失敗 throw 由呼叫端記 log
+// LINE Messaging API push 請求建構（純函式，可離線驗格式）
+export function lineRequest(token, userId, text) {
+  return { url: "https://api.line.me/v2/bot/message/push", init: { method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+    body: JSON.stringify({ to: userId, messages: [{ type: "text", text }] }) } };
+}
+// 外送：通道可並存（webhook 與 LINE 都設就都發）；單通道失敗不擋另一通道（errors 帶回）；
+// 全部未設 → {sent:false}（靜默，不打任何外部請求）
 export async function sendAlert(env, text, fetchFn = fetch) {
-  if (!env.ALERT_WEBHOOK) return { sent: false, reason: "未設定通道（wrangler secret put ALERT_WEBHOOK）" };
-  const { url, init } = webhookRequest(env.ALERT_WEBHOOK, text);
-  const r = await fetchFn(url, init);
-  if (!r.ok) throw new Error(`webhook HTTP ${r.status}`);
-  return { sent: true, channel: "webhook" };
+  const jobs = [];
+  if (env.ALERT_WEBHOOK) jobs.push(["webhook", webhookRequest(env.ALERT_WEBHOOK, text)]);
+  if (env.LINE_TOKEN && env.LINE_USER_ID) jobs.push(["line", lineRequest(env.LINE_TOKEN, env.LINE_USER_ID, text)]);
+  if (!jobs.length)
+    return { sent: false, reason: "未設定通道（wrangler secret put ALERT_WEBHOOK，或 LINE_TOKEN＋LINE_USER_ID）" };
+  const ok = [], errs = [];
+  for (const [name, { url, init }] of jobs) {
+    try {
+      const r = await fetchFn(url, init);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      ok.push(name);
+    } catch (e) { errs.push(`${name}: ${String(e && e.message || e)}`); }
+  }
+  const out = { sent: ok.length > 0, channels: ok };
+  if (errs.length) out.errors = errs;
+  return out;
+}
+// /line/webhook：LINE 平台事件進來時擷取 source.userId 存 KV（單 key line:uid，變化才寫）。
+// 僅用於「一次性取 userId」設定 LINE_USER_ID；不驗 x-line-signature（簽章需 channel secret，
+// 為降低設定步驟省略）——取得 userId 後可關閉 LINE 平台 webhook，此端點平時收不到流量。
+export async function handleLineWebhook(env, body) {
+  let uid = null;
+  for (const ev of (body && body.events) || []) {
+    if (ev && ev.source && ev.source.userId) { uid = ev.source.userId; break; }
+  }
+  if (!uid || !env.FLOW_KV) return { ok: true, uid: null };
+  const prev = await env.FLOW_KV.get("line:uid");
+  if (prev !== uid) await env.FLOW_KV.put("line:uid", uid);
+  return { ok: true, uid };
 }
 // I/O 協調器：每分鐘 frame 班 storeFrame 成功後呼叫（scheduled 端已 catch，不影響主體）
 export async function runAlerts(env, tp, frameKey, fetchFn = fetch) {
@@ -881,10 +915,21 @@ export default {
     }
     if (url.pathname === "/alerts/test") {  // 第九期：手動驗證外送通道（未設 secret 回明確 JSON，不觸外部請求）
       try {
-        const r = await sendAlert(env, `[台股提醒 測試] 通道驗證訊息（${taipeiParts().date}），收到代表 ALERT_WEBHOOK 設定成功`);
+        const r = await sendAlert(env, `[台股提醒 測試] 通道驗證訊息（${taipeiParts().date}），收到代表提醒通道設定成功`);
+        // KV 有 line:uid（使用者傳過訊息給 bot）就附帶顯示，供設定 LINE_USER_ID 時抄用
+        const uid = env.FLOW_KV ? await env.FLOW_KV.get("line:uid") : null;
+        if (uid) r.line_uid = uid;
         return json({ ok: r.sent, ...r }, { "Cache-Control": "no-store" });
       } catch (e) {
         return json({ ok: false, sent: false, error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
+    if (url.pathname === "/line/webhook") {  // 第九期 LINE：一次性 userId 擷取（詳 handleLineWebhook 註解）
+      try {
+        const body = request.method === "POST" ? await request.json().catch(() => null) : null;
+        return json(await handleLineWebhook(env, body), { "Cache-Control": "no-store" });
+      } catch (e) {   // LINE 平台要求回 200：任何錯誤照回 ok（僅 log 用途）
+        return json({ ok: true, error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
       }
     }
     if (url.pathname === "/alerts/log") {  // 第九期：近 24h 事件紀錄（單 key 1 get，無 list）

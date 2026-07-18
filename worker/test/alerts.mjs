@@ -1,6 +1,7 @@
 // 第九期：離線提醒——事件判定/去重/通道 離線單元測試（無需 token，mock KV/fetch）
 // 執行：cd worker && node test/alerts.mjs
-import { detectIdxEvent, detectSubEvents, dedupAlerts, webhookRequest, sendAlert, runAlerts } from "../src/index.js";
+import { detectIdxEvent, detectSubEvents, dedupAlerts, webhookRequest, sendAlert, runAlerts,
+  lineRequest, handleLineWebhook } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -98,6 +99,55 @@ function chk(name, ok, detail) {
   chk("無 secret 回設定指引", (r.reason || "").includes("ALERT_WEBHOOK"), r.reason);
   const r2 = await sendAlert({ ALERT_WEBHOOK: "https://discord.com/api/webhooks/1/a" }, "msg", fetchFn);
   chk("有 secret 走 webhook", r2.sent === true && called === 1, JSON.stringify(r2));
+}
+
+// ---- LINE 通道：兩 secret 齊全才發、payload 格式、與 webhook 並存雙發、單通道失敗不擋 ----
+{
+  const calls = [];
+  const fetchFn = async (url, init) => { calls.push({ url, init }); return { ok: true }; };
+  let r = await sendAlert({ LINE_TOKEN: "tok" }, "hi", fetchFn);
+  chk("LINE 只有 token 不發（靜默）", r.sent === false && calls.length === 0, JSON.stringify(r));
+  r = await sendAlert({ LINE_USER_ID: "U123" }, "hi", fetchFn);
+  chk("LINE 只有 userId 不發（靜默）", r.sent === false && calls.length === 0, JSON.stringify(r));
+  r = await sendAlert({ LINE_TOKEN: "tok", LINE_USER_ID: "U123" }, "hi", fetchFn);
+  chk("LINE 兩 secret 齊全發送", r.sent === true && calls.length === 1 && r.channels.join() === "line", JSON.stringify(r));
+  const b = JSON.parse(calls[0].init.body);
+  chk("LINE push URL/payload", calls[0].url === "https://api.line.me/v2/bot/message/push"
+    && b.to === "U123" && b.messages.length === 1 && b.messages[0].type === "text" && b.messages[0].text === "hi",
+    calls[0].url + " " + calls[0].init.body);
+  chk("LINE Bearer 認證", calls[0].init.headers.Authorization === "Bearer tok", JSON.stringify(calls[0].init.headers));
+  calls.length = 0;
+  r = await sendAlert({ ALERT_WEBHOOK: "https://discord.com/api/webhooks/1/a",
+    LINE_TOKEN: "tok", LINE_USER_ID: "U123" }, "hi", fetchFn);
+  chk("webhook+LINE 並存雙發", r.sent === true && calls.length === 2
+    && r.channels.join() === "webhook,line", JSON.stringify(r));
+  // 單通道失敗（webhook 500）不擋 LINE，errors 帶回
+  const fetchHalf = async (url, init) => ({ ok: !url.includes("discord.com"), status: 500 });
+  r = await sendAlert({ ALERT_WEBHOOK: "https://discord.com/api/webhooks/1/a",
+    LINE_TOKEN: "tok", LINE_USER_ID: "U123" }, "hi", fetchHalf);
+  chk("單通道失敗不擋另一通道", r.sent === true && r.channels.join() === "line"
+    && r.errors.length === 1 && r.errors[0].startsWith("webhook:"), JSON.stringify(r));
+}
+
+// ---- /line/webhook：uid 擷取寫 KV（變化才寫）----
+{
+  const store = new Map(); const puts = [];
+  const kv = {
+    async get(k) { const v = store.get(k); return v === undefined ? null : v; },
+    async put(k, v) { store.set(k, v); puts.push(k); },
+  };
+  const env = { FLOW_KV: kv };
+  let r = await handleLineWebhook(env, { events: [{ type: "message", source: { type: "user", userId: "U9" } }] });
+  chk("webhook 事件寫入 uid", r.ok === true && r.uid === "U9" && store.get("line:uid") === "U9", JSON.stringify(r));
+  r = await handleLineWebhook(env, { events: [{ source: { userId: "U9" } }] });
+  chk("同 uid 再進不重寫（變化才寫）", r.uid === "U9" && puts.length === 1, String(puts.length));
+  r = await handleLineWebhook(env, { events: [{ source: { userId: "U10" } }] });
+  chk("uid 變化時覆寫", r.uid === "U10" && store.get("line:uid") === "U10" && puts.length === 2, String(puts.length));
+  const before = puts.length;
+  r = await handleLineWebhook(env, { events: [] });
+  chk("空事件回 200 不寫", r.ok === true && r.uid === null && puts.length === before, JSON.stringify(r));
+  r = await handleLineWebhook(env, null);
+  chk("空 body 不炸", r.ok === true && r.uid === null, JSON.stringify(r));
 }
 
 // ---- runAlerts 整合（mock KV + mock fetch）：偵測→去重→寫 log 一次 ----
