@@ -1,9 +1,16 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-18（「即時一覽」tab 五期完工＋7a 盤中歸檔/權重月更上線）
+最後更新：2026-07-18（「即時一覽」tab 五期完工＋7a 盤中歸檔/權重月更＋第八期收盤總結落檔上線）
 
 ## 快速接手
 
+- **第八期 收盤總結落檔**（2026-07-18 完工，commit 3ba8586）：`src/build_daysummary.py`＋
+  `daysummary.yml`（平日 14:05 台北＋dispatch 帶 date）——收盤後拉 Worker /live 定格重算
+  收盤總結卡（ovSummaryCard）同口徑全日總結 → `data/daysummary/YYYY-MM-DD.json`＋
+  `latest.json`（保留近 30 交易日；非交易日 /live 日期不符優雅退出）。下游：taiwan-stock-news
+  晨報「昨日資金流向」段跨 repo raw 讀 latest.json（讀不到整段隱藏）。已知限制：上游
+  /replay 全日 series 常態只剩尾筆（2026-07-18 實測），全日高低 hi/lo 以 null 誠實降級，
+  待 series 修復後自動恢復。
 - **7a 盤中歸檔＋權重月更**（2026-07-18 完工，commit 9db1e96＋修補 1c188cd，fresh-context
   驗收 7/7 PASS）：①`src/archive_intraday.py`＋`intraday.yml`（平日 14:10 台北＋dispatch
   帶 date）——收盤後拉 Worker /replay 存全日 series＋「次產業×5分時點(09:05–13:30 共54點)」
