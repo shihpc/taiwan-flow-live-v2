@@ -44,6 +44,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 優雅退出（非交易日/無 frame）時 data/intraday/ 可能不存在，git add 會報
+          # pathspec 錯（2026-07-18 首跑踩到）——先擋
+          if [ ! -d data/intraday ]; then echo "no data/intraday（優雅退出）"; exit 0; fi
           git add data/intraday/
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git commit -m "intraday archive $(date -u +%FT%TZ)"
