@@ -317,6 +317,25 @@ async function pickFrames(env, d, nowMin, wins) {
   return out;
 }
 
+// ---- 第五期：當日回放 ----
+// /replay?t=HH:MM：直接按 key 規則讀 f:<date>:<HH:MM>（不經 fi 索引——索引已知會漏筆），
+// 該分鐘缺格時往前逐分鐘回退最多 5 分鐘（≤6 次 get，無 list）。
+// date 參數僅供驗證／測試用（正式前端不帶，預設台北今日）。錯誤一律 200＋{error}（不 500）。
+export async function replayFrame(env, d, t) {
+  if (!/^\d{2}:\d{2}$/.test(t || "")) return { error: "t 需為 HH:MM（09:00–13:30）" };
+  let m = hm2min(t);
+  if (m > 13 * 60 + 30) m = 13 * 60 + 30;   // 收盤後的時間夾到 13:30
+  if (m < 9 * 60) return { error: "盤前時段無盤中資料（09:00 起）", date: d, t };
+  for (let i = 0; i <= 5; i++) {
+    const mm = m - i;
+    if (mm < 9 * 60) break;
+    const hm = `${String(Math.floor(mm / 60)).padStart(2, "0")}:${String(mm % 60).padStart(2, "0")}`;
+    const fr = await env.FLOW_KV.get(`f:${d}:${hm}`, "json");
+    if (fr) return { t: hm, date: d, stocks: fr };
+  }
+  return { error: "該時段無盤中資料（該分鐘與往前 5 分鐘皆無 frame）", date: d, t };
+}
+
 // frame 舊格式（純數字）相容
 const frAmt = (v) => (v == null ? null : Array.isArray(v) ? v[0] : v);
 const frClose = (v) => (v == null || !Array.isArray(v) ? null : v[1]);
@@ -634,8 +653,23 @@ export default {
       if (!list.length) return json({ error: "t 參數需為逗號分隔代號（≤12 檔）" });
       return json({ rows: await usWatch(env, list) }, { "Cache-Control": "public, max-age=300" });
     }
+    if (url.pathname === "/replay") {  // 第五期：當日回放（frame 當日不變 → 命中時短快取 60s）
+      const dq = url.searchParams.get("date") || "";   // date 僅供驗證/測試（正式前端不帶＝台北今日）
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(dq) ? dq : taipeiParts().date;
+      const t = url.searchParams.get("t");
+      try {
+        if (t === null) {   // 不帶 t：回當日全日分鐘序列（收盤總結曲線用；1 次 get，無 list）
+          const series = (await env.FLOW_KV.get(`series:${d}`, "json")) || [];
+          return json({ date: d, series }, { "Cache-Control": "public, max-age=60" });
+        }
+        const out = await replayFrame(env, d, t);
+        return json(out, { "Cache-Control": out.error ? "no-store" : "public, max-age=60" });
+      } catch (e) {
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
     if (url.pathname !== "/live") {
-      return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch"] });
+      return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/replay"] });
     }
     // stale-while-revalidate：新鮮(≤LIVE_TTL秒)直接回；過期但未太舊(≤STALE秒)先回舊資料、
     // 背景重建下一份（使用者永遠毫秒級回應，不用同步等 FinMind）；太舊才同步重建。

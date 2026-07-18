@@ -1,6 +1,6 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-18（「即時一覽」tab 三期上線）
+最後更新：2026-07-18（「即時一覽」tab 五期全數完工）
 
 ## 快速接手
 
@@ -14,9 +14,22 @@
   發行股數。Worker 為此 additive 新增：`flow.mkt{d10_yi,d30_yi}`、個股尾欄 `f30`、
   `series:<date>` rolling key（每分鐘 append 市場總額/指數，繞開 fi 索引漏筆缺陷）＋
   /live 頂層 `series`（近 60 筆）。前端新函式群 ov*（index.html ~1113-1500）。
-  **未解/待觀察**：全部功能僅在週末盤外驗證（定格/降級路徑），下一交易日開盤需實測
-  series 累積、flow.mkt 生效、sparkline 與 treemap 角標；第四期（異動雷達＋提醒）、
-  第五期（當日回放＋收盤總結）已規劃未實作，規劃在主對話 2026-07-18 紀錄。
+  第四期（盤中異動雷達＋自訂提醒，純前端，commit 9debfe6）與第五期（當日回放＋收盤總結，
+  2026-07-18 日間完工）皆已上線。**第五期要點**：Worker 新端點 `/replay?t=HH:MM`
+  （直讀 `f:<date>:<HH:MM>` frame 不經 fi 索引、缺格往前回退 ≤5 分鐘 ≤6 次 get 無 list；
+  `date` 參數僅驗證/總結卡用；不帶 `t` 回 `series:<date>` 全日序列）；前端回放模式
+  （滑桿 09:00–13:30、debounce 500ms、`ovVal()` 資料入口讓整條 ov 渲染鏈自動吃回放重建值：
+  昨收=close−dp、Δ指數≈昨收指數×Σ(dp×sh)/Σ(昨收×sh) 市值權重近似、pts 同 worker 鏈路、
+  ETF 排除；短窗欄位一律「回放模式不適用」、回放中暫停 pull 重繪與提醒）；收盤總結卡
+  （13:35 後全日口徑＋複製摘要鈕，「升幅最大」以全日貢獻點最高口徑呈現）。
+  單元測試 worker/test/replay.mjs（14 項）。
+  **未解/待觀察**：①盤中未實測——下一交易日開盤需觀察 series 累積、flow.mkt、回放滑桿
+  真實 frame 重建；②**frame 落格管線有洞**：KV 實查 2026-07-16 全日僅 26 格（每分鐘 cron
+  應 ~270 格）、2026-07-17（五）盤中一格都沒有——回放/短窗功能品質受上游落格率制約，
+  需查 cron 觸發率或 FinMind 快照失敗率（storeFrame throw 只 log）；③第五期改動
+  （index.html/worker/src/index.js/worker/test/replay.mjs/本檔）尚未 commit，且本機 main
+  已領先 origin 1 個 commit（第四期），push 前必 fetch 檢查；④test/parity.mjs 在 HEAD
+  即有 3 項 lw fixture 漂移失敗（非第四/五期造成）。
 - 現況：v2 已收斂為「純即時看盤站＋跨站資料中樞」。前端為 6 個即時 tab＋1 個摘要分析 tab；
   晨報、主動ETF 的**前端**已拆到「新聞晨報」「盤後分析」兩個姊妹站，
   但兩者的**資料管線仍在本 repo**，下游站跨 repo 讀 `data/`。
