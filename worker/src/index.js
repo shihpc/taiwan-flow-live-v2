@@ -135,7 +135,7 @@ async function buildLive(env) {
       ? await pickFrames(env, ts.slice(0, 10), hm2min(ts.slice(11, 16)), [10, 30])
       : {};
     const items = Object.entries(live.stocks).map(([code, a]) => ({ code, amt: a[1], close: a[2] }));
-    const { flow, per } = computeFlow(cl, items, baseline, frames);
+    const { flow, per } = computeFlow(cl, items, baseline, frames, ts);
     const blst = baseline.stocks || {};
     for (const code in live.stocks) {
       const s = per[code] || [null, null, null, null, null];
@@ -233,10 +233,29 @@ export function aggregate(cl, rows, limits, lw) {
 const mkZero = () => ({ amt: 0, up: 0, down: 0, flat: 0, n: 0, ul: 0, dl: 0 });
 
 // ---- 盤中分鐘 frame（Cron 每分鐘寫入 KV，資金湧入的時間序列）----
-// key = f:<資料日>:<HH:MM>（取快照自身時間戳 → 收盤後重跑覆寫同 key，冪等）
-// value = {code: 累計成交額}；expirationTtl 2 天自動清理
-async function storeFrame(env) {
-  const rows = await finSnapshot(env.FINMIND_TOKEN);
+// key = f:<台北日期>:<HH:MM>——2026-07-18 起取「喚醒時間」event.scheduledTime 的台北牆鐘。
+//   舊制取 FinMind 快照自身時戳，07-16/17 上游時戳停滯時同 key 被反覆覆寫、當日格數塌縮
+//   （斷檔放大器）；牆鐘 key 保證每分鐘一格，上游停滯只會讓相鄰格內容相同（Δ=0 → 下游降級）。
+// value = {code: [累計成交額, 現價], _ts: FinMind 原始時戳, _stale?: 1}
+//   _ts/_stale 為保留 meta 鍵（股票代號不會撞名）；computeFlow 依 code 查表不受影響，
+//   replayFrame 回傳前抽出改掛頂層 src_ts/stale。expirationTtl 2 天自動清理。
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export async function storeFrame(env, scheduledTime, opts = {}) {
+  const snap = opts.snapFn || (() => finSnapshot(env.FINMIND_TOKEN));
+  let rows;
+  try { rows = await snap(); }
+  catch (e) {
+    // FinMind 偶發失敗 → 短暫間隔後重試一次；第二次失敗照舊 throw，由 scheduled 端記 err:<date>
+    await sleep(opts.retryMs != null ? opts.retryMs : 1500);
+    rows = await snap();
+  }
+  const tp = taipeiParts(new Date(scheduledTime || Date.now()));
+  const d = tp.date;
+  const hm = `${String(tp.hour).padStart(2, "0")}:${String(tp.minute).padStart(2, "0")}`;
+  const wallMin = tp.hour * 60 + tp.minute;
+  // 收盤後（>13:35）快照不再變化：舊制覆寫同 key 冪等無害，牆鐘 key 會長出盤後假格
+  // （frame cron 跑到台北 13:59）→ 直接跳過；/snap 手動測試可帶 force=1 略過此檢查
+  if (!opts.force && wallMin > 13 * 60 + 35) return { skipped: true, reason: "盤後（>13:35）不落格" };
   let ts = null;
   const fr = {};   // {code: [累計成交額, 現價]}
   let mktAmt = 0;  // 全市場累計成交額（原始值，個股加總，含001/101外的所有列）
@@ -251,7 +270,11 @@ async function storeFrame(env) {
     if (a > 0) { fr[c] = [Math.round(a), orNull(r.close)]; mktAmt += a; }
   }
   if (!ts) throw new Error("snapshot 無資料");
-  const d = ts.slice(0, 10), hm = ts.slice(11, 16);
+  const nStocks = Object.keys(fr).length;
+  // FinMind 時戳與牆鐘差 >3 分（或日期不同）→ 照存但標 stale（07-16 時戳停滯型異常可見化）
+  const stale = ts.slice(0, 10) !== d || !(Math.abs(wallMin - hm2min(ts.slice(11, 16))) <= 3);
+  fr._ts = ts;
+  if (stale) fr._stale = 1;
   await env.FLOW_KV.put(`f:${d}:${hm}`, JSON.stringify(fr), { expirationTtl: 172800 });
   // 維護當日 frame 時間索引（pickFrames 用 get 讀索引，不用 list——KV 免費版 list 僅 1000次/日）
   const idxKey = `fi:${d}`;
@@ -268,7 +291,21 @@ async function storeFrame(env) {
   } catch (e) {
     console.log("appendSeries:", e && e.message);
   }
-  return { key: `f:${d}:${hm}`, stocks: Object.keys(fr).length };
+  return { key: `f:${d}:${hm}`, src_ts: ts, stale, stocks: nStocks };
+}
+// storeFrame 失敗可見化（07-16/17 斷檔兩天無人知的教訓）：err:<date> 存最後錯誤＋當日計數，
+// TTL 2 天；「僅錯誤內容變化時寫」省 KV write 額度——同錯誤連續發生時 count 不再累加（可接受取捨）。
+export async function recordFrameErr(env, dateISO, e) {
+  try {
+    const msg = String(e && e.message || e);
+    const key = `err:${dateISO}`;
+    const prev = await env.FLOW_KV.get(key, "json");
+    if (prev && prev.last === msg) return false;
+    await env.FLOW_KV.put(key, JSON.stringify({
+      last: msg, at: new Date().toISOString(), count: ((prev && prev.count) || 0) + 1,
+    }), { expirationTtl: 172800 });
+    return true;
+  } catch (e2) { console.log("recordFrameErr:", e2 && e2.message); return false; }
 }
 // series:<date> = [{t:"HH:MM", amt:市場總成交額(億), idx:加權指數值|null, chg:漲跌點|null}, ...]
 // 保留當日全部（盤中每分鐘一筆，≤270 筆，遠低於 KV 單值 25MB 上限）；同一分鐘重跑覆寫最後一筆（冪等）。
@@ -331,7 +368,13 @@ export async function replayFrame(env, d, t) {
     if (mm < 9 * 60) break;
     const hm = `${String(Math.floor(mm / 60)).padStart(2, "0")}:${String(mm % 60).padStart(2, "0")}`;
     const fr = await env.FLOW_KV.get(`f:${d}:${hm}`, "json");
-    if (fr) return { t: hm, date: d, stocks: fr };
+    if (fr) {
+      // meta 保留鍵抽出改掛頂層（additive；舊格式 frame 無 _ts → 欄位缺省），stocks 保持乾淨
+      const out = { t: hm, date: d, stocks: fr };
+      if (fr._ts) { out.src_ts = fr._ts; delete fr._ts; }
+      if (fr._stale) { out.stale = 1; delete fr._stale; }
+      return out;
+    }
   }
   return { error: "該時段無盤中資料（該分鐘與往前 5 分鐘皆無 frame）", date: d, t };
 }
@@ -340,9 +383,15 @@ export async function replayFrame(env, d, t) {
 const frAmt = (v) => (v == null ? null : Array.isArray(v) ? v[0] : v);
 const frClose = (v) => (v == null || !Array.isArray(v) ? null : v[1]);
 
-export function computeFlow(cl, items, baseline, frames) {
+export function computeFlow(cl, items, baseline, frames, nowTs) {
   const bl = baseline.stocks || {}, tot5 = baseline.tot5 || 0;
   if (!tot5) return { flow: null, per: {} };
+  // stale 防護（07-16/17 上游時戳停滯教訓）：窗口 frame 的 _ts 與當前快照時戳完全相同
+  // → 上游停滯、該窗 Δ 必為 0，視同「無 frame」走既有降級（cx/mkt 回 null），不產生假訊號
+  if (nowTs) for (const w of Object.keys(frames)) {
+    const f = frames[w];
+    if (f && f.data && f.data._ts === nowTs) delete frames[w];
+  }
   const wins = Object.keys(frames).map(Number).sort((a, b) => a - b);
   if (!wins.length) return { flow: null, per: {} };
 
@@ -623,14 +672,18 @@ export default {
       ctx.waitUntil(runSentinel(env, tp).catch((e) => console.log("sentinel:", e && e.message)));
       return;
     }
-    ctx.waitUntil(storeFrame(env).catch((e) => console.log("storeFrame:", e.message)));
+    // frame key 由喚醒時間決定（scheduledTime）；失敗除 log 外寫 err:<date> 可見化（不再靜默斷檔）
+    ctx.waitUntil(storeFrame(env, event.scheduledTime).catch(async (e) => {
+      console.log("storeFrame:", e && e.message);
+      await recordFrameErr(env, tp.date, e);
+    }));
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
-    if (url.pathname === "/snap") {  // 手動觸發存 frame（測試/補格用）
+    if (url.pathname === "/snap") {  // 手動觸發存 frame（測試/補格用；force=1 略過收盤後守門）
       try {
-        return json(await storeFrame(env));
+        return json(await storeFrame(env, undefined, { force: url.searchParams.get("force") === "1" }));
       } catch (e) {
         return json({ error: String(e && e.message || e) });
       }
@@ -669,7 +722,22 @@ export default {
       }
     }
     if (url.pathname !== "/live") {
-      return json({ ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/replay"] });
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/replay"] };
+      // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
+      // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
+      if (url.pathname === "/" && env.FLOW_KV) {
+        try {
+          const tpd = taipeiParts().date;
+          const [fi, err] = await Promise.all([
+            env.FLOW_KV.get(`fi:${tpd}`, "json"),
+            env.FLOW_KV.get(`err:${tpd}`, "json"),
+          ]);
+          out.health = { date: tpd, frames_today: (fi || []).length, last_err: err || null };
+        } catch (e) {
+          out.health = { error: String(e && e.message || e) };
+        }
+      }
+      return json(out);
     }
     // stale-while-revalidate：新鮮(≤LIVE_TTL秒)直接回；過期但未太舊(≤STALE秒)先回舊資料、
     // 背景重建下一份（使用者永遠毫秒級回應，不用同步等 FinMind）；太舊才同步重建。
