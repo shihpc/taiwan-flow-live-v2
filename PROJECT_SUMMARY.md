@@ -23,13 +23,15 @@
   ETF 排除；短窗欄位一律「回放模式不適用」、回放中暫停 pull 重繪與提醒）；收盤總結卡
   （13:35 後全日口徑＋複製摘要鈕，「升幅最大」以全日貢獻點最高口徑呈現）。
   單元測試 worker/test/replay.mjs（14 項）。
-  **未解/待觀察**：①盤中未實測——下一交易日開盤需觀察 series 累積、flow.mkt、回放滑桿
-  真實 frame 重建；②**frame 落格管線有洞**：KV 實查 2026-07-16 全日僅 26 格（每分鐘 cron
-  應 ~270 格）、2026-07-17（五）盤中一格都沒有——回放/短窗功能品質受上游落格率制約，
-  需查 cron 觸發率或 FinMind 快照失敗率（storeFrame throw 只 log）；③第五期改動
-  （index.html/worker/src/index.js/worker/test/replay.mjs/本檔）尚未 commit，且本機 main
-  已領先 origin 1 個 commit（第四期），push 前必 fetch 檢查；④test/parity.mjs 在 HEAD
-  即有 3 項 lw fixture 漂移失敗（非第四/五期造成）。
+  **frame 落格斷檔已修復**（2026-07-18，commit 6bf3342，已部署）：根因＝FinMind snapshot
+  上游 07-16/17 異常（時戳停滯/整天失敗）＋設計放大器（frame key 用資料時戳命名→塌縮、
+  錯誤靜默）。修法：key 改 event.scheduledTime 台北牆鐘＋value 存 _ts/_stale、失敗重試一次、
+  err:<date> 錯誤可見化、Worker `/` 根路徑 health{frames_today,last_err} 可日常巡檢；
+  computeFlow 對 stale 窗口降級、/replay 附 src_ts。單測 worker/test/frames.mjs 33 項。
+  **未解/待觀察**：①盤中未實測——下一交易日開盤需觀察 series 累積、flow.mkt、每分鐘
+  frame 不塌縮（看 `/` health 的 frames_today）、回放滑桿真實 frame 重建；
+  ②小項：13:36+ 收盤守門在 FinMind 呼叫之後，盤後 cron 尾段每日多 ~24 次快照 API（非阻斷）；
+  ③test/parity.mjs 在 HEAD 即有 3 項 lw fixture 漂移失敗（先於本輪五期，另案處理）。
 - 現況：v2 已收斂為「純即時看盤站＋跨站資料中樞」。前端為 6 個即時 tab＋1 個摘要分析 tab；
   晨報、主動ETF 的**前端**已拆到「新聞晨報」「盤後分析」兩個姊妹站，
   但兩者的**資料管線仍在本 repo**，下游站跨 repo 讀 `data/`。
