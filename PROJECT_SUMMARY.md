@@ -1,9 +1,20 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-18（「即時一覽」tab 五期全數完工）
+最後更新：2026-07-18（「即時一覽」tab 五期完工＋7a 盤中歸檔/權重月更上線）
 
 ## 快速接手
 
+- **7a 盤中歸檔＋權重月更**（2026-07-18 完工，commit 9db1e96＋修補 1c188cd，fresh-context
+  驗收 7/7 PASS）：①`src/archive_intraday.py`＋`intraday.yml`（平日 14:10 台北＋dispatch
+  帶 date）——收盤後拉 Worker /replay 存全日 series＋「次產業×5分時點(09:05–13:30 共54點)」
+  累積成交額矩陣到 `data/intraday/YYYY-MM-DD.json`（聚合口徑同 computeFlow p 去重多對多；
+  缺格記 null；無 frame 優雅退出不寫檔；KV 讀 ≤325/日）；②`meta.yml`（每週六 00:00 UTC
+  cron＋「日≤7」守門＝每月第一個週六 08:00 台北；dispatch 不受限）跑既有 src/meta.py 重建
+  classify.json，commit 前有 schema 守門（map 值鍵恆為 n/e/c/p/t/sh，下游 v2 前端＋postmkt
+  build_diag 依賴）。**續作指針（7b，8 月初）**：data/intraday/ 累積 ≥10 交易日後回測
+  「盤中佔比躍升/動能加速」的 T+30分/收盤延續性；注意 2026-07-18.json 是週六 stale 資料
+  （frames[i].stale=1、僅 12:20 一點），回測時應以 stale 與 n_hit 過濾；meta 與 intraday
+  同日先後跑時 intraday 用 checkout 當下的 classify 快照（檔內自洽，屬預期）。
 - 「即時一覽」tab（2026-07-18 夜間三期完工，現為**預設 tab**、第 7 個 tab）：綜合呈現
   「此刻誰在推動大盤」——儀表列（加權/櫃買、廣度條、成交值＋資金速率＋大盤 sparkline、
   盤前/收盤定格徽章）、規則式定調句（旁有「AI 深入解讀」鈕→切 insight tab，不自動呼叫）、
