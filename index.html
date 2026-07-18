@@ -108,6 +108,12 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 .ovt-flat{background:var(--panel2);color:var(--fg)}
 .ovtfoot{font-size:11px;color:var(--dim);margin:2px 0 6px}
 .ovmom{font-size:11px;font-weight:700}
+/* 即時一覽 tab（第四期：盤中異動雷達＋自訂提醒） */
+.ovradar{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0}
+.ovradar>div{flex:1;min-width:250px}
+.ovtoastwrap{position:fixed;right:12px;bottom:12px;z-index:60;display:flex;flex-direction:column;gap:8px;max-width:min(340px,86vw)}
+.ovtoast{background:var(--panel2);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;font-size:13px;line-height:1.5;box-shadow:0 6px 18px rgba(0,0,0,.55);animation:ovtoastin .25s ease}
+@keyframes ovtoastin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 </style>
 </head>
 <body>
@@ -148,7 +154,7 @@ const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
 
 // 摘要分析可選模型（與 postmkt/news 三站共用 localStorage key：insight_model / anthropic_key）
 const INSIGHT_MODELS=[["claude-opus-4-8","Opus 4.8（最佳判讀，約NT$3/次）"],["claude-sonnet-5","Sonnet 5（近Opus、約半價更快）"]];
-const state={tab:"ov", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{ov:{open:null,view:"sub",expandAll:false,treeChain:null,treeSub:null}, exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null,openEtf:null}},
+const state={tab:"ov", idx:"tse", pool:null, live:null, cl:null, us:null, morning:null, aetf:null, sub:{ov:{open:null,view:"sub",expandAll:false,treeChain:null,treeSub:null,radarClosed:false,alertOpen:false}, exchange:{open:null}, chain:{open:null,opensub:null}, flow:{open:null}, outflow:{open:null}, aetf:{open:null,openEtf:null}},
   insight:null, insightLoading:false, insightErr:null,
   insightModel: localStorage.getItem("insight_model")||"claude-opus-4-8"};
 
@@ -1447,12 +1453,16 @@ function renderOvTable(){
   return html;
 }
 function renderOverview(){
+  // 第四期：使用者正在提醒設定面板輸入時跳過重繪（20 秒自動刷新會清空輸入；比照 renderInsight 的 token 輸入保護）
+  const act=document.activeElement;
+  if(act&&/^ovAl/.test(act.id||""))return;
   OV_SUB_CACHE=ovComputeSubAgg();
   renderMarket();   // mkcard 雖隱藏，仍需更新 #tsline 資料時間列
   let html=ovDashboard();
   html+=ovHeadline();
   html+=`<div class="crumb"><b>貢獻點發散</b>（拉抬前6＋拖累前4）</div>`+ovViewPills()+ovDivergingBar(state.sub.ov.view);
   html+=ovTreemapHtml();
+  html+=ovRadarHtml();
   html+=renderOvTable();
   document.getElementById("main").innerHTML=html;
   const open=state.sub.ov.open;
@@ -1479,6 +1489,207 @@ document.addEventListener("click",e=>{
   if(cr.dataset.ovtreeCrumb==="root"){state.sub.ov.treeChain=null; state.sub.ov.treeSub=null;}
   else{state.sub.ov.treeSub=null;}
   render();
+});
+
+// ---- 第四期：盤中異動雷達＋自訂提醒（純前端；全即時原則同上）----
+// 短窗欄位定義（worker computeFlow 確認）：f10=近10分成交增量(原始元)、f30=近30分、
+// r10=近10分價格變化%（close/窗口起點價-1）——三者皆純盤中即時，可用。
+// c10/c30 為 (窗Δ/市場Δ)÷(a5/tot5)，分母含 5 日常態基準 → 依全即時鐵律禁用，本區不取。
+const OV_RADAR_STK_MIN=3e7;   // 個股榜近10分額下限（元）：過濾冷門股（同資金湧入 tab 門檻）
+const OV_RADAR_SUB_MIN=0.3e8; // 次產業榜近10分聚合額下限（元）
+const OV_BURST_RATIO=0.08;    // 爆量門檻：近10分額佔全日成交比 ≥8%（均勻盤 10/270≈3.7% 的兩倍餘）
+const OV_BURST_R10=1.0;       // 爆量急動的短窗漲跌門檻（%）
+// flow 短窗體系是否生效（盤前/盤外/Worker 異常 → null → 整區降級「盤中生效」）
+function ovFlowActive(){
+  const fl=state.live&&state.live.flow;
+  return !!(fl&&fl.mkt&&fl.mkt.d10_yi!=null&&fl.mkt.d10_yi>0);
+}
+// 個股短窗池：有 r10/f10 且過金額門檻，依 r10 由大到小
+function ovRadarStocks(){
+  const rows=[];
+  for(const c in state.live.stocks){
+    const v=sval(c); if(!v||v.r10==null||v.f10==null)continue;
+    if(v.f10<OV_RADAR_STK_MIN)continue;
+    const info=state.cl[c]||{};
+    rows.push({c,name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,r10:v.r10,f10:v.f10,chgp:v.chg,price:v.close,amt:v.amt||0});
+  }
+  rows.sort((a,b)=>b.r10-a.r10);
+  return rows;
+}
+// 榜2：近10分佔比 vs 全日佔比落差最大次產業 前5（f10聚合÷flow.mkt.d10_yi 對比 amt÷market.tse.amt_yi）
+function ovRadarSubs(){
+  const d10=state.live.flow&&state.live.flow.mkt?state.live.flow.mkt.d10_yi:null;
+  const mktAmt=(state.live.market&&state.live.market.tse&&state.live.market.tse.amt_yi)||0;
+  if(!d10||!mktAmt)return [];
+  return Object.values(OV_SUB_CACHE).filter(s=>s.n>=3&&s.f10>=OV_RADAR_SUB_MIN)
+    .map(s=>{const now10=(s.f10/1e8)/d10*100, full=(s.amt/1e8)/mktAmt*100;
+      return {name:s.name,now10,full,diff:now10-full};})
+    .sort((a,b)=>b.diff-a.diff).slice(0,5);
+}
+// 榜3：爆量急動＝近10分額佔全日比異常 ＋ |r10| 超門檻（漲跌同列、紅綠自明）
+function ovRadarBurst(all){
+  return all.filter(r=>r.amt>0&&r.f10/r.amt>=OV_BURST_RATIO&&Math.abs(r.r10)>=OV_BURST_R10)
+    .map(r=>({...r,ratio:r.f10/r.amt*100}))
+    .sort((a,b)=>b.ratio-a.ratio).slice(0,8);
+}
+const ovR10Cell=r=>r.r10==null?'<span class="mut">—</span>':sgn(r.r10,(r.r10>0?"+":"")+r.r10.toFixed(2)+"%");
+function ovRadarHtml(){
+  const st=state.sub.ov, open=!st.radarClosed;
+  const head=`<div class="crumb"><b>盤中異動雷達</b> <span class="clk" data-ovradar-toggle>${open?"收合":"展開"}</span>`+
+    ` <span class="mut">近10分視角 · 20秒隨頁刷新</span>`+
+    ` <button class="seg2" data-ovalert-gear style="float:right">⚙ 提醒設定</button></div>`;
+  let body="";
+  if(open){
+    if(!ovFlowActive()){
+      body=`<div class="loading">短窗資料未生效：<b>盤中生效</b>（開盤後每分鐘累積，約 09:10 起）。</div>`;
+    }else{
+      const all=ovRadarStocks();
+      const up=all.filter(r=>r.r10>0).slice(0,5);
+      const dn=all.filter(r=>r.r10<0).slice(-5).reverse();  // 最急殺在前
+      const b1=tbl([
+        {h:"急拉前5／急殺後5",cls:"l",w:110,f:r=>r.name},
+        {h:"近10分%",w:66,f:ovR10Cell},
+        {h:"近10分額",w:70,f:r=>yi(r.f10/1e8)},
+        {h:"漲跌%",w:60,f:r=>r.chgp==null?'<span class="mut">—</span>':sgn(r.chgp,pct(r.chgp))}],[...up,...dn]);
+      const subs=ovRadarSubs();
+      const b2=tbl([
+        {h:"佔比升溫次產業",cls:"l",w:110,f:r=>cleanSub(r.name)},
+        {h:"近10分佔比",w:76,f:r=>r.now10.toFixed(1)+"%"},
+        {h:"全日佔比",w:66,f:r=>r.full.toFixed(1)+"%"},
+        {h:"落差",w:60,f:r=>sgn(r.diff,(r.diff>0?"+":"")+r.diff.toFixed(1)+"pp")}],subs);
+      const burst=ovRadarBurst(all);
+      const b3=tbl([
+        {h:"爆量急動",cls:"l",w:110,f:r=>r.name},
+        {h:"近10分/全日",w:80,f:r=>`<b>${r.ratio.toFixed(1)}%</b>`},
+        {h:"近10分%",w:66,f:ovR10Cell},
+        {h:"近10分額",w:70,f:r=>yi(r.f10/1e8)}],burst);
+      const empty=t=>`<div class="note mut">${t}</div>`;
+      body=`<div class="ovradar">`+
+        `<div>${[...up,...dn].length?b1:empty("暫無達門檻個股（近10分額≥"+OV_RADAR_STK_MIN/1e8+"億）。")}</div>`+
+        `<div>${subs.length?b2:empty("暫無達門檻次產業。")}</div>`+
+        `<div>${burst.length?b3:empty("暫無爆量急動（近10分佔全日≥"+(OV_BURST_RATIO*100)+"%且|近10分|≥"+OV_BURST_R10+"%）。")}</div>`+
+        `</div>`+
+        `<div class="note mut">個股榜門檻：近10分額≥${OV_RADAR_STK_MIN/1e8}億。回測顯示個股爆量追高歷史上平均不利，此為觀察用。</div>`;
+    }
+  }
+  return head+ovAlertPanelHtml()+body;
+}
+// ---- 自訂提醒（localStorage 持久化；預設全關）----
+const OV_ALERT_KEY="tflive2_alerts";
+const OV_ALERT_DEF={en1:false,n1:30,en2:false,x2:1.5,en3:false,codes:"",y3:1.5,notif:false};
+function ovAlertCfg(){
+  try{return Object.assign({},OV_ALERT_DEF,JSON.parse(localStorage.getItem(OV_ALERT_KEY)||"{}"));}
+  catch(e){return Object.assign({},OV_ALERT_DEF);}
+}
+function ovAlertPanelHtml(){
+  if(!state.sub.ov.alertOpen)return "";
+  const cfg=ovAlertCfg();
+  const supp=typeof Notification!=="undefined";
+  const inStyle="background:var(--bg);border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:4px 6px;font-size:13px";
+  const notifBtn=cfg.notif&&supp&&Notification.permission==="granted"
+    ?`<button class="seg2 on" data-ovalert-notif>🔔 瀏覽器通知已啟用（點此停用）</button>`
+    :(supp?`<button class="seg2" data-ovalert-notif>啟用瀏覽器通知</button>`
+          :`<span class="mut" style="font-size:11px">此瀏覽器不支援通知，僅頁內 toast</span>`);
+  return `<div class="card" style="font-size:13px;line-height:2">`+
+    `<b>自訂提醒</b> <span class="mut" style="font-size:11px">設定存本機 · <b>頁面開著才有效</b>（關頁即停，非伺服器推播）· 同一標的同向 10 分鐘內不重複 · 預設全關</span>`+
+    `<div><label><input type="checkbox" id="ovAlEn1"${cfg.en1?" checked":""}> 加權指數 5 分鐘變動超過 ±</label>`+
+    `<input type="number" id="ovAlN1" value="${+cfg.n1||30}" min="1" style="${inStyle};width:64px"> 點`+
+    ` <span class="mut" style="font-size:11px">（分鐘序列不足 5 筆時此項待命）</span></div>`+
+    `<div><label><input type="checkbox" id="ovAlEn2"${cfg.en2?" checked":""}> 任一次產業近10分佔比高出全日佔比</label>`+
+    `<input type="number" id="ovAlX2" value="${+cfg.x2||1.5}" min="0.1" step="0.5" style="${inStyle};width:64px"> 個百分點</div>`+
+    `<div><label><input type="checkbox" id="ovAlEn3"${cfg.en3?" checked":""}> 自選台股短窗急動：近10分漲跌超過 ±</label>`+
+    `<input type="number" id="ovAlY3" value="${+cfg.y3||1.5}" min="0.1" step="0.5" style="${inStyle};width:64px"> %</div>`+
+    `<div style="display:flex;gap:6px;align-items:center"><span style="white-space:nowrap">自選代號</span>`+
+    `<input id="ovAlCodes" value="${escI(cfg.codes||"")}" placeholder="逗號分隔，如 2330,2454" style="${inStyle};flex:1;min-width:0"></div>`+
+    `<div style="display:flex;gap:8px;margin-top:4px;align-items:center;flex-wrap:wrap"><button class="btn" data-ovalert-save>儲存設定</button>${notifBtn}</div>`+
+    `</div>`;
+}
+function ovAlertSave(){
+  const gv=id=>document.getElementById(id);
+  const ck=id=>!!(gv(id)&&gv(id).checked);
+  const nm=(id,d)=>{const v=parseFloat((gv(id)||{}).value);return isFinite(v)&&v>0?v:d;};
+  const old=ovAlertCfg();
+  const cfg={en1:ck("ovAlEn1"),n1:nm("ovAlN1",30),en2:ck("ovAlEn2"),x2:nm("ovAlX2",1.5),
+    en3:ck("ovAlEn3"),y3:nm("ovAlY3",1.5),
+    codes:String((gv("ovAlCodes")||{}).value||"").replace(/\s+/g,""),notif:old.notif};
+  localStorage.setItem(OV_ALERT_KEY,JSON.stringify(cfg));
+}
+function ovAlertNotifToggle(){
+  const cfg=ovAlertCfg();
+  if(cfg.notif){cfg.notif=false;localStorage.setItem(OV_ALERT_KEY,JSON.stringify(cfg));ovToast("已停用瀏覽器通知（頁內 toast 照常）");render();return;}
+  if(typeof Notification==="undefined"){ovToast("此瀏覽器不支援通知，僅頁內 toast");return;}
+  Notification.requestPermission().then(p=>{
+    const c2=ovAlertCfg();
+    if(p==="granted"){c2.notif=true;localStorage.setItem(OV_ALERT_KEY,JSON.stringify(c2));ovToast("瀏覽器通知已啟用（頁面開著才有效）");}
+    else ovToast("未授權通知，僅頁內 toast");
+    render();
+  }).catch(()=>{ovToast("未授權通知，僅頁內 toast");render();});
+}
+// 頁內 toast（textContent 寫入，無注入面）
+function ovToast(msg){
+  let w=document.getElementById("ovToastWrap");
+  if(!w){w=document.createElement("div");w.id="ovToastWrap";w.className="ovtoastwrap";document.body.appendChild(w);}
+  const d=document.createElement("div");d.className="ovtoast";d.textContent=msg;
+  w.appendChild(d);
+  setTimeout(()=>{try{d.remove();}catch(e){}},8000);
+}
+// 同一標的同向 10 分鐘去重（記憶體即可：提醒本就只在頁面開著時有效）
+let OV_ALERT_LAST={};
+function ovAlertFire(key,title,body){
+  const now=Date.now();
+  if(OV_ALERT_LAST[key]&&now-OV_ALERT_LAST[key]<600e3)return;
+  OV_ALERT_LAST[key]=now;
+  ovToast(title+"："+body);
+  const cfg=ovAlertCfg();
+  if(cfg.notif&&typeof Notification!=="undefined"&&Notification.permission==="granted"){
+    try{new Notification(title,{body});}catch(e){}
+  }
+}
+// 每次 pull 到新資料後檢查（掛在 pull()，與所在 tab 無關；全部條件預設關閉＝零開銷）
+function ovAlertCheck(){
+  if(!state.live||!state.cl)return;
+  const cfg=ovAlertCfg();
+  if(!cfg.en1&&!cfg.en2&&!cfg.en3)return;
+  if(cfg.en1){
+    const s=state.live.series||[];
+    if(s.length>=6){   // 尾端 vs 往前 5 分鐘那筆；不足 5 筆待命
+      const a=s[s.length-6],b=s[s.length-1];
+      if(a&&b&&a.idx!=null&&b.idx!=null){
+        const d=b.idx-a.idx;
+        if(Math.abs(d)>=(+cfg.n1||30))
+          ovAlertFire("idx:"+(d>0?"+":"-"),"指數5分速動",`加權 ${b.t} 較 ${a.t} ${d>0?"+":""}${d.toFixed(0)} 點`);
+      }
+    }
+  }
+  const mktAmt=(state.live.market&&state.live.market.tse&&state.live.market.tse.amt_yi)||0;
+  if(cfg.en2&&ovFlowActive()&&mktAmt){
+    const d10=state.live.flow.mkt.d10_yi;
+    for(const s of Object.values(ovComputeSubAgg())){
+      if(s.n<3||s.f10<OV_RADAR_SUB_MIN)continue;
+      const now10=(s.f10/1e8)/d10*100, full=(s.amt/1e8)/mktAmt*100, diff=now10-full;
+      if(diff>=(+cfg.x2||1.5))
+        ovAlertFire("sub:"+s.name+":+","次產業資金升溫",`${cleanSub(s.name)} 近10分佔比 ${now10.toFixed(1)}%（全日 ${full.toFixed(1)}%，+${diff.toFixed(1)}pp）`);
+    }
+  }
+  if(cfg.en3){
+    for(const c of String(cfg.codes||"").split(/[,，]/).filter(Boolean)){
+      const v=sval(c); if(!v||v.r10==null)continue;
+      if(Math.abs(v.r10)>=(+cfg.y3||1.5)){
+        const nm2=(state.cl[c]&&state.cl[c].n)||"";
+        ovAlertFire("stk:"+c+":"+(v.r10>0?"+":"-"),"自選股短窗急動",`${c}${nm2} 近10分 ${v.r10>0?"+":""}${v.r10.toFixed(2)}%`);
+      }
+    }
+  }
+}
+document.addEventListener("click",e=>{
+  const g=e.target.closest("[data-ovalert-gear]");
+  if(g){state.sub.ov.alertOpen=!state.sub.ov.alertOpen;render();return;}
+  const t=e.target.closest("[data-ovradar-toggle]");
+  if(t){state.sub.ov.radarClosed=!state.sub.ov.radarClosed;render();return;}
+  const s=e.target.closest("[data-ovalert-save]");
+  if(s){ovAlertSave();ovToast("提醒設定已儲存（頁面開著才有效）");render();return;}
+  const n=e.target.closest("[data-ovalert-notif]");
+  if(n){ovAlertNotifToggle();return;}
 });
 
 function render(){
@@ -1557,7 +1768,7 @@ async function pull(manual){
     if(state.tab==="us"&&manual){state.us=null;state.morning=null;uswCache=null;}   // 晨報 tab 手動更新 → 重抓全部
     if(state.tab==="aetf"&&manual)state.aetf=null;               // 主動ETF tab 手動更新 → 重抓快照+diff
     const j=await loadJSON(liveURL());
-    if(j&&j.ts){state.live=j;render();}
+    if(j&&j.ts){state.live=j;render();try{ovAlertCheck();}catch(e){}}   // 第四期：資料更新後跑自訂提醒檢查（預設全關＝零開銷）
     else if(state.tab==="us")render();
   }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
   finally{ pulling=false; if(manual){btn.textContent=old;btn.disabled=false;} }
