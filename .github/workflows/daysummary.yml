@@ -1,0 +1,56 @@
+name: daysummary
+# 第八期：收盤總結落檔。收盤後拉 Worker /live（13:30 收盤定格）重算收盤總結卡
+# 同口徑的全日總結 → data/daysummary/YYYY-MM-DD.json＋latest.json，
+# 供 taiwan-stock-news 晨報「昨日資金流向」段跨 repo raw 讀取。
+# 排 14:05 台北（06:05 UTC），與 intraday 14:10 錯開。非交易日 /live 定格日期
+# 不符 → 腳本優雅退出（不寫檔、不 commit）。保留近 30 個交易日檔。
+on:
+  schedule:
+    - cron: '5 6 * * 1-5'   # 週一~五 06:05 UTC = 14:05 台北
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '目標日期 YYYY-MM-DD（留空＝台北今日；/live 定格日期不符即優雅退出）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  # 不 dispatch pages：daysummary 由 news 站走 raw.githubusercontent 讀，不需部署
+
+concurrency:
+  group: daysummary
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: build daysummary
+        run: |
+          d="${{ github.event.inputs.date }}"
+          if [ -n "$d" ]; then
+            python src/build_daysummary.py --date "$d"
+          else
+            python src/build_daysummary.py
+          fi
+      - name: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 優雅退出（非交易日）時 data/daysummary/ 可能不存在，先擋（同 intraday 教訓）
+          if [ ! -d data/daysummary ]; then echo "no data/daysummary（優雅退出）"; exit 0; fi
+          git add data/daysummary/
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "daysummary $(date -u +%FT%TZ)"
+          pushed=0
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push; then pushed=1; break; fi
+            sleep 4
+          done
+          if [ "$pushed" != "1" ]; then echo "::error::push failed after 5 retries"; exit 1; fi
