@@ -27,10 +27,13 @@
     （KV `line:uid` 變化才寫；**該端點不驗 x-line-signature**——簽章需 channel secret、
     為降低設定步驟省略，僅用於一次性取 userId，取得後可關閉 LINE 平台 webhook）。
     單通道失敗不擋另一通道（/alerts/test 回應 errors 可見）。
-  - **使用者要做的動作（外送最後一哩，擇一即可）**：
-    - Discord（最快）：任一伺服器→頻道設定→整合→Webhook→新增→複製 URL，
-      在 `worker/` 下 `npx wrangler secret put ALERT_WEBHOOK` 貼上；
-      開 `https://taiwan-flow-v2.shihpc.workers.dev/alerts/test` 應收到測試訊息。
+  - **使用者要做的動作（外送最後一哩，擇一即可；使用者 2026-07-18 裁定只用 LINE＋Telegram，
+    Discord 格式僅為 webhook 預設 fallback 不使用）**：
+    - Telegram（最快）：①手機找 @BotFather 建 bot 取 token ②傳一句話給新 bot，開
+      `https://api.telegram.org/bot<token>/getUpdates` 從回應 message.chat.id 取 chat_id
+      ③在 `worker/` 下 `npx wrangler secret put ALERT_WEBHOOK` 填
+      `https://api.telegram.org/bot<token>/sendMessage?chat_id=<chat_id>`
+      ④開 `https://taiwan-flow-v2.shihpc.workers.dev/alerts/test` 應收到測試訊息。
     - LINE：①建 LINE 官方帳號並到 developers.line.biz console 對該帳號開 Messaging API
       channel ②Messaging API 分頁發 channel access token（long-lived）→
       `npx wrangler secret put LINE_TOKEN` ③LINE 平台 Webhook URL 填
@@ -40,8 +43,6 @@
       應收到 LINE 測試訊息 ⑦（可選）回 console 關閉 webhook。
       **額度**：Messaging API 免費 500 則/月；本事件集保守（30 分去重、兩事件型）
       典型 0~10 則/日 ≈ 月上限 ~220 則，在額度內；若日後 7b 擴充訊號需重估。
-    - Telegram 替代：BotFather 建 bot 取 token，`ALERT_WEBHOOK` 填
-      `https://api.telegram.org/bot<token>/sendMessage?chat_id=<你的chat_id>`。
     未設定前偵測照跑、事件照記 `/alerts/log`（sent=0），只是不外送。
   - 單元測試 worker/test/alerts.mjs（43 項：兩事件情境/門檻可調/30分去重/無 secret 靜默/
     Discord・Telegram 格式/LINE 兩secret齊全才發・payload・並存雙發・單通道失敗不擋/
