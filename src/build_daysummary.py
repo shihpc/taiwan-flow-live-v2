@@ -7,7 +7,7 @@
 
 口徑（與 index.html ovSummaryCard 第五期實作逐項對齊）：
 - 個股貢獻排行：僅上市（classify t=="twse"），欄位 pts（貢獻點）；
-  top5 取 pts>0 降序前 5、bot3 取 pts<0 升序前 3。
+  top5 取 pts>0 降序前 5、bot3 取 pts<0 升序前 5（2026-07-19 由 3 改 5；欄位名不變）。
 - 次產業聚合：classify.json map[code].p 多對多**去重**（{p[1] for p in p}，
   每個次產業各加一次全額、不切權重；同前端 ovComputeSubAgg 與 archive_intraday.py）；
   成分股數 n>=3 才納入（同前端 filter(s=>s.n>=3)）。
@@ -108,7 +108,8 @@ def build(date: str) -> int:
             continue
         rows.append({"c": code, "n": info.get("n") or code, "pts": round(pts, 2)})
     stocks_top5 = [r for r in sorted(rows, key=lambda r: -r["pts"])[:5] if r["pts"] > 0]
-    stocks_bot3 = [r for r in sorted(rows, key=lambda r: r["pts"])[:3] if r["pts"] < 0]
+    # 2026-07-19：拖累 3→5 與貢獻並列（欄位名 stocks_bot3/subs_bot3 保留，晨報顯示端相容）
+    stocks_bot3 = [r for r in sorted(rows, key=lambda r: r["pts"])[:5] if r["pts"] < 0]
 
     # ---- 次產業聚合（多對多去重、每個次產業各加一次全額；同 ovComputeSubAgg）----
     agg: dict[str, dict] = {}
@@ -145,7 +146,7 @@ def build(date: str) -> int:
         }
 
     subs_top5 = [sub_row(s) for s in sorted(subs, key=lambda s: -s["pts"])[:5] if s["pts"] > 0]
-    subs_bot3 = [sub_row(s) for s in sorted(subs, key=lambda s: s["pts"])[:3] if s["pts"] < 0]
+    subs_bot3 = [sub_row(s) for s in sorted(subs, key=lambda s: s["pts"])[:5] if s["pts"] < 0]
     share_top = sub_row(max(subs, key=lambda s: s["amt"])) if subs else None
     pts_top_cand = max(subs, key=lambda s: s["pts"]) if subs else None
     pts_top = sub_row(pts_top_cand) if pts_top_cand and pts_top_cand["pts"] > 0 else None
