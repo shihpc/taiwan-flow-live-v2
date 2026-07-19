@@ -1,9 +1,26 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-19（資金地圖案四：湧入／退出 tab 比照案三收盤定格，worker 已部署待週一驗真值）
+最後更新：2026-07-20（個股追蹤第三批技術面 `/technical` 上線部署 version 9567508f）
 
 ## 快速接手
 
+- **個股追蹤技術面端點 `/technical`**（2026-07-20 完工部署 version 9567508f；供「新聞晨報」站個股追蹤第三批，三批＝基本/籌碼/技術至此完整）：
+  - **Worker**（`worker/src/index.js`，`chipsBatch` 後、`FUND_RE`/美股同步前）：additive 新端點
+    `/technical?id=2330`（單股回物件）或 `?ids=a,b,c`（批次回 `{stocks,date}`，上限 30 檔）。資料源
+    FinMind `TaiwanStockPrice`（Free(w/id) OHLCV，回溯 ~400 曆日 ≈250 交易日）；7 項指標**全在 Worker 算**
+    （不外送長序列）：`ma`(MA5/10/20/60＋現價距離%＋多空排列)、`kd`(9,3,3)、`macd`(12,26,9)、`rsi`(5,10)、
+    `boll`(20,2 %b)、`volume`(5日/20日均量比＋爆量/量縮)、`range52`(距52週高/低%)。每指標帶中性 `state`
+    描述詞（超買/超賣/黃金交叉/死亡交叉/黏合/排列…＝數學狀態，**非買賣訊號**）。
+  - **KV 每股每日快取** `tech:<code>:<date>` TTL 2 天；FinMind 失敗重試一次後該股回 `{id,error}` 不整批倒；
+    資料不足指標回 null＋前端優雅降級「—（資料不足）」。
+  - **純函式全 export** 供 `worker/test/technical.mjs` 離線驗算（49 通過，無需 token）：`sma/ema/kd/macd/
+    rsi/boll/volumeRatio/range52/maArrange/buildSeries/buildTechnical/technicalFor/technicalBatch`。固定序列
+    對照教科書值：`ema([1..10],5)=8`、`kd`手算末 K≈67.59/D≈60.19、`rsi([10,11,10,11,10,11],5)=60`、
+    `boll([2,4,6,8],4,2)` mid=5/%b≈0.84、`macd`常數序列全 0。線上 2330 抽核：MA20＝boll.mid（獨立碼路一致）、
+    dist20=(price−MA20)/MA20 手算符合。
+  - **零影響**：無新 cron（維持 3 條）、`/live`＋`/fundamentals`＋`/chips` 舊回傳/測試零改動、無 `.list(`、
+    三站同步函式零改動。前端配合：`taiwan-stock-news/index.html` 個股追蹤詳情框加第三分頁「技術面」（沿用
+    TRACK.view 機制、lazy 取、頂部固定免責）。**續作指針**：回測技術指標對波動的有效性（7b 一併，先驗證再宣稱）。
 - **個股追蹤基本面 refine（4 點回饋）**（2026-07-20 完工部署 version ae22fd05）：`/fundamentals`
   additive 擴充—回傳新增 `name`（TaiwanStockInfo）、`dividend`（TaiwanStockDividend：現金/股票股利
   ＋除息日 exDate＋公告 announce＋年度季別 year，cash 回 FinMind 原值）、`news`（媒體新聞

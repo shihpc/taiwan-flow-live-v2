@@ -1256,6 +1256,236 @@ export async function chipsBatch(env, ids, date, fetchFn = fetch) {
     chipsFor(env, id, date, fetchFn).catch((e) => ({ id, error: String((e && e.message) || e) }))));
 }
 
+// ---- 個股追蹤：技術面（/technical?id=2330 或 ?ids=a,b,c，additive、無新 cron）----
+// FinMind TaiwanStockPrice（Free(w/id)，OHLCV）抓近 ~250 交易日；7 項指標（均線/KD/MACD/RSI/
+// 布林/量能/距52週高低）全部在 Worker 算，寫成純函式供 test/technical.mjs 離線驗算（固定序列對照
+// 教科書值）。KV 每股每日快取 key `tech:<code>:<date>`（TTL 2 天）。沿用 finData（重試一次）＋批次
+// 逐股 try 容錯＋json() CORS，不動既有回傳。
+//
+// 誠實原則（專案鐵律）：所有 state 皆為「指標數學狀態的中性描述」（超買/超賣/黃金交叉/死亡交叉/
+// 黏合/多頭排列…），非買賣訊號、非行動建議、非預測宣稱；前端另加固定免責。
+//
+// 精選 7 項回傳結構（值不足回 null，不炸）：
+//   ma      均線：{ma5,ma10,ma20,ma60, dist5..60 現價距離%, arrange 多空排列描述}
+//   kd      KD(9,3,3)：{k,d, state 高檔/低檔/黃金交叉/死亡交叉/中性}
+//   macd    MACD(12,26,9)：{dif,macd(訊號線),hist 柱狀體, state 柱翻正/翻負/黏合＋零軸上下}
+//   rsi     RSI(5,10)：{rsi5,rsi10, state 超買>70/超賣<30/中性；背離不自動判、留白}
+//   boll    布林(20,2)：{mid,upper,lower, pb %b 通道位置, state 觸上軌/觸下軌/中軌上下}
+//   volume  量能：{avg5,avg20(張), ratio 5日均量÷20日均量, surge 爆量, shrink 量縮, state}
+//   range52 距52週高/低：{high,low, distHigh 距高%(≤0), distLow 距低%(≥0)}
+
+// 簡單移動平均：最後 period 個值的平均；不足 period 回 null。
+export function sma(arr, period) {
+  const a = arr || [];
+  if (a.length < period || period <= 0) return null;
+  let s = 0;
+  for (let i = a.length - period; i < a.length; i++) s += a[i];
+  return s / period;
+}
+// 指數移動平均（回整條序列，種子＝前 period 個的 SMA、其後遞迴 k=2/(period+1)）；
+// 不足 period 回 []。教科書慣例：EMA[period-1]=SMA(0..period-1)，之後 EMA[i]=v[i]*k+EMA[i-1]*(1-k)。
+export function ema(arr, period) {
+  const a = arr || [];
+  if (a.length < period || period <= 0) return [];
+  const k = 2 / (period + 1), out = new Array(a.length).fill(null);
+  let seed = 0;
+  for (let i = 0; i < period; i++) seed += a[i];
+  out[period - 1] = seed / period;
+  for (let i = period; i < a.length; i++) out[i] = a[i] * k + out[i - 1] * (1 - k);
+  return out;
+}
+// KD 隨機指標（台股慣例 RSV→K→D，平滑 1/smooth；初值 K=D=50）。回最後一日 {k,d}，不足 n 回 null。
+// RSV=(C-最低LL)/(最高HH-最低LL)×100；區間為 0 時（無波動）RSV=50。
+export function kd(highs, lows, closes, n = 9, smooth = 3) {
+  const H = highs || [], L = lows || [], C = closes || [];
+  if (C.length < n) return null;
+  const a = 1 / smooth;
+  let k = 50, d = 50;
+  for (let i = n - 1; i < C.length; i++) {
+    let hh = -Infinity, ll = Infinity;
+    for (let j = i - n + 1; j <= i; j++) { if (H[j] > hh) hh = H[j]; if (L[j] < ll) ll = L[j]; }
+    const rng = hh - ll, rsv = rng === 0 ? 50 : ((C[i] - ll) / rng) * 100;
+    k = k * (1 - a) + rsv * a;
+    d = d * (1 - a) + k * a;
+  }
+  return { k: r2(k), d: r2(d) };
+}
+// MACD（快慢 EMA 差＝DIF、DIF 的 signal EMA＝MACD 線、柱狀體＝DIF−MACD）。回最後一日
+// {dif,macd,hist} 及前一日 histPrev（供翻正/翻負判定）；不足回 null。
+export function macd(closes, fast = 12, slow = 26, signal = 9) {
+  const C = closes || [];
+  if (C.length < slow + signal) return null;
+  const ef = ema(C, fast), es = ema(C, slow);
+  const dif = C.map((_, i) => (ef[i] != null && es[i] != null ? ef[i] - es[i] : null));
+  const difVals = dif.filter((x) => x != null);
+  const sig = ema(difVals, signal);
+  if (!sig.length || sig[sig.length - 1] == null) return null;
+  const macdLine = sig[sig.length - 1], macdPrev = sig[sig.length - 2];
+  const difLast = difVals[difVals.length - 1], difPrev = difVals[difVals.length - 2];
+  const hist = difLast - macdLine, histPrev = (difPrev != null && macdPrev != null) ? difPrev - macdPrev : null;
+  return { dif: r2(difLast), macd: r2(macdLine), hist: r2(hist), histPrev: histPrev == null ? null : r2(histPrev) };
+}
+// RSI（Wilder 平滑；序列長度恰 period+1 時＝簡單平均 RSI 種子）。全漲回 100、全跌回 0、
+// 無波動回 50。不足 period+1 回 null。
+export function rsi(closes, period = 14) {
+  const C = closes || [];
+  if (C.length < period + 1) return null;
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++) { const ch = C[i] - C[i - 1]; if (ch >= 0) gain += ch; else loss -= ch; }
+  let avgG = gain / period, avgL = loss / period;
+  for (let i = period + 1; i < C.length; i++) {
+    const ch = C[i] - C[i - 1];
+    avgG = (avgG * (period - 1) + (ch > 0 ? ch : 0)) / period;
+    avgL = (avgL * (period - 1) + (ch < 0 ? -ch : 0)) / period;
+  }
+  if (avgL === 0) return avgG === 0 ? 50 : 100;
+  if (avgG === 0) return 0;
+  return r2(100 - 100 / (1 + avgG / avgL));
+}
+// 布林通道（中軌＝SMA、母體標準差×mult）。回 {mid,upper,lower,pb}；區間 0 時 pb=0.5。不足回 null。
+export function boll(closes, period = 20, mult = 2) {
+  const C = closes || [];
+  if (C.length < period) return null;
+  const mid = sma(C, period);
+  let v = 0;
+  for (let i = C.length - period; i < C.length; i++) v += (C[i] - mid) ** 2;
+  const sd = Math.sqrt(v / period);
+  const upper = mid + mult * sd, lower = mid - mult * sd, close = C[C.length - 1];
+  const rng = upper - lower, pb = rng === 0 ? 0.5 : (close - lower) / rng;
+  return { mid: r2(mid), upper: r2(upper), lower: r2(lower), pb: r2(pb) };
+}
+// 量能：近5日均量 vs 20日均量比（單位＝原始量，前端可轉張）。爆量＝比≥2 且末日收漲；量縮＝比≤0.5。
+export function volumeRatio(volumes, closes) {
+  const V = volumes || [], C = closes || [];
+  const avg5 = sma(V, 5), avg20 = sma(V, 20);
+  if (avg5 == null || avg20 == null || avg20 === 0) return null;
+  const ratio = avg5 / avg20;
+  const up = C.length >= 2 ? C[C.length - 1] > C[C.length - 2] : false;
+  return { avg5: Math.round(avg5), avg20: Math.round(avg20), ratio: r2(ratio), surge: ratio >= 2 && up, shrink: ratio <= 0.5 };
+}
+// 距 52 週（全序列）高/低 %：distHigh=(C−HH)/HH×100（≤0）、distLow=(C−LL)/LL×100（≥0）。
+export function range52(highs, lows, closes) {
+  const H = highs || [], L = lows || [], C = closes || [];
+  if (!C.length) return null;
+  let hh = -Infinity, ll = Infinity;
+  for (const h of H) if (h > hh) hh = h;
+  for (const l of L) if (l < ll) ll = l;
+  const close = C[C.length - 1];
+  return {
+    high: r2(hh), low: r2(ll),
+    distHigh: hh > 0 ? r2(((close - hh) / hh) * 100) : null,
+    distLow: ll > 0 ? r2(((close - ll) / ll) * 100) : null,
+  };
+}
+// 多空排列（中性描述、非訊號）：MA5>MA10>MA20>MA60 多頭排列；反向 空頭排列；否則 糾結。
+export function maArrange(m5, m10, m20, m60) {
+  const v = [m5, m10, m20, m60];
+  if (v.some((x) => x == null)) return "資料不足";
+  if (m5 > m10 && m10 > m20 && m20 > m60) return "多頭排列";
+  if (m5 < m10 && m10 < m20 && m20 < m60) return "空頭排列";
+  return "糾結";
+}
+// 由 KD 值推中性狀態描述：交叉（黃金/死亡）優先，其次高/低檔區，否則中性。
+function kdState(cur, prevK, prevD) {
+  if (prevK != null && prevD != null) {
+    if (prevK <= prevD && cur.k > cur.d) return "黃金交叉（K 上穿 D）";
+    if (prevK >= prevD && cur.k < cur.d) return "死亡交叉（K 下穿 D）";
+  }
+  if (cur.k > 80 && cur.d > 80) return "高檔區（>80）";
+  if (cur.k < 20 && cur.d < 20) return "低檔區（<20）";
+  return "中性";
+}
+// MACD 中性狀態：柱翻正/翻負（跨零）或黏合（近零），附零軸上下描述。
+function macdState(m) {
+  let bar = "柱狀持平";
+  if (m.histPrev != null) {
+    if (m.histPrev <= 0 && m.hist > 0) bar = "柱狀翻正（跨零軸）";
+    else if (m.histPrev >= 0 && m.hist < 0) bar = "柱狀翻負（跨零軸）";
+    else if (Math.abs(m.hist) < 0.05) bar = "黏合（近零）";
+    else bar = m.hist > 0 ? "柱狀為正" : "柱狀為負";
+  }
+  return `${bar}；DIF ${m.dif > 0 ? "零軸之上" : "零軸之下"}`;
+}
+// RSI 中性狀態（取較短 rsi5 判超買/超賣；背離不自動判、留白）。
+function rsiState(v) {
+  if (v == null) return "資料不足";
+  if (v > 70) return "超買區（>70）";
+  if (v < 30) return "超賣區（<30）";
+  return "中性";
+}
+// 布林中性狀態（依 %b 描述通道位置）。
+function bollState(pb) {
+  if (pb == null) return "資料不足";
+  if (pb >= 1) return "觸/破上軌";
+  if (pb <= 0) return "觸/破下軌";
+  return pb >= 0.5 ? "中軌之上" : "中軌之下";
+}
+// 量能中性狀態（爆量需價漲；量縮）。
+function volState(vr) {
+  if (!vr) return "資料不足";
+  if (vr.surge) return "爆量（量增且價漲）";
+  if (vr.shrink) return "量縮";
+  return "量能正常";
+}
+// TaiwanStockPrice 原始列 → 依日期升冪的 {date,o,h,l,c,v} 序列（欄：open/max/min/close/Trading_Volume）。
+export function buildSeries(rows) {
+  return (rows || [])
+    .filter((r) => r && r.date != null && r.close != null)
+    .map((r) => ({ date: String(r.date).slice(0, 10), o: num(r.open), h: num(r.max), l: num(r.min), c: num(r.close), v: num(r.Trading_Volume) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+// 由 OHLCV 序列組 7 項技術指標（全中性描述）；序列空回 {error}，個別指標不足時該項 null＋arrange/state 註記。
+export function buildTechnical(series) {
+  if (!series || !series.length) return { error: "查無價格資料" };
+  const closes = series.map((x) => x.c), highs = series.map((x) => x.h), lows = series.map((x) => x.l), vols = series.map((x) => x.v);
+  const last = series[series.length - 1], price = last.c;
+  const distPct = (mv) => (mv == null ? null : r2(((price - mv) / mv) * 100));
+  const m5 = sma(closes, 5), m10 = sma(closes, 10), m20 = sma(closes, 20), m60 = sma(closes, 60);
+  // KD 需當日與前一日以判交叉：用全序列與去尾一筆各算一次
+  const kdCur = kd(highs, lows, closes), kdPrev = kd(highs.slice(0, -1), lows.slice(0, -1), closes.slice(0, -1));
+  const macdVal = macd(closes);
+  const rsi5 = rsi(closes, 5), rsi10 = rsi(closes, 10);
+  const bollVal = boll(closes);
+  const vr = volumeRatio(vols, closes);
+  const r52 = range52(highs, lows, closes);
+  return {
+    date: last.date, price: r2(price),
+    ma: {
+      ma5: m5 == null ? null : r2(m5), ma10: m10 == null ? null : r2(m10), ma20: m20 == null ? null : r2(m20), ma60: m60 == null ? null : r2(m60),
+      dist5: distPct(m5), dist10: distPct(m10), dist20: distPct(m20), dist60: distPct(m60),
+      arrange: maArrange(m5, m10, m20, m60),
+    },
+    kd: kdCur ? { k: kdCur.k, d: kdCur.d, state: kdState(kdCur, kdPrev ? kdPrev.k : null, kdPrev ? kdPrev.d : null) } : null,
+    macd: macdVal ? { dif: macdVal.dif, macd: macdVal.macd, hist: macdVal.hist, state: macdState(macdVal) } : null,
+    rsi: (rsi5 == null && rsi10 == null) ? null : { rsi5, rsi10, state: rsiState(rsi5 != null ? rsi5 : rsi10) },
+    boll: bollVal ? { ...bollVal, state: bollState(bollVal.pb) } : null,
+    volume: vr ? { ...vr, state: volState(vr) } : null,
+    range52: r52,
+  };
+}
+// 單股技術面：先查 KV 每日快取（命中不重抓）；miss 才打 FinMind TaiwanStockPrice（近 ~250 交易日）。
+export async function technicalFor(env, id, date, fetchFn = fetch) {
+  const cacheKey = `tech:${id}:${date}`;
+  if (env.FLOW_KV) {
+    const hit = await env.FLOW_KV.get(cacheKey, "json");
+    if (hit) return hit;
+  }
+  const token = env.FINMIND_TOKEN;
+  const start = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)) - 400))
+    .toISOString().slice(0, 10);   // ~400 曆日回溯：涵蓋 ~250 交易日（MA60／布林20／52週高低／MACD 暖身）
+  const rows = await finData(token, "TaiwanStockPrice", id, start, fetchFn);   // 失敗（重試後）拋出 → 批次端降級 {id,error}
+  const tech = buildTechnical(buildSeries(rows));
+  if (tech.error) throw new Error(tech.error);
+  const out = { id, ...tech, updated: new Date().toISOString() };
+  if (env.FLOW_KV) await env.FLOW_KV.put(cacheKey, JSON.stringify(out), { expirationTtl: 172800 });
+  return out;
+}
+// 批次：每股獨立 try（某股 FinMind 失敗或查無回 {id,error}，不整批倒）。
+export async function technicalBatch(env, ids, date, fetchFn = fetch) {
+  return Promise.all(ids.map((id) =>
+    technicalFor(env, id, date, fetchFn).catch((e) => ({ id, error: String((e && e.message) || e) }))));
+}
+
 // ---- 美股自選跨裝置同步（/usersync?k=同步碼[&set=A,B]）----
 // 清單存 KV `usw:<sha256(碼)>`（永久）；同步碼=輕量共享密鑰，內容僅股票代號、低敏感。
 async function syncKey(code) {
@@ -1352,6 +1582,15 @@ export default {
       const ids = [...new Set((idsRaw || single || "").split(",").map((s) => s.trim().toUpperCase()).filter((s) => FUND_RE.test(s)))].slice(0, 30);
       if (!ids.length) return json({ error: "id/ids 參數需為逗號分隔台股代號（≤30 檔）" }, { "Cache-Control": "no-store" });
       const stocks = await chipsBatch(env, ids, date);
+      const body = idsRaw === null ? stocks[0] : { stocks, date };
+      return json(body, { "Cache-Control": "public, max-age=1800" });
+    }
+    if (url.pathname === "/technical") {  // 個股追蹤技術面（?id=單股回物件／?ids=批次回 {stocks}）
+      const date = taipeiParts().date;
+      const idsRaw = url.searchParams.get("ids"), single = url.searchParams.get("id");
+      const ids = [...new Set((idsRaw || single || "").split(",").map((s) => s.trim().toUpperCase()).filter((s) => FUND_RE.test(s)))].slice(0, 30);
+      if (!ids.length) return json({ error: "id/ids 參數需為逗號分隔台股代號（≤30 檔）" }, { "Cache-Control": "no-store" });
+      const stocks = await technicalBatch(env, ids, date);
       const body = idsRaw === null ? stocks[0] : { stocks, date };
       return json(body, { "Cache-Control": "public, max-age=1800" });
     }
