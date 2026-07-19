@@ -946,11 +946,12 @@ export function buildFinancials(rows, limit = 10) {
     const qid = `${d.slice(0, 4)}Q${q}`;
     if (!byQ.has(qid)) byQ.set(qid, { q: qid });
     byQ.get(qid)[key] = Number(row.value);
+    byQ.get(qid).date = d;   // 季底日（業績事件排序用；同季各列 date 相同）
   }
   const quarters = [...byQ.keys()].sort((a, b) => a.localeCompare(b)).map((qid) => {
     const e = byQ.get(qid), rev = e.rev;
     const margin = (x) => (rev && x != null ? r2((x / rev) * 100) : null);
-    return { q: qid, eps: e.eps ?? null, rev: rev ?? null, gross: e.gross ?? null, op: e.op ?? null, net: e.net ?? null,
+    return { q: qid, date: e.date || null, eps: e.eps ?? null, rev: rev ?? null, gross: e.gross ?? null, op: e.op ?? null, net: e.net ?? null,
       gross_margin: margin(e.gross), op_margin: margin(e.op), net_margin: margin(e.net) };
   });
   const byId = new Map(quarters.map((x) => [x.q, x]));
@@ -978,20 +979,117 @@ async function finData(token, dataset, id, start, fetchFn = fetch) {
   }
   throw lastErr;
 }
-// 單股基本面：先查 KV 每日快取（命中不重抓）；miss 才打 FinMind（月營收＋季財報並行）。
+// 個股新聞：TaiwanStockNews（欄 date/stock_id/link/source/title；同一 link 常有多來源列 → 去重
+// by link，無 link 者以 title 去重）。依 date 降冪取最新 limit 條，皆媒體新聞（event:false，掛外連）。
+export function buildNews(rows, limit = 12) {
+  const seen = new Set(), out = [];
+  const sorted = (rows || []).slice().sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  for (const r of sorted) {
+    const title = String((r && r.title) || "").trim();
+    if (!title) continue;
+    const key = String((r && r.link) || "").trim() || title;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ date: String(r.date || "").slice(0, 10), source: r.source || "", title, link: r.link || null, event: false });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+// 股利：TaiwanStockDividend（現金 CashEarningsDistribution／股票 StockEarningsDistribution／除息
+// CashExDividendTradingDate／公告 AnnouncementDate／年度季別 year）。取公告日最新一筆；cash 回原值。
+export function buildDividend(rows) {
+  const valid = (rows || []).filter((r) => r && (num(r.CashEarningsDistribution) || num(r.StockEarningsDistribution)));
+  if (!valid.length) return null;
+  const keyDate = (r) => String(r.AnnouncementDate || r.CashExDividendTradingDate || r.date || "");
+  valid.sort((a, b) => keyDate(a).localeCompare(keyDate(b)));
+  const last = valid[valid.length - 1];
+  return {
+    cash: num(last.CashEarningsDistribution) || null,
+    stock: num(last.StockEarningsDistribution) || null,
+    exDate: last.CashExDividendTradingDate || null,
+    announce: last.AnnouncementDate || null,
+    year: last.year || null,
+    payDate: last.CashDividendPaymentDate || null,
+  };
+}
+// 股票名稱：TaiwanStockInfo（同股多列不同產業別，取首筆 stock_name）。取不到回 null。
+export function buildName(rows, id) {
+  for (const r of rows || []) {
+    if (r && r.stock_name && (id == null || String(r.stock_id) === String(id))) return String(r.stock_name);
+  }
+  return null;
+}
+// 業績事件：從月營收/季財報/股利合成「業績快訊」新聞項（event:true，不外連，source 標明自財報數據生成），
+// 與媒體新聞區分。墊底保證：股利＋最新季財報＋月營收（不足 3 條時往前補月營收），任一上市櫃股皆可靠達 ≥3。
+const md = (s) => { const t = String(s || ""); return t.length >= 10 ? t.slice(5, 10).replace("-", "/") : t; };   // YYYY-MM-DD → MM/DD
+const EV_SRC = "業績事件（自財報數據生成）";
+export function buildEvents(revenue, financials, dividend) {
+  const ev = [], revArr = revenue || [], finArr = financials || [];
+  if (dividend && (dividend.cash || dividend.stock)) {
+    const parts = [];
+    if (dividend.cash) parts.push(`現金股利 ${r2(dividend.cash)} 元`);
+    if (dividend.stock) parts.push(`股票股利 ${r2(dividend.stock)} 元`);
+    const ex = dividend.exDate ? `，除息 ${md(dividend.exDate)}` : "";
+    ev.push({ date: dividend.announce || dividend.exDate || "", source: EV_SRC, event: true, link: null,
+      title: `宣告${dividend.year ? dividend.year + " " : ""}${parts.join("、")}${ex}` });
+  }
+  if (finArr.length) {
+    const q = finArr[finArr.length - 1], bits = [];
+    if (q.eps != null) bits.push(`EPS ${r2(q.eps)}`);
+    if (q.net_margin != null) bits.push(`淨利率 ${r2(q.net_margin)}%`);
+    ev.push({ date: q.date || "", source: EV_SRC, event: true, link: null,
+      title: `${q.q} 財報${bits.length ? " " + bits.join("／") : ""} 公布` });
+  }
+  const revEvent = (m) => {
+    const yi = m.rev != null ? Math.round((m.rev / 1e8) * 10) / 10 : null;
+    const yoy = m.yoy != null ? ` YoY ${m.yoy > 0 ? "+" : ""}${r2(m.yoy)}%` : "";
+    const pub = m.announce ? `（公布 ${md(m.announce)}）` : "";
+    return { date: m.announce || `${m.ym}-01`, source: EV_SRC, event: true, link: null,
+      title: `${m.ym} 營收 ${yi != null ? yi + " 億" : "—"}${yoy}${pub}` };
+  };
+  if (revArr.length) ev.push(revEvent(revArr[revArr.length - 1]));
+  for (let i = revArr.length - 2; ev.length < 3 && i >= 0; i--) ev.push(revEvent(revArr[i]));
+  return ev;
+}
+// 合併 媒體新聞＋業績事件 → 去重（by link|title）→ 依日期降冪，保證 ≥min 條且業績事件必顯（墊底、
+// 消除「不在新聞池」死路）。為業績事件保留名額（cap-events），故熱門股即使媒體充足也同時含業績事件。
+export function assembleNews(mediaRows, revenue, financials, dividend, min = 3, cap = 12) {
+  const events = buildEvents(revenue, financials, dividend);
+  const media = buildNews(mediaRows, cap).slice(0, Math.max(min, cap - events.length));
+  const seen = new Set(), all = [];
+  for (const n of [...media, ...events]) {
+    const key = (n.link || n.title || "").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key); all.push(n);
+  }
+  all.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return all;
+}
+// 單股基本面：先查 KV 每日快取（命中不重抓）；miss 才打 FinMind（月營收＋季財報＋新聞＋股利＋名稱並行；
+// 新聞/股利/名稱為 additive 且非致命，個別 .catch 降級不阻斷既有月營收/季財報回傳）。
 export async function fundamentalsFor(env, id, date, fetchFn = fetch) {
-  const cacheKey = `fund:${id}:${date}`;
+  const cacheKey = `fund:4:${id}:${date}`;   // v3 schema（加 news/dividend/name＋近 5 日新聞窗＋業績事件保留名額）；版本前綴讓舊快取自然失效
   if (env.FLOW_KV) {
     const hit = await env.FLOW_KV.get(cacheKey, "json");
     if (hit) return hit;
   }
   const token = env.FINMIND_TOKEN;
-  const start = `${Number(date.slice(0, 4)) - 4}-01-01`;   // ~4 年：涵蓋 24 月營收＋10 季財報＋YoY 對照
-  const [revRows, finRows] = await Promise.all([
+  const start = `${Number(date.slice(0, 4)) - 4}-01-01`;   // ~4 年：涵蓋 24 月營收＋10 季財報＋YoY 對照＋近年股利
+  const newsStart = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)) - 5))
+    .toISOString().slice(0, 10);   // 新聞近 ~5 天：FinMind TaiwanStockNews 由 start_date 升冪、≤500 列截斷，
+                                   // 熱門股用短窗避免最新新聞被截掉（買賣力 buildNews 內再降冪取最新 12 條）
+  const [revRows, finRows, newsRows, divRows, infoRows] = await Promise.all([
     finData(token, "TaiwanStockMonthRevenue", id, start, fetchFn),
     finData(token, "TaiwanStockFinancialStatements", id, start, fetchFn),
+    finData(token, "TaiwanStockNews", id, newsStart, fetchFn).catch(() => []),
+    finData(token, "TaiwanStockDividend", id, start, fetchFn).catch(() => []),
+    finData(token, "TaiwanStockInfo", id, start, fetchFn).catch(() => []),
   ]);
-  const out = { id, revenue: buildRevenue(revRows), financials: buildFinancials(finRows), updated: new Date().toISOString() };
+  const revenue = buildRevenue(revRows), financials = buildFinancials(finRows), dividend = buildDividend(divRows);
+  const out = {
+    id, name: buildName(infoRows, id), revenue, financials, dividend,
+    news: assembleNews(newsRows, revenue, financials, dividend), updated: new Date().toISOString(),
+  };
   if (env.FLOW_KV && (out.revenue.length || out.financials.length)) {
     await env.FLOW_KV.put(cacheKey, JSON.stringify(out), { expirationTtl: 172800 });
   }
