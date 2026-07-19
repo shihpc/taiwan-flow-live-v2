@@ -315,8 +315,16 @@ const annCell=(y1,y2)=>{
   if(y2===1)return '<span class="mut">前湧</span>';
   if(y2===-1)return '<span class="mut">前退</span>';
   return '<span class="mut">—</span>';};
-function flowStockRow(c){const v=sval(c);if(!v||v.f10==null)return null;const info=state.cl[c]||{};
-  return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,f10:v.f10,c10:v.c10,c30:v.c30,r10:v.r10,
+// 案四（2026-07-19）：盤外用 flow_last.stocks[code]（[f10,c10,c30,r10]）覆寫短窗四欄，
+// 由 renderFlow 在渲染前設定 FLOW_STK_SRC（null=即時，走 sval(c) 原欄位）。
+// it/fi/y1/y2/ints/nl/chgp/price/lim 這些永遠從 sval(c) 取（baseline 直出，不受 flow 是否
+// 定格影響，兩種來源下都一樣即時），只有短窗四欄換血。
+let FLOW_STK_SRC=null;
+function flowStockRow(c){const v=sval(c);if(!v)return null;const info=state.cl[c]||{};
+  let f10,c10,c30,r10;
+  if(FLOW_STK_SRC){const s=FLOW_STK_SRC[c];if(!s)return null;[f10,c10,c30,r10]=s;}
+  else{if(v.f10==null)return null;f10=v.f10;c10=v.c10;c30=v.c30;r10=v.r10;}
+  return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,f10,c10,c30,r10,
     chgp:v.chg,price:v.close,lim:v.lim,it:v.it,fi:v.fi,y1:v.y1,y2:v.y2,ints:v.ints,nl:v.nl};}
 // 各次產業總成員數（分母，讓「檔」有參與率意義；由 classify 現算、快取一次）
 // 只計上市/上櫃（與湧入統計的分子同一母體；興櫃不在 baseline，不能進分母）
@@ -340,10 +348,21 @@ function flowStockCols(out){const cols=[
   {h:"外資3日",w:62,f:r=>itCell(r.fi,r.it>=2&&r.fi>=2)}];
   if(out)cols.splice(8,0,{h:"破底",w:48,f:r=>r.nl?'<b class="down">破底</b>':'<span class="mut">—</span>'});
   return cols;}
+// 案四（2026-07-19）：flow_last 是否可用於 renderFlow 定格 fallback——
+// 需含 subs（案三舊 payload 只有 mkt/f30，沒有 subs，此判斷會正確擋掉、落回既有降級文案）；
+// 回放模式（OV_REPLAY，即時一覽拖過還沒按「回到即時」）不適用，比照象限圖/角標的 ovFlowLast() guard。
+function flowLastUsable(){
+  if(OV_REPLAY||!state.live)return null;
+  const fl=state.live.flow_last;
+  return (fl&&fl.subs&&fl.mkt&&fl.mkt.d30_yi!=null)?fl:null;
+}
 // 湧入/退出共用：同一套集中度，依「窗內方向」拆分（漲=買盤湧入、跌=賣壓退出）
 function renderFlow(){
   const out=state.tab==="outflow", word=out?"退出":"湧入";
-  const fl=state.live.flow, main=document.getElementById("main");
+  const liveFlow=state.live.flow, last=flowLastUsable();
+  const fl=liveFlow||last, usingLast=!liveFlow&&!!last;
+  FLOW_STK_SRC=usingLast?(last.stocks||{}):null;
+  const main=document.getElementById("main");
   let html=out
     ?`<div class="note">資金<b>退出</b>＝短窗集中度高且<b>窗內下跌</b>（賣壓集中湧出）。`+
      `回測：<b>個股</b>爆量下殺有<span class="down">續弱傾向</span>（T+3輸大盤63% vs 對照58%，跌停鎖死更強）；`+
@@ -358,8 +377,9 @@ function renderFlow(){
      `「法人強度」＝法人淨買額佔成交額，<span class="up">≥+5%</span>湧入股不再追高吃虧；`+
      `<span class="db">土洋同買</span>（投信外資皆≥2日，紅底）為湧入唯一翻正組合(+0.55%)。</div>`;
   if(!fl){
-    // flow=null 有兩種截然不同的原因：盤前正常累積中 vs Worker 端出錯（baseline 抓不到、
-    // frame cron 沒寫 KV…）。後者藏在 live.flow_err，不顯示的話壞了很難發現——一併亮出來。
+    // flow=null 且 flow_last 也不可用（首次部署後尚未定格 / 舊格式無 subs / 回放模式）——
+    // 兩種截然不同的原因：盤前正常累積中 vs Worker 端出錯（baseline 抓不到、frame cron 沒寫 KV…）。
+    // 後者藏在 live.flow_err，不顯示的話壞了很難發現——一併亮出來（不得被 fallback 邏輯蓋掉）。
     const err=state.live&&state.live.flow_err;
     main.innerHTML=html+`<div class="loading">盤中每分鐘累積後生效（約 09:10 起）。目前無盤中序列資料。`+
       (err?`<br><span class="down">流向計算失敗（flow_err）：${escI(String(err))}</span><br>`+
@@ -367,8 +387,10 @@ function renderFlow(){
       `</div>`;
     return;
   }
+  // 案四：使用收盤定格資料時的徽章（同案三象限圖徽號樣式），標註資料日
+  if(usingLast)html+=`<div class="note"><span class="ovlastbadge">資金動向：${escI(String(fl.date||"").slice(5))} 收盤定格</span></div>`;
   html+=`<div class="note mut">窗口：10分(自${fl.frames["10"]||"—"}) / 30分(自${fl.frames["30"]||"—"}) · 基準日 ${fl.baseline_date}</div>`;
-  if(fl.frames["10"]&&fl.frames["10"]===fl.frames["30"]){
+  if(!usingLast&&fl.frames["10"]&&fl.frames["10"]===fl.frames["30"]){
     main.innerHTML=html+`<div class="loading">盤中分鐘序列尚未累積出多筆快照（目前僅單一時間點），暫無法判斷窗內漲跌方向。`+
       `盤中每分鐘寫入後會自動補齊，稍後再查看。</div>`;
     return;

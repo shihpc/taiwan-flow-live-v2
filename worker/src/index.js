@@ -484,6 +484,9 @@ export function computeFlow(cl, items, baseline, frames, nowTs) {
 //   /live 流量路徑不寫——寫入次數固定 ≤16/日，不隨流量浮動。
 // KV write 預算（免費 1000/日）：既有 frame+fi+series 每盤中分鐘 ≤3 put（~275 分 ≈825）＋alerts/err/哨兵
 //   零星 ≤20 → 本功能 +16 後 worst case ≈860/日，仍留 >100 餘裕。讀：/live 僅 flow=null 時 +1 get（10 萬/日額度無虞）。
+// 案四（2026-07-19）擴充：payload 加 subs/frames/baseline_date/stocks，供「資金湧入／退出」
+//   tab（renderFlow）比照定格 fallback；寫入路徑/頻率/窗口不變，見 flowLastPayload 上方註解。
+//   KV value 大小需量測（目標 <1MB，遠低於 25MB 上限）——見 test/flowlast.mjs 的位元組數測試。
 export const FLOW_LAST_KEY = "flow:last";
 export const FLOW_LAST_TTL = 604800;   // 7 天：超長連假過期 → 前端自然退回既有「盤中生效」降級
 // 寫入窗口：台北平日 13:25–13:40（收盤撮合 13:30 前後；13:36+ 快照凍結、frames 停更，覆寫冪等無害）
@@ -493,17 +496,33 @@ export function inFlowLastWindow(tp) {
 }
 // live → flow:last payload（純函式可離線測）：flow null 或 d30 缺 → null（不寫）
 // f30 只收 >0 的個股（省 KV 值大小；前端聚合缺鍵視同 0，語意不變）
+//
+// 案四（2026-07-19）擴充：「資金湧入／資金退出」tab（renderFlow）比照案三定格 fallback，
+// 需要完整 flow.subs[]／flow.frames／flow.baseline_date，以及逐股 f10/c10/c30/r10
+// （it/fi/y1/y2/ints/nl 是 baseline 直出、不受 flow=null 影響、永遠可從 sval(c) 取得，
+// 不需要在這裡重複存一份）。stocks 比照 f30 的省空間做法，只收 f10>0 的個股。
+// 純 additive：既有 mkt/f30 欄位與寫入路徑/頻率/窗口完全不變（案三驗收不得退化）。
 export function flowLastPayload(live) {
   const fl = live && live.flow;
   if (!fl || !fl.mkt || fl.mkt.d30_yi == null) return null;
-  const i = (live.stock_cols || []).indexOf("f30");
+  const cols = live.stock_cols || [];
+  const iF30 = cols.indexOf("f30");
+  const iF10 = cols.indexOf("f10"), iC10 = cols.indexOf("c10"),
+    iC30 = cols.indexOf("c30"), iR10 = cols.indexOf("r10");
   const f30 = {};
-  if (i >= 0) for (const c in live.stocks) {
-    const v = live.stocks[c][i];
+  if (iF30 >= 0) for (const c in live.stocks) {
+    const v = live.stocks[c][iF30];
     if (v != null && v > 0) f30[c] = v;
   }
+  const stocks = {};
+  if (iF10 >= 0) for (const c in live.stocks) {
+    const a = live.stocks[c];
+    const f10 = a[iF10];
+    if (f10 != null && f10 > 0) stocks[c] = [f10, a[iC10], a[iC30], a[iR10]];
+  }
   return { date: String(live.ts || "").slice(0, 10), ts: live.ts,
-    mkt: { d10_yi: fl.mkt.d10_yi, d30_yi: fl.mkt.d30_yi }, f30 };
+    mkt: { d10_yi: fl.mkt.d10_yi, d30_yi: fl.mkt.d30_yi }, f30,
+    subs: fl.subs, frames: fl.frames, baseline_date: fl.baseline_date, stocks };
 }
 // 窗口內且 flow 非 null 才覆寫單一 key（冪等；TTL 7 天）
 export async function storeFlowLast(env, live, tp) {

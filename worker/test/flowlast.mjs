@@ -41,7 +41,9 @@ const mkLive = (flow, stocks) => ({
   flow: flow,
 });
 const FLOW = { wins: { w1: 10, w2: 30 }, baseline_date: "2026-07-16",
-  subs: [], mkt: { d10_yi: 120.5, d30_yi: 350.25 } };
+  frames: { 10: "13:20", 30: "13:00" },
+  subs: [{ name: "IC設計", n: 12, d_yi: 3.2, c1: 1.5, c2: 1.2, ret: 1.1, y: [1, 0] }],
+  mkt: { d10_yi: 120.5, d30_yi: 350.25 } };
 
 // ---- 1. 寫入窗口：平日 13:25–13:40 才 true ----
 {
@@ -64,6 +66,50 @@ const FLOW = { wins: { w1: 10, w2: 30 }, baseline_date: "2026-07-16",
   chk("flow=null → payload null", flowLastPayload(mkLive(null)) === null);
   chk("d30 缺 → payload null", flowLastPayload(mkLive({ mkt: { d10_yi: 1, d30_yi: null } })) === null);
   chk("flow 無 mkt → payload null", flowLastPayload(mkLive({ subs: [] })) === null);
+}
+
+// ---- 2b. 案四：payload 擴充欄位（subs/frames/baseline_date/stocks）----
+{
+  const pl = flowLastPayload(mkLive(FLOW));
+  chk("subs 原樣帶出", pl && Array.isArray(pl.subs) && pl.subs.length === 1 && pl.subs[0].name === "IC設計",
+    JSON.stringify(pl && pl.subs));
+  chk("frames 原樣帶出", pl && pl.frames && pl.frames["10"] === "13:20" && pl.frames["30"] === "13:00",
+    JSON.stringify(pl && pl.frames));
+  chk("baseline_date 原樣帶出", pl && pl.baseline_date === "2026-07-16");
+  chk("stocks 只收 f10>0（2 檔，值為 [f10,c10,c30,r10]）",
+    pl && Object.keys(pl.stocks).length === 2
+      && JSON.stringify(pl.stocks["2330"]) === JSON.stringify([5e8, 1.1, 1.0, 0.5])
+      && JSON.stringify(pl.stocks["2317"]) === JSON.stringify([1e8, 0.9, 0.8, -0.2]),
+    JSON.stringify(pl && pl.stocks));
+  chk("f10<=0／null 個股被過濾出 stocks（1101/9999 不在內）",
+    pl && !("1101" in pl.stocks) && !("9999" in pl.stocks));
+  // 既有 f30/mkt 欄位不變（防退化）
+  chk("f30 欄位不變（防退化）", pl && Object.keys(pl.f30).length === 2 && pl.f30["2330"] === 15e8);
+  chk("mkt 欄位不變（防退化）", pl && pl.mkt.d10_yi === 120.5 && pl.mkt.d30_yi === 350.25);
+}
+
+// ---- 2c. KV value 大小量測：真實規模 mock（1500 檔個股 + 500 次產業）序列化後 <1MB ----
+{
+  const bigStocks = {};
+  for (let i = 0; i < 1500; i++) {
+    const code = String(1000 + i);
+    // f10 全部 >0（最壞情況：全部進 stocks，不被過濾掉）
+    bigStocks[code] = [0, 1e8, 100 + i * 0.01, 5e7 + i, 1.2, 1.1, 0.3, 1.5e8 + i];
+  }
+  const bigSubs = [];
+  for (let i = 0; i < 500; i++) {
+    bigSubs.push({ name: `次產業${i}測試較長中文名稱示例`, n: 8, d_yi: 1.23, c1: 1.4, c2: 1.1, ret: 0.5, y: [1, -1] });
+  }
+  const bigLive = mkLive(
+    { wins: { w1: 10, w2: 30 }, baseline_date: "2026-07-16", frames: { 10: "13:20", 30: "13:00" },
+      subs: bigSubs, mkt: { d10_yi: 500.5, d30_yi: 1200.25 } },
+    bigStocks,
+  );
+  const pl = flowLastPayload(bigLive);
+  const bytes = Buffer.byteLength(JSON.stringify(pl), "utf8");
+  chk(`KV value <1MB（實測 ${bytes} bytes，1500檔+500次產業）`, bytes < 1024 * 1024, `bytes=${bytes}`);
+  chk("大規模 mock 下 stocks 收滿 1500 檔（f10 全>0）", Object.keys(pl.stocks).length === 1500);
+  chk("大規模 mock 下 subs 收滿 500 條", pl.subs.length === 500);
 }
 
 // ---- 3. storeFlowLast：窗口內＋flow 非 null 才寫；TTL 7 天；窗口外/flow null 不寫 ----

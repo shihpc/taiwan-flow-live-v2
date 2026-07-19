@@ -1,9 +1,36 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-19（資金地圖案三：盤外收盤定格 flow:last 上線）
+最後更新：2026-07-19（資金地圖案四：湧入／退出 tab 比照案三收盤定格，worker 已部署待週一驗真值）
 
 ## 快速接手
 
+- **案四 湧入／退出 tab 收盤定格**（2026-07-19 完工部署；「資金湧入」「資金退出」原始 tab
+  (`renderFlow`, index.html) 盤外/週末不再空等「盤中生效」，改用最後營業日收盤資料定格，
+  比照案三的做法但擴充儲存內容）：
+  - **Worker**（`worker/src/index.js` `flowLastPayload`，案三段落內「案四擴充」註解處）：
+    additive 擴充 `flow:last` payload，加 `subs`（flow.subs 原樣）、`frames`（{10,30}）、
+    `baseline_date`、`stocks`（{code:[f10,c10,c30,r10]}，只收 f10>0 個股，比照 f30 省空間）；
+    既有 `mkt`/`f30` 欄位、寫入路徑/頻率/窗口（平日 13:25–13:40 frame cron 保底）完全不變。
+    KV value 大小已用 1500 檔個股+500 次產業規模 mock 量測 <1MB（見
+    `worker/test/flowlast.mjs` 「2c. KV value 大小量測」區塊，實測結果印在測試輸出）。
+  - **前端**（index.html `flowLastUsable`/`flowStockRow`/`FLOW_STK_SRC`/`renderFlow`）：
+    `fl=state.live.flow??flowLastUsable()`；`flowLastUsable()` 要求 flow_last 含 `subs`
+    才視為可用（案三舊 payload 只有 mkt/f30、沒有 subs，會被正確擋掉、回落既有降級文案，
+    不會炸）；回放模式（`OV_REPLAY` 非 null）不套用 fallback。個股列 f10/c10/c30/r10 改讀
+    `flow_last.stocks[code]`（`FLOW_STK_SRC`），it/fi/y1/y2/ints/nl/漲跌%/最新價仍從
+    `sval(c)` 取（baseline 直出，永遠即時，不需重複存）。用定格資料時頁面上方顯示徽章
+    「資金動向：MM-DD 收盤定格」（沿用 `.ovlastbadge` 樣式）；`flow_err` 異常提示只在
+    flow 與 flow_last 都不可用時才顯示，不被 fallback 蓋掉（已用瀏覽器 mock 驗證：mock
+    flow_err + 可用 flow_last 同時存在時，優先走 fallback 正常渲染、不顯示錯誤字樣）。
+  - **驗證方式**：今天週日、真實 KV `flow:last` 尚未落新欄位（甚至目前 KV 完全無值——
+    weekday 首次覆寫要等下週一 13:25 後），本輪全靠瀏覽器 console 對 `state.live` 灌
+    mock `flow_last`（新格式含 subs/stocks／舊格式只有 mkt/f30／`OV_REPLAY` 非 null 三種
+    情境）呼叫 `render()` 驗證渲染與方向判定正確、7 tab 零 console error；worker 單元測試
+    `worker/test/flowlast.mjs`（36 項，含新增的 payload 欄位/過濾/位元組數測試）全過。
+  - **待觀察（週一 2026-07-20 13:25 後）**：確認 `flow:last` KV 真的落地新欄位
+    （`npx wrangler kv key get --binding FLOW_KV flow:last --remote | 檢查有無 subs/stocks`），
+    盤外重新整理「資金湧入」tab 應直接看到真實次產業/個股排行＋「07-20 收盤定格」徽章
+    （非 mock）。若當天徽章沒出現，先查 `/live` 回應是否真的帶 `flow_last.subs`。
 - **案三 盤外收盤定格**（2026-07-19 完工部署；盤外/週末即時一覽「象限圖＋treemap 角標」
   不再空等「盤中生效」，改用最後營業日收盤短窗資料定格＋徽章「資金動向：MM-DD 收盤定格」）：
   - **Worker**（`worker/src/index.js`「案三」段）：frame cron 於台北平日 13:25–13:40 每分鐘
