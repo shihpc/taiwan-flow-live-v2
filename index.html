@@ -1553,9 +1553,13 @@ function ovDashboard(){
   const up=rp?rp.mkt.up:(m.tse&&m.tse.up||0)+(m.otc&&m.otc.up||0);
   const down=rp?rp.mkt.down:(m.tse&&m.tse.down||0)+(m.otc&&m.otc.down||0);
   const flat=rp?rp.mkt.flat:(m.tse&&m.tse.flat||0)+(m.otc&&m.otc.flat||0);
+  // 漲跌停家數（回放 frame 未存 lim，回放模式不顯示）
+  const upLim=rp?null:(m.tse&&m.tse.up_lim||0)+(m.otc&&m.otc.up_lim||0);
+  const downLim=rp?null:(m.tse&&m.tse.down_lim||0)+(m.otc&&m.otc.down_lim||0);
+  const limTxt=(n,cls)=>n==null?"":`<span class="${cls}" style="font-size:11px">(停${n})</span>`;
   const total=up+down+flat||1;
   const breadthCard=`<div class="ovcard"><div class="h">漲跌家數廣度${rp?'<span class="mut">（回放重建）</span>':""}</div>`+
-    `<div class="v" style="font-size:15px">漲<span class="up">${up}</span>／平<span class="mut">${flat}</span>／跌<span class="down">${down}</span></div>`+
+    `<div class="v" style="font-size:15px">漲<span class="up">${up}</span>${limTxt(upLim,"up")}／平<span class="mut">${flat}</span>／跌<span class="down">${down}</span>${limTxt(downLim,"down")}</div>`+
     `<div class="ovbreadth"><div style="width:${up/total*100}%;background:var(--up)"></div>`+
     `<div style="width:${flat/total*100}%;background:var(--muted)"></div>`+
     `<div style="width:${down/total*100}%;background:var(--down)"></div></div></div>`;
@@ -2131,8 +2135,10 @@ function ovSummaryCard(){
   const up=(m.tse&&m.tse.up||0)+(m.otc&&m.otc.up||0), down=(m.tse&&m.tse.down||0)+(m.otc&&m.otc.down||0);
   const shareTxt=shareTop?`${cleanSub(shareTop.name)}（${(mktAmt?(shareTop.amt/1e8)/mktAmt*100:0).toFixed(1)}%）`:"—";
   const ptsTxt=(ptsTop&&ptsTop.pts>0)?`${cleanSub(ptsTop.name)}（${sgnTxt(ptsTop.pts)} 點）`:"—";
+  const ptsBot=[...subs].sort((a,b)=>a.pts-b.pts)[0];
+  const botTxt=(ptsBot&&ptsBot.pts<0)?`${cleanSub(ptsBot.name)}（${sgnTxt(ptsBot.pts)} 點）`:"—";
   // 全日口徑定調句（無短窗子句；「升幅最大」以全日貢獻點最高口徑呈現——盤中佔比升降屬短窗，收盤後無基準）
-  const tone=`今日大盤 ${sgnTxt(ix.chgP)} 點（${pctTxt(ix.chg)}）；廣度 漲${up}／跌${down}；全日成交佔比最高 ${shareTxt}，貢獻最強 ${ptsTxt}。`;
+  const tone=`今日大盤 ${sgnTxt(ix.chgP)} 點（${pctTxt(ix.chg)}）；廣度 漲${up}／跌${down}；全日成交佔比最高 ${shareTxt}，貢獻最強 ${ptsTxt}，拖累最多 ${botTxt}。`;
   const fmtP=r=>`${r.name} ${sgnTxt(r.pts)}`;
   OV_SUMMARY_TEXT=[`【今日總結 ${(state.live.ts||"").slice(0,10)}】`,tone,
     `貢獻前5：${top5.map(fmtP).join("、")||"—"}`,`拖累前5：${bot5.map(fmtP).join("、")||"—"}`].join("\n");
