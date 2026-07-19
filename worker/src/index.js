@@ -893,6 +893,117 @@ async function usWatch(env, list) {
   return out;
 }
 
+// ---- 個股追蹤：基本面（/fundamentals?id=2330 或 ?ids=a,b,c，additive、無新 cron）----
+// FinMind 財報/月營收皆 Free 層，沿用既有 FINMIND_TOKEN secret；MoM/YoY/三率/QoQ 皆本檔算，
+// 前端只渲染。純函式全部 export 供 test/fundamentals.mjs 離線驗算（無需 token）。
+//
+// KV 每股每日快取 key `fund:<code>:<date>`（TTL 2 天）：同股同日只打一次 FinMind。
+// 預算：實務自選＋持股 <30 檔／人；每檔每日最多 1 read（查快取）＋1 write（miss 時）。
+// 縱使一天出現 100 檔不同股，仍 ~100 write « 免費 1000 write／10 萬 read，額度充裕。
+// 另每次 FinMind 回應以 cf cacheTtl 3600 邊緣快取，多裝置同股同小時不重打。
+
+// 相對變化%（EPS／營收／稅後淨利用）：prev 為 0 或缺值回 null，分母取絕對值容忍負值。
+export function pctChange(cur, prev) {
+  if (cur == null || prev == null || prev === 0) return null;
+  return r2(((cur - prev) / Math.abs(prev)) * 100);
+}
+// 百分點差（三率用；三率本身已是百分比，相對%意義不清，故取 pp 差）。
+export function ppChange(cur, prev) {
+  if (cur == null || prev == null) return null;
+  return r2(cur - prev);
+}
+// 月營收：TaiwanStockMonthRevenue。date 欄比 revenue_month 晚一個月，故以 revenue_year+
+// revenue_month 對月份（ym="YYYY-MM"）；create_time=公布日（舊資料可能空→announce null）。
+// 依 ym 升冪，MoM 對上一日曆月、YoY 對去年同月（用 map 精準對齊，不靠索引避免缺月誤配）。
+export function buildRevenue(rows, limit = 24) {
+  const byYm = new Map();
+  for (const row of rows || []) {
+    const y = num(row.revenue_year), m = num(row.revenue_month);
+    if (!y || !m) continue;
+    const ym = `${y}-${String(m).padStart(2, "0")}`;
+    byYm.set(ym, { ym, rev: num(row.revenue), announce: row.create_time || null });
+  }
+  const prevYm = (ym) => { const [y, m] = ym.split("-").map(Number); return `${m === 1 ? y - 1 : y}-${String(m === 1 ? 12 : m - 1).padStart(2, "0")}`; };
+  const yoyYm = (ym) => { const [y, m] = ym.split("-").map(Number); return `${y - 1}-${String(m).padStart(2, "0")}`; };
+  const out = [...byYm.keys()].sort().map((ym) => {
+    const e = byYm.get(ym), p = byYm.get(prevYm(ym)), yy = byYm.get(yoyYm(ym));
+    return { ym, rev: e.rev, mom: p ? pctChange(e.rev, p.rev) : null, yoy: yy ? pctChange(e.rev, yy.rev) : null, announce: e.announce };
+  });
+  return out.slice(-limit);
+}
+// 季財報：TaiwanStockFinancialStatements（單季值）。取 Revenue/GrossProfit/OperatingIncome/
+// IncomeAfterTaxes/EPS，三率＝各項÷Revenue×100。季別由 date 月份推（03→Q1…12→Q4）。
+// QoQ（對上一季）／YoY（對去年同季）：EPS/營收/稅後淨利用相對%、三率用百分點差。
+const FIN_TYPE_MAP = { Revenue: "rev", GrossProfit: "gross", OperatingIncome: "op", IncomeAfterTaxes: "net", EPS: "eps" };
+const QMONTH = { "03": 1, "06": 2, "09": 3, "12": 4 };
+export function buildFinancials(rows, limit = 10) {
+  const byQ = new Map();
+  for (const row of rows || []) {
+    const key = FIN_TYPE_MAP[row.type];
+    if (!key) continue;
+    const d = String(row.date || ""), q = QMONTH[d.slice(5, 7)];
+    if (!q) continue;
+    const qid = `${d.slice(0, 4)}Q${q}`;
+    if (!byQ.has(qid)) byQ.set(qid, { q: qid });
+    byQ.get(qid)[key] = Number(row.value);
+  }
+  const quarters = [...byQ.keys()].sort((a, b) => a.localeCompare(b)).map((qid) => {
+    const e = byQ.get(qid), rev = e.rev;
+    const margin = (x) => (rev && x != null ? r2((x / rev) * 100) : null);
+    return { q: qid, eps: e.eps ?? null, rev: rev ?? null, gross: e.gross ?? null, op: e.op ?? null, net: e.net ?? null,
+      gross_margin: margin(e.gross), op_margin: margin(e.op), net_margin: margin(e.net) };
+  });
+  const byId = new Map(quarters.map((x) => [x.q, x]));
+  const prevQ = (qid) => { const [y, q] = qid.split("Q").map(Number); return q === 1 ? `${y - 1}Q4` : `${y}Q${q - 1}`; };
+  const yoyQ = (qid) => { const [y, q] = qid.split("Q").map(Number); return `${y - 1}Q${q}`; };
+  const chg = (cur, prev) => prev ? {
+    eps: pctChange(cur.eps, prev.eps), rev: pctChange(cur.rev, prev.rev), net: pctChange(cur.net, prev.net),
+    gross_margin: ppChange(cur.gross_margin, prev.gross_margin), op_margin: ppChange(cur.op_margin, prev.op_margin), net_margin: ppChange(cur.net_margin, prev.net_margin),
+  } : null;
+  for (const x of quarters) { x.qoq = chg(x, byId.get(prevQ(x.q))); x.yoy = chg(x, byId.get(yoyQ(x.q))); }
+  return quarters.slice(-limit);
+}
+// FinMind 讀取（重試一次）：非 2xx 或 data 非陣列 → 拋出，由呼叫端決定是否降級成 {id,error}。
+async function finData(token, dataset, id, start, fetchFn = fetch) {
+  const u = `${FIN_BASE}?dataset=${dataset}&data_id=${encodeURIComponent(id)}&start_date=${start}&token=${encodeURIComponent(token)}`;
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetchFn(u, { cf: { cacheTtl: 3600, cacheEverything: true } });
+      if (!r.ok) throw new Error(`${dataset} HTTP ${r.status}`);
+      const j = await r.json();
+      if (!Array.isArray(j.data)) throw new Error(j.msg || `${dataset} 無資料`);
+      return j.data;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+// 單股基本面：先查 KV 每日快取（命中不重抓）；miss 才打 FinMind（月營收＋季財報並行）。
+export async function fundamentalsFor(env, id, date, fetchFn = fetch) {
+  const cacheKey = `fund:${id}:${date}`;
+  if (env.FLOW_KV) {
+    const hit = await env.FLOW_KV.get(cacheKey, "json");
+    if (hit) return hit;
+  }
+  const token = env.FINMIND_TOKEN;
+  const start = `${Number(date.slice(0, 4)) - 4}-01-01`;   // ~4 年：涵蓋 24 月營收＋10 季財報＋YoY 對照
+  const [revRows, finRows] = await Promise.all([
+    finData(token, "TaiwanStockMonthRevenue", id, start, fetchFn),
+    finData(token, "TaiwanStockFinancialStatements", id, start, fetchFn),
+  ]);
+  const out = { id, revenue: buildRevenue(revRows), financials: buildFinancials(finRows), updated: new Date().toISOString() };
+  if (env.FLOW_KV && (out.revenue.length || out.financials.length)) {
+    await env.FLOW_KV.put(cacheKey, JSON.stringify(out), { expirationTtl: 172800 });
+  }
+  return out;
+}
+// 批次：每股獨立 try（某股 FinMind 失敗回 {id,error}，不整批倒）。
+export async function fundamentalsBatch(env, ids, date, fetchFn = fetch) {
+  return Promise.all(ids.map((id) =>
+    fundamentalsFor(env, id, date, fetchFn).catch((e) => ({ id, error: String((e && e.message) || e) }))));
+}
+const FUND_RE = /^[0-9]{4,6}[A-Z]?$/;
+
 // ---- 美股自選跨裝置同步（/usersync?k=同步碼[&set=A,B]）----
 // 清單存 KV `usw:<sha256(碼)>`（永久）；同步碼=輕量共享密鑰，內容僅股票代號、低敏感。
 async function syncKey(code) {
@@ -974,6 +1085,15 @@ export default {
       if (!list.length) return json({ error: "t 參數需為逗號分隔代號（≤12 檔）" });
       return json({ rows: await usWatch(env, list) }, { "Cache-Control": "public, max-age=300" });
     }
+    if (url.pathname === "/fundamentals") {  // 個股追蹤基本面（?id=單股回物件／?ids=批次回 {stocks}）
+      const date = taipeiParts().date;
+      const idsRaw = url.searchParams.get("ids"), single = url.searchParams.get("id");
+      const ids = [...new Set((idsRaw || single || "").split(",").map((s) => s.trim().toUpperCase()).filter((s) => FUND_RE.test(s)))].slice(0, 30);
+      if (!ids.length) return json({ error: "id/ids 參數需為逗號分隔台股代號（≤30 檔）" }, { "Cache-Control": "no-store" });
+      const stocks = await fundamentalsBatch(env, ids, date);
+      const body = idsRaw === null ? stocks[0] : { stocks, date };
+      return json(body, { "Cache-Control": "public, max-age=1800" });
+    }
     if (url.pathname === "/replay") {  // 第五期：當日回放（frame 當日不變 → 命中時短快取 60s）
       const dq = url.searchParams.get("date") || "";   // date 僅供驗證/測試（正式前端不帶＝台北今日）
       const d = /^\d{4}-\d{2}-\d{2}$/.test(dq) ? dq : taipeiParts().date;
@@ -1020,7 +1140,7 @@ export default {
       }
     }
     if (url.pathname !== "/live") {
-      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/replay", "/alerts/test", "/alerts/log"] };
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/replay", "/alerts/test", "/alerts/log"] };
       // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
       // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
       if (url.pathname === "/" && env.FLOW_KV) {

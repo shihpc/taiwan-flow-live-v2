@@ -4,6 +4,25 @@
 
 ## 快速接手
 
+- **個股追蹤基本面端點 `/fundamentals`**（2026-07-19 完工部署；供「新聞晨報」站個股追蹤第一批）：
+  - **Worker**（`worker/src/index.js`，`usWatch` 後、`/uswatch` 路由後）：additive 新端點
+    `/fundamentals?id=2330`（單股回物件）或 `?ids=a,b,c`（批次回 `{stocks,date}`，上限 30 檔）。
+    回傳每股 `{id, revenue:[{ym,rev,mom,yoy,announce}×24], financials:[{q,eps,rev,gross,op,net,
+    gross_margin,op_margin,net_margin,qoq,yoy}×10], updated}`。月營收＝TaiwanStockMonthRevenue
+    （以 revenue_year+revenue_month 對月，非 date；create_time=公布日）；季財報＝
+    TaiwanStockFinancialStatements（**單季值**，三率＝各項÷Revenue）。**QoQ/YoY 由 Worker 算並附回**
+    （EPS/營收/稅後淨利＝相對%；三率＝百分點pp差）。純函式 `pctChange/ppChange/buildRevenue/
+    buildFinancials/fundamentalsFor/fundamentalsBatch` 全 export，離線單元測試見 `worker/test/
+    fundamentals.mjs`（33 通過，無需 token；mock FinMind＋mock KV）。
+  - **KV 每日快取** key `fund:<code>:<date>` TTL 2 天：同股同日只打一次 FinMind；另 FinMind 回應
+    cf cacheTtl 3600 邊緣快取。預算：實務 <30 檔/人，每檔每日 ≤1 read+1 write « 免費額度。
+  - **零影響**：無新 cron（維持 3 條）、`/live` 與既有端點/測試零改動（6 個 guard 測試全過）；
+    某股 FinMind 失敗回 `{id,error}` 不整批倒、重試一次。線上抽核 2330 2026Q1 毛/營/淨率
+    ＝66.25/58.1/50.51%、6月營收 YoY 67.87% 皆與 FinMind 原值手算一致。
+  - **後續批次指針**：籌碼面（法人買賣超/融資券/借券，可續用哨兵落地資料或新 FinMind dataset）、
+    技術面（採描述性統計傾向、留待回測驗證，比照第七期b；不做預測宣稱）。前端 tab 地基已備
+    （`taiwan-stock-news/index.html` 個股追蹤 tab，兩組來源清單＋選股詳情框，加區塊即可）。
+
 - **案四 湧入／退出 tab 收盤定格**（2026-07-19 完工部署；「資金湧入」「資金退出」原始 tab
   (`renderFlow`, index.html) 盤外/週末不再空等「盤中生效」，改用最後營業日收盤資料定格，
   比照案三的做法但擴充儲存內容）：
