@@ -1004,6 +1004,160 @@ export async function fundamentalsBatch(env, ids, date, fetchFn = fetch) {
 }
 const FUND_RE = /^[0-9]{4,6}[A-Z]?$/;
 
+// ---- 個股追蹤：籌碼面（/chips?id=2330 或 ?ids=a,b,c，additive、無新 cron）----
+// 三大法人/融資券/借券/當沖/外資持股皆 FinMind Free 層；千張大戶 TaiwanStockHoldingSharesPer
+// 為 Backer 付費層——執行時 finData 取不到即該欄降級 null＋big_note，不整批倒。純函式全 export
+// 供 test/chips.mjs 離線驗算（無需 token）。KV 每股每日快取 key `chips:<code>:<date>`（TTL 2 天）。
+// 沿用 fundamentals 的 finData（重試一次）＋批次逐股 try 容錯＋json() CORS，不動既有回傳。
+//
+// 回傳結構（單位一律標清；張＝1000 股）：
+//   inst  三大法人：{foreign:[{d,v}…≤20日 淨買賣張], trust:[…], dealer:[…],
+//                   streak:{foreign,trust,dealer 連續同號天數±（正買負賣）}, sum5:{…近5日合計張}}
+//   margin 融資融券：{bal 融資餘額張, chg 增減張, series:[{d,v}…≤20日 融資餘額張],
+//                    short_bal 融券餘額張, short_chg 增減張, credit_ratio 券資比%, date}
+//   sbl    借券賣出：{bal 餘額張, chg 增減張, date}
+//   daytrade 當沖：{ratio 當沖量÷成交量%, date}
+//   foreign_hold 外資持股：{ratio 持股率%, chg 區間pp變化, date}
+//   big    千張大戶（週資料，date=資料週）：{ratio 持股比%, wchg 週變化pp, date}|null
+//   big_note 付費層取不到時的降級說明；updated
+const chipT = (v) => Math.round(v);   // 張數取整（股數÷1000）
+// 連續同號天數（由最近往前數）：最近淨額>0 回正計數、<0 回負計數、=0 回 0。
+export function chipStreak(nets) {
+  const n = (nets || []).length;
+  if (!n) return 0;
+  const last = nets[n - 1];
+  if (last === 0) return 0;
+  const s = last > 0 ? 1 : -1;
+  let c = 0;
+  for (let i = n - 1; i >= 0; i--) {
+    if ((s > 0 && nets[i] > 0) || (s < 0 && nets[i] < 0)) c++;
+    else break;
+  }
+  return s * c;
+}
+// 三大法人 TaiwanStockInstitutionalInvestorsBuySell：依 name 歸併三大法人，每日淨買賣（張）。
+// 外資＝Foreign_Investor＋Foreign_Dealer_Self；投信＝Investment_Trust；自營＝Dealer_self＋Dealer_Hedging。
+const INST_GROUP = {
+  Foreign_Investor: "foreign", Foreign_Dealer_Self: "foreign",
+  Investment_Trust: "trust",
+  Dealer_self: "dealer", Dealer_Hedging: "dealer",
+};
+export function buildInst(rows, days = 20) {
+  const byDate = new Map();   // date -> {foreign,trust,dealer} 淨股數
+  for (const row of rows || []) {
+    const g = INST_GROUP[row.name];
+    const d = String(row.date || "");
+    if (!g || !d) continue;
+    if (!byDate.has(d)) byDate.set(d, { foreign: 0, trust: 0, dealer: 0 });
+    byDate.get(d)[g] += num(row.buy) - num(row.sell);
+  }
+  const dates = [...byDate.keys()].sort();
+  if (!dates.length) return null;
+  const out = { streak: {}, sum5: {} };
+  for (const g of ["foreign", "trust", "dealer"]) {
+    const arr = dates.slice(-days).map((d) => ({ d, v: chipT(byDate.get(d)[g] / 1000) }));
+    out[g] = arr;
+    out.streak[g] = chipStreak(arr.map((x) => x.v));
+    out.sum5[g] = arr.slice(-5).reduce((a, b) => a + b.v, 0);
+  }
+  return out;
+}
+// 融資融券 TaiwanStockMarginPurchaseShortSale（餘額原生單位＝張）：末日餘額＋增減＋券資比＋20日融資餘額序列。
+export function buildMargin(rows, days = 20) {
+  const sorted = (rows || []).filter((r) => r.date).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!sorted.length) return null;
+  const last = sorted[sorted.length - 1];
+  const bal = num(last.MarginPurchaseTodayBalance);
+  const short_bal = num(last.ShortSaleTodayBalance);
+  return {
+    bal, chg: bal - num(last.MarginPurchaseYesterdayBalance),
+    short_bal, short_chg: short_bal - num(last.ShortSaleYesterdayBalance),
+    credit_ratio: bal ? r2((short_bal / bal) * 100) : null,   // 券資比＝融券餘額÷融資餘額
+    series: sorted.slice(-days).map((r) => ({ d: String(r.date), v: num(r.MarginPurchaseTodayBalance) })),
+    date: String(last.date),
+  };
+}
+// 借券賣出 TaiwanDailyShortSaleBalances（SBL 餘額原生單位＝股）：末日餘額＋增減，換算張。
+export function buildSBL(rows) {
+  const sorted = (rows || []).filter((r) => r.date).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!sorted.length) return null;
+  const last = sorted[sorted.length - 1];
+  const cur = num(last.SBLShortSalesCurrentDayBalance), prev = num(last.SBLShortSalesPreviousDayBalance);
+  return { bal: chipT(cur / 1000), chg: chipT((cur - prev) / 1000), date: String(last.date) };
+}
+// 當沖 TaiwanStockDayTrading：當沖成交量÷當日總成交量（TaiwanStockPrice.Trading_Volume）＝當沖比%。
+export function buildDayTrade(dtRows, priceRows) {
+  const dt = (dtRows || []).filter((r) => r.date).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!dt.length) return null;
+  const last = dt[dt.length - 1];
+  const tv = new Map((priceRows || []).map((r) => [String(r.date), num(r.Trading_Volume)])).get(String(last.date));
+  return { ratio: tv ? r2((num(last.Volume) / tv) * 100) : null, date: String(last.date) };
+}
+// 外資持股 TaiwanStockShareholding：末日 ForeignInvestmentSharesRatio＋對區間首筆的 pp 變化。
+export function buildForeignHold(rows) {
+  const sorted = (rows || []).filter((r) => r.date && r.ForeignInvestmentSharesRatio != null)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!sorted.length) return null;
+  const last = sorted[sorted.length - 1], ratio = num(last.ForeignInvestmentSharesRatio);
+  const ref = sorted[Math.max(0, sorted.length - 6)];   // ~5 交易日前
+  return { ratio: r2(ratio), chg: r2(ratio - num(ref.ForeignInvestmentSharesRatio)), date: String(last.date) };
+}
+// 千張大戶 TaiwanStockHoldingSharesPer（週資料，付費層）：取 >1000 張級距(more than 1,000,001)持股比％，
+// 末週值＋對上一週的 pp 變化。取不到（空/finData 拋出被 catch 成 null）回 null → big_note 標降級。
+export function buildBigHolder(rows) {
+  const byDate = new Map();
+  for (const r of rows || []) {
+    if (r.HoldingSharesLevel === "more than 1,000,001" && r.date) byDate.set(String(r.date), num(r.percent));
+  }
+  const dates = [...byDate.keys()].sort();
+  if (!dates.length) return null;
+  const lastD = dates[dates.length - 1], prevD = dates.length >= 2 ? dates[dates.length - 2] : null;
+  return { ratio: r2(byDate.get(lastD)), wchg: prevD ? r2(byDate.get(lastD) - byDate.get(prevD)) : null, date: lastD };
+}
+// 單股籌碼：先查 KV 每日快取（命中不重抓）；miss 才並行打 FinMind（各 dataset 獨立容錯，某表失敗
+// 該欄 null；千張大戶付費取不到降級不整批倒）。全部區塊皆 null → 拋出交由 batch 降成 {id,error}。
+export async function chipsFor(env, id, date, fetchFn = fetch) {
+  const cacheKey = `chips:${id}:${date}`;
+  if (env.FLOW_KV) {
+    const hit = await env.FLOW_KV.get(cacheKey, "json");
+    if (hit) return hit;
+  }
+  const token = env.FINMIND_TOKEN;
+  const start = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)) - 75))
+    .toISOString().slice(0, 10);   // ~75 天回溯：涵蓋 20 交易日序列＋千張大戶近幾週＋外資持股區間
+  const get = (ds) => finData(token, ds, id, start, fetchFn).catch(() => null);
+  const [instR, marginR, sblR, dtR, priceR, fhR, bigR] = await Promise.all([
+    get("TaiwanStockInstitutionalInvestorsBuySell"),
+    get("TaiwanStockMarginPurchaseShortSale"),
+    get("TaiwanDailyShortSaleBalances"),
+    get("TaiwanStockDayTrading"),
+    get("TaiwanStockPrice"),
+    get("TaiwanStockShareholding"),
+    get("TaiwanStockHoldingSharesPer"),   // 付費層，取不到 → null → big 降級
+  ]);
+  const big = buildBigHolder(bigR);
+  const out = {
+    id,
+    inst: buildInst(instR),
+    margin: buildMargin(marginR),
+    sbl: buildSBL(sblR),
+    daytrade: buildDayTrade(dtR, priceR),
+    foreign_hold: buildForeignHold(fhR),
+    big,
+    big_note: big ? null : "千張大戶為 FinMind 付費層，此 token 或此股暫無法取得（其餘欄不受影響）",
+    updated: new Date().toISOString(),
+  };
+  if (!out.inst && !out.margin && !out.sbl && !out.daytrade && !out.foreign_hold && !out.big)
+    throw new Error("查無籌碼資料");
+  if (env.FLOW_KV) await env.FLOW_KV.put(cacheKey, JSON.stringify(out), { expirationTtl: 172800 });
+  return out;
+}
+// 批次：每股獨立 try（某股 FinMind 失敗或查無回 {id,error}，不整批倒）。
+export async function chipsBatch(env, ids, date, fetchFn = fetch) {
+  return Promise.all(ids.map((id) =>
+    chipsFor(env, id, date, fetchFn).catch((e) => ({ id, error: String((e && e.message) || e) }))));
+}
+
 // ---- 美股自選跨裝置同步（/usersync?k=同步碼[&set=A,B]）----
 // 清單存 KV `usw:<sha256(碼)>`（永久）；同步碼=輕量共享密鑰，內容僅股票代號、低敏感。
 async function syncKey(code) {
@@ -1094,6 +1248,15 @@ export default {
       const body = idsRaw === null ? stocks[0] : { stocks, date };
       return json(body, { "Cache-Control": "public, max-age=1800" });
     }
+    if (url.pathname === "/chips") {  // 個股追蹤籌碼面（?id=單股回物件／?ids=批次回 {stocks}）
+      const date = taipeiParts().date;
+      const idsRaw = url.searchParams.get("ids"), single = url.searchParams.get("id");
+      const ids = [...new Set((idsRaw || single || "").split(",").map((s) => s.trim().toUpperCase()).filter((s) => FUND_RE.test(s)))].slice(0, 30);
+      if (!ids.length) return json({ error: "id/ids 參數需為逗號分隔台股代號（≤30 檔）" }, { "Cache-Control": "no-store" });
+      const stocks = await chipsBatch(env, ids, date);
+      const body = idsRaw === null ? stocks[0] : { stocks, date };
+      return json(body, { "Cache-Control": "public, max-age=1800" });
+    }
     if (url.pathname === "/replay") {  // 第五期：當日回放（frame 當日不變 → 命中時短快取 60s）
       const dq = url.searchParams.get("date") || "";   // date 僅供驗證/測試（正式前端不帶＝台北今日）
       const d = /^\d{4}-\d{2}-\d{2}$/.test(dq) ? dq : taipeiParts().date;
@@ -1140,7 +1303,7 @@ export default {
       }
     }
     if (url.pathname !== "/live") {
-      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/replay", "/alerts/test", "/alerts/log"] };
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/alerts/test", "/alerts/log"] };
       // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
       // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
       if (url.pathname === "/" && env.FLOW_KV) {

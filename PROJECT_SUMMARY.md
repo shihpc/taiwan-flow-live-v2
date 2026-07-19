@@ -4,6 +4,31 @@
 
 ## 快速接手
 
+- **個股追蹤籌碼面端點 `/chips`**（2026-07-20 完工部署；供「新聞晨報」站個股追蹤第二批）：
+  - **Worker**（`worker/src/index.js`，`fundamentalsBatch` 後、`FUND_RE` 後）：additive 新端點
+    `/chips?id=2330`（單股回物件）或 `?ids=a,b,c`（批次回 `{stocks,date}`，上限 30 檔）。回傳每股
+    `{id, inst:{foreign/trust/dealer:[{d,v}×≤20日 淨買賣張], streak:{±連續同號天數}, sum5:{近5日合計張}},
+    margin:{bal,chg,short_bal,short_chg,credit_ratio 券資比%,series,date}, sbl:{bal,chg,date},
+    daytrade:{ratio 當沖量÷成交量%,date}, foreign_hold:{ratio,chg,date}, big:{ratio,wchg,date}|null,
+    big_note, updated}`。單位：三大法人/融資/借券一律「張」（=1000股），比率 %。
+  - **資料集**（皆 finData 重試一次、各表獨立容錯，某表失敗該欄 null）：三大法人＝
+    TaiwanStockInstitutionalInvestorsBuySell（外資含 Foreign_Dealer_Self、自營含 Dealer_Hedging）；
+    融資券＝TaiwanStockMarginPurchaseShortSale（餘額原生張）；借券＝TaiwanDailyShortSaleBalances
+    （SBL 原生股→÷1000 張）；當沖＝TaiwanStockDayTrading÷TaiwanStockPrice.Trading_Volume；外資持股＝
+    TaiwanStockShareholding.ForeignInvestmentSharesRatio；**千張大戶＝TaiwanStockHoldingSharesPer
+    （Backer 付費層，週資料）——實測 Worker FINMIND_TOKEN 可取到**（2330 big_note=null、84.91%），
+    取不到則 big=null＋big_note 降級不整批倒。純函式 `chipStreak/buildInst/buildMargin/buildSBL/
+    buildDayTrade/buildForeignHold/buildBigHolder/chipsFor/chipsBatch` 全 export，離線測試見
+    `worker/test/chips.mjs`（41 通過，無需 token）。
+  - **KV 每日快取** key `chips:<code>:<date>` TTL 2 天；全欄皆 null（含查無）拋出 → batch 降 `{id,error}`。
+  - **零影響**：無新 cron（維持 3 條）、`/live` 與 `/fundamentals` 舊回傳/測試零改動（7 個 guard 測試全過；
+    parity.mjs 的 31 失敗為既有線上資料漂移，clean tree 同樣失敗，與本次無關）。線上抽核 2330（2026-07-17）
+    外資 −44,184 張、融資 +455 張、券資比 0.24%、借券 +375 張、當沖 11.77%、外資持股 69.34% 皆與
+    FinMind 原值手算一致。
+  - **後續批次指針**：技術面（第三批）採描述性統計傾向、留待回測驗證（比照第七期b／postmkt 持股診斷，
+    不做預測宣稱）；前端 tab 地基已備（`taiwan-stock-news/index.html` 個股追蹤 `基本面/籌碼面` 分頁，
+    再加第三個分頁即可）。
+
 - **個股追蹤基本面端點 `/fundamentals`**（2026-07-19 完工部署；供「新聞晨報」站個股追蹤第一批）：
   - **Worker**（`worker/src/index.js`，`usWatch` 後、`/uswatch` 路由後）：additive 新端點
     `/fundamentals?id=2330`（單股回物件）或 `?ids=a,b,c`（批次回 `{stocks,date}`，上限 30 檔）。
