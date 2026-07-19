@@ -1,9 +1,24 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-18（「即時一覽」tab 五期完工＋7a 盤中歸檔/權重月更＋第八期收盤總結落檔＋第九期離線提醒基礎設施上線）
+最後更新：2026-07-19（資金地圖案三：盤外收盤定格 flow:last 上線）
 
 ## 快速接手
 
+- **案三 盤外收盤定格**（2026-07-19 完工部署；盤外/週末即時一覽「象限圖＋treemap 角標」
+  不再空等「盤中生效」，改用最後營業日收盤短窗資料定格＋徽章「資金動向：MM-DD 收盤定格」）：
+  - **Worker**（`worker/src/index.js`「案三」段）：frame cron 於台北平日 13:25–13:40 每分鐘
+    保底 `buildLive→storeFlowLast`，把非 null flow 定格成單一 key `flow:last`
+    （{date,ts,mkt:{d10_yi,d30_yi},f30:{code:近30分Δ額>0}}，TTL 7 天，≤16 writes/日；
+    /live 流量路徑不寫）。`/live` 在 flow=null 時 +1 get 附頂層 `flow_last`（additive，
+    flow 非 null 不附）。KV write 預算：既有 ~825＋本功能 16 ≈860/日 <1000。
+  - **前端**（index.html `ovFlowLast/ovF30/ovFlowLastBadge`）：僅象限圖與 treemap 角標退回
+    `flow ?? flow_last`（個股 f30 → flow_last.f30[code]）；雷達/儀表列/定調句/總表近30分欄/
+    湧入退出 tab 一律照舊降級「盤中生效」；回放模式不適用 fallback；兩者皆無（首次部署後
+    KV 尚空）→ 既有「盤中生效」提示。單元測試 `worker/test/flowlast.mjs`（26 項）。
+  - **待觀察（週一 2026-07-20）**：13:25 後 KV 首次落 `flow:last`（`npx wrangler kv key get
+    --binding FLOW_KV flow:last --remote` 或收盤後看 /live flow_last）；當晚盤外象限圖應
+    顯示定格資料＋「07-20 收盤定格」徽章。註：parity.mjs 在 HEAD 即 31 項失敗
+    （data/live.json 與 lastweek.json fixture 漂移，與案三無關）。
 - **資金地圖改造＋六點回饋**（2026-07-19，commit 7251379，fresh-context 總驗收全 PASS）：
   treemap 第一層改「佔比≥1%動態門檻」（原 top9＋37.9%黑箱→28具名格＋3.1%粉塵格）、
   N欄自動布局、「其餘N條」與「未入鏈」（拆一般/主動A/債券B/反向R/槓桿L/未入鏈六灰格）

@@ -107,6 +107,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 .ovt-dnl{background:rgba(63,208,127,.32);color:var(--fg)}
 .ovt-flat{background:var(--panel2);color:var(--fg)}
 .ovtfoot{font-size:11px;color:var(--dim);margin:2px 0 6px}
+.ovlastbadge{display:inline-block;border:1px solid var(--line);border-radius:8px;padding:0 6px;font-size:11px;color:var(--dim);background:var(--bg2,transparent)}
 .ovmom{font-size:11px;font-weight:700}
 /* 即時一覽 tab（第四期：盤中異動雷達＋自訂提醒） */
 .ovradar{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0}
@@ -1199,7 +1200,7 @@ function ovAggBy(filterFn,groupByFn){
     const names=groupByFn(info)||[];
     for(const name of new Set(names)){
       const o=out[name]||(out[name]={name,amt:0,wchg:0,f30:0,up:0,down:0,n:0,codes:[]});
-      o.amt+=v.amt||0; o.wchg+=(v.chg||0)*(v.amt||0); o.f30+=(v.f30||0); o.n++; o.codes.push(c);
+      o.amt+=v.amt||0; o.wchg+=(v.chg||0)*(v.amt||0); o.f30+=ovF30(c,v); o.n++; o.codes.push(c);   // 案三：f30 盤外退定格
       if(v.chg>0)o.up++; else if(v.chg<0)o.down++;
     }
   }
@@ -1238,11 +1239,34 @@ function ovTreemapAutoSplit(items){
   }
   return r;
 }
+// ---- 案三（2026-07-19）：盤外/週末收盤定格 fallback ----
+// /live 只在 flow=null 時附頂層 flow_last（Worker 於交易日 13:25–13:40 定格最後一份非 null flow）。
+// 範圍鐵律：只有「象限圖＋treemap 角標」退回定格值；雷達/儀表列/定調句/總表近30分欄/湧入退出 tab
+// 一律照舊吃 state.live.flow（盤外維持既有「盤中生效」降級），回放模式也不適用 fallback。
+function ovFlowLast(){
+  const l=state.live;
+  if(OV_REPLAY||!l)return null;
+  if(l.flow&&l.flow.mkt&&l.flow.mkt.d30_yi)return null;   // 盤中 flow 生效 → 不用定格
+  const fl=l.flow_last;
+  return (fl&&fl.mkt&&fl.mkt.d30_yi&&fl.f30)?fl:null;
+}
+// treemap 聚合用個股 f30：盤中用 /live 個股欄（v.f30），盤外定格退 flow_last.f30[code]（缺鍵視同 0）
+function ovF30(c,v){
+  const last=ovFlowLast();
+  if(last)return last.f30[c]||0;
+  return (v&&v.f30)||0;
+}
+// 徽章：使用定格資料時標註資料日（象限與地圖視角標題列共用）
+function ovFlowLastBadge(){
+  const last=ovFlowLast();
+  return last?` <span class="ovlastbadge">資金動向：${escI(String(last.date||"").slice(5))} 收盤定格</span>`:"";
+}
 // 角標：群組近30分成交佔比 vs 全日成交佔比（f30聚合÷flow.mkt.d30_yi 對比 amt÷market.tse.amt_yi）
 function ovTreemapBadge(amtRaw,f30Raw){
   if(OV_REPLAY)return "";   // 第五期：近30分升降屬短窗，回放模式不適用
   const mktAmt=(state.live.market&&state.live.market.tse&&state.live.market.tse.amt_yi)||0;
-  const fl=state.live.flow, d30=fl&&fl.mkt?fl.mkt.d30_yi:null;
+  const fl=state.live.flow;let d30=fl&&fl.mkt?fl.mkt.d30_yi:null;
+  const last=d30==null?ovFlowLast():null; if(last)d30=last.mkt.d30_yi;   // 案三：盤外退收盤定格
   if(!mktAmt||d30==null)return "";
   const fullShr=(amtRaw/1e8)/mktAmt*100, now30=(f30Raw/1e8)/d30*100, diff=now30-fullShr;
   return diff>0.3?'<span class="ovtbadge up">↑</span>':diff<-0.3?'<span class="ovtbadge down">↓</span>':"";
@@ -1286,7 +1310,7 @@ function ovChainAgg(){
     const v=ovVal(c); if(!v)continue;
     const g=ovUncGroup(c);
     const o=ug[g]||(ug[g]={name:g,amt:0,f30:0,w:0,n:0});
-    o.amt+=v.amt||0; o.f30+=v.f30||0; o.w+=(v.chg||0)*(v.amt||0); o.n++;
+    o.amt+=v.amt||0; o.f30+=ovF30(c,v); o.w+=(v.chg||0)*(v.amt||0); o.n++;   // 案三：f30 盤外退定格
   }
   const uncGroups=OV_UNC_ORDER.filter(g=>ug[g]).map(g=>({...ug[g],chg:ug[g].amt?ug[g].w/ug[g].amt:null}));
   const total=arr.reduce((a,r)=>a+r.amt,0)+uncGroups.reduce((a,r)=>a+r.amt,0);
@@ -1312,14 +1336,17 @@ const OV_QUAD_LBL_TOP=12;  // 面積前幾名直接標名
 const OV_QUAD_LBL_R=12;    // 或半徑 ≥ 此值(px) 也標名；其餘 hover（<title>）
 function ovQuadrantHtml(){
   if(OV_REPLAY)return `<div class="loading">回放模式不適用（象限圖需盤中短窗資料；按「回到即時」或切回「地圖」視角）。</div>`;
-  const fl=state.live.flow, d30=fl&&fl.mkt?fl.mkt.d30_yi:null, mktAmt=ovMktTseYi();
+  const fl=state.live.flow;let d30=fl&&fl.mkt?fl.mkt.d30_yi:null;
+  const last=d30==null?ovFlowLast():null; if(last)d30=last.mkt.d30_yi;   // 案三：盤外/週末退最後收盤定格
+  const mktAmt=ovMktTseYi();
   if(!d30||!mktAmt)return `<div class="loading">短窗資料未生效：<b>盤中生效</b>（開盤累積約 30 分鐘起）。</div>`;
   const rows=Object.values(OV_SUB_CACHE).sort((a,b)=>b.amt-a.amt).slice(0,OV_QUAD_N).map(s=>{
     let w=0,amt=0;const chAmt={};   // 加權漲跌現算＋找該次產業成交值最大的所屬鏈（下鑽用）
     for(const c of s.codes){const v=ovVal(c);if(!v)continue;
       w+=(v.chg||0)*(v.amt||0);amt+=v.amt||0;
       const info=state.cl[c];if(info&&info.p)for(const p of info.p)if(p[1]===s.name)chAmt[p[0]]=(chAmt[p[0]]||0)+(v.amt||0);}
-    const share=(s.amt/1e8)/mktAmt*100, now30=(s.f30/1e8)/d30*100;
+    const f30=last?s.codes.reduce((a,c)=>a+(last.f30[c]||0),0):s.f30;   // 案三：定格時逐檔取 flow_last.f30
+    const share=(s.amt/1e8)/mktAmt*100, now30=(f30/1e8)/d30*100;
     return {name:s.name,chg:amt?w/amt:0,share,y:now30-share,
       chain:Object.keys(chAmt).sort((a,b)=>chAmt[b]-chAmt[a])[0]||""};
   }).filter(r=>r.share>0);
@@ -1391,7 +1418,7 @@ function ovTreemapHtml(){
   const pills=`<button class="seg2 ${st.mapView==="quad"?"":"on"}" data-ovmap="tree">地圖</button>`+
     `<button class="seg2 ${st.mapView==="quad"?"on":""}" data-ovmap="quad">象限</button>`;
   if(st.mapView==="quad"){
-    return `<div class="crumb"><b>資金地圖</b> ${pills} <span class="mut">x=次產業加權漲跌% · y=盤中資金動向(pp) · 面積=成交佔比 · 前${OV_QUAD_N}大次產業</span></div>`+
+    return `<div class="crumb"><b>資金地圖</b> ${pills}${ovFlowLastBadge()} <span class="mut">x=次產業加權漲跌% · y=盤中資金動向(pp) · 面積=成交佔比 · 前${OV_QUAD_N}大次產業</span></div>`+
       ovQuadrantHtml();
   }
   let crumbHtml=`<span class="clk" data-ovtree-crumb="root">全部產業鏈</span>`;
@@ -1404,13 +1431,13 @@ function ovTreemapHtml(){
     if(st.treeChain)crumbHtml+=` › <span class="clk" data-ovtree-crumb="chain">${escI(ovChainDisp(st.treeChain))}</span>`;
     if(st.treeSub)crumbHtml+=` › <span>${escI(cleanSub(st.treeSub))}</span>`;
   }
-  const head=`<div class="crumb"><b>資金地圖</b> ${pills} ${crumbHtml} <span class="mut">面積=成交值佔比 · 顏色=漲跌(深淺) · ${OV_REPLAY?"角標(近30分)：回放模式不適用":"角標=近30分資金升降"}</span></div>`;
+  const head=`<div class="crumb"><b>資金地圖</b> ${pills}${ovFlowLastBadge()} ${crumbHtml} <span class="mut">面積=成交值佔比 · 顏色=漲跌(深淺) · ${OV_REPLAY?"角標(近30分)：回放模式不適用":"角標=近30分資金升降"}</span></div>`;
 
   let items, mkAttr, footNote="";
   if(st.treeUnc){
     // 未入鏈分類個股列表層（樣式同第三層個股格；口徑見 ovUncCodes(grp)）
     let all=ovUncCodes(st.treeUnc).map(c=>{const v=ovVal(c)||{},info=state.cl[c]||{};
-      return {name:info.n||c, amt:v.amt||0, f30:v.f30||0, chg:v.chg};}).sort((a,b)=>b.amt-a.amt);
+      return {name:info.n||c, amt:v.amt||0, f30:ovF30(c,v), chg:v.chg};}).sort((a,b)=>b.amt-a.amt);
     footNote=`<div class="ovtfoot">「${escI(st.treeUnc)}」（無產業鏈分類）個股共 ${all.length} 檔${all.length>24?`，另有 ${all.length-24} 檔成交值較小未顯示`:""}。</div>`;
     if(all.length>24)all=all.slice(0,24);
     items=ovMergeSmall(all,0.02);
@@ -1461,7 +1488,7 @@ function ovTreemapHtml(){
       const info=state.cl[c]; return info&&info.t==="twse"&&info.p&&info.p.some(p=>p[0]===st.treeChain&&p[1]===st.treeSub);
     });
     let all=codes.map(c=>{const v=ovVal(c)||{},info=state.cl[c]||{};
-      return {name:info.n||c, amt:v.amt||0, f30:v.f30||0, chg:v.chg};}).sort((a,b)=>b.amt-a.amt);
+      return {name:info.n||c, amt:v.amt||0, f30:ovF30(c,v), chg:v.chg};}).sort((a,b)=>b.amt-a.amt);
     if(all.length>24){footNote=`<div class="ovtfoot">另有 ${all.length-24} 檔成交值較小未顯示。</div>`; all=all.slice(0,24);}
     items=ovMergeSmall(all,0.02);
     mkAttr=()=>"";

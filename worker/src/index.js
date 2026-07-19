@@ -152,6 +152,10 @@ async function buildLive(env) {
     live.flow_err = String(e && e.message || e);
   }
 
+  // 案三（2026-07-19）：flow 為 null（盤前/盤外/週末/異常）時多 1 次 get 附最後收盤定格
+  // flow_last（additive 頂層欄位；flow 非 null 時不附、不多讀）。既有欄位零改動。
+  await attachFlowLast(env, live);
+
   // 分鐘動能序列（即時一覽 tab 第二期 sparkline）：1 次 get，附近 60 分；失敗不影響 /live 主體
   try {
     const ts = String(live.ts || "");
@@ -471,6 +475,52 @@ export function computeFlow(cl, items, baseline, frames, nowTs) {
     mkt,
   };
   return { flow, per: stockFlow };
+}
+
+// ---- 案三（2026-07-19）：收盤前定格 flow:last ——盤外/週末即時一覽「象限圖＋treemap 角標」fallback ----
+// 動機：flow 盤外為 null、frame TTL 2 天 → 盤外沒有短窗資料可退回；收盤前把最後一份非 null flow
+//   定格存 KV，/live 於 flow=null 時附頂層 flow_last，前端僅象限圖與角標退回定格值（標註資料日）。
+// 寫入路徑：只走 frame cron 保底（scheduled 於台北平日 13:25–13:40 每分鐘 buildLive→storeFlowLast），
+//   /live 流量路徑不寫——寫入次數固定 ≤16/日，不隨流量浮動。
+// KV write 預算（免費 1000/日）：既有 frame+fi+series 每盤中分鐘 ≤3 put（~275 分 ≈825）＋alerts/err/哨兵
+//   零星 ≤20 → 本功能 +16 後 worst case ≈860/日，仍留 >100 餘裕。讀：/live 僅 flow=null 時 +1 get（10 萬/日額度無虞）。
+export const FLOW_LAST_KEY = "flow:last";
+export const FLOW_LAST_TTL = 604800;   // 7 天：超長連假過期 → 前端自然退回既有「盤中生效」降級
+// 寫入窗口：台北平日 13:25–13:40（收盤撮合 13:30 前後；13:36+ 快照凍結、frames 停更，覆寫冪等無害）
+export function inFlowLastWindow(tp) {
+  const m = tp.hour * 60 + tp.minute;
+  return tp.dow >= 1 && tp.dow <= 5 && m >= 13 * 60 + 25 && m <= 13 * 60 + 40;
+}
+// live → flow:last payload（純函式可離線測）：flow null 或 d30 缺 → null（不寫）
+// f30 只收 >0 的個股（省 KV 值大小；前端聚合缺鍵視同 0，語意不變）
+export function flowLastPayload(live) {
+  const fl = live && live.flow;
+  if (!fl || !fl.mkt || fl.mkt.d30_yi == null) return null;
+  const i = (live.stock_cols || []).indexOf("f30");
+  const f30 = {};
+  if (i >= 0) for (const c in live.stocks) {
+    const v = live.stocks[c][i];
+    if (v != null && v > 0) f30[c] = v;
+  }
+  return { date: String(live.ts || "").slice(0, 10), ts: live.ts,
+    mkt: { d10_yi: fl.mkt.d10_yi, d30_yi: fl.mkt.d30_yi }, f30 };
+}
+// 窗口內且 flow 非 null 才覆寫單一 key（冪等；TTL 7 天）
+export async function storeFlowLast(env, live, tp) {
+  if (!env.FLOW_KV || !inFlowLastWindow(tp)) return { stored: false, reason: "窗口外" };
+  const pl = flowLastPayload(live);
+  if (!pl) return { stored: false, reason: "flow null" };
+  await env.FLOW_KV.put(FLOW_LAST_KEY, JSON.stringify(pl), { expirationTtl: FLOW_LAST_TTL });
+  return { stored: true, key: FLOW_LAST_KEY, date: pl.date };
+}
+// /live 附掛：flow=null 時 1 次 get；KV 讀失敗吞錯不影響 /live 主體
+export async function attachFlowLast(env, live) {
+  if (!live || live.flow != null || !env.FLOW_KV) return live;
+  try {
+    const fl = await env.FLOW_KV.get(FLOW_LAST_KEY, "json");
+    if (fl) live.flow_last = fl;
+  } catch (e) { console.log("attachFlowLast:", e && e.message); }
+  return live;
 }
 
 // ---- FinMind 哨兵（傍晚探測盤後資料落地 → GitHub workflow 兩段式觸發）----
@@ -869,6 +919,13 @@ export default {
         console.log("storeFrame:", e && e.message);
         await recordFrameErr(env, tp.date, e);
       }));
+    // 案三：收盤前 13:25–13:40 每分鐘保底定格 flow:last（不依賴 /live 流量，頁面沒開也保證
+    // 每交易日落一份；與 storeFrame 並行互不影響，失敗只 log）。窗口/非null 守門在 storeFlowLast。
+    if (inFlowLastWindow(tp)) {
+      ctx.waitUntil(buildLive(env)
+        .then((live) => storeFlowLast(env, live, tp))
+        .catch((e) => console.log("flowLast:", e && e.message)));
+    }
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
