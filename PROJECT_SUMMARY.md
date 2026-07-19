@@ -4,6 +4,18 @@
 
 ## 快速接手
 
+- **個股追蹤基本面 refine（4 點回饋）**（2026-07-20 完工部署 version ae22fd05）：`/fundamentals`
+  additive 擴充—回傳新增 `name`（TaiwanStockInfo）、`dividend`（TaiwanStockDividend：現金/股票股利
+  ＋除息日 exDate＋公告 announce＋年度季別 year，cash 回 FinMind 原值）、`news`（媒體新聞
+  TaiwanStockNews 去重 by link＋業績事件墊底，保證 ≥3、消除「不在新聞池」死路）。純函式
+  `buildNews/buildDividend/buildName/buildEvents/assembleNews` 全 export（`worker/test/fundamentals.mjs`
+  67 通過）。**新聞窗只取近 5 日**（FinMind TaiwanStockNews 由 start_date 升冪、≤500 列截斷，長窗會
+  把最新新聞截掉）；assembleNews 為業績事件**保留名額**（cap-events），故熱門股仍同時含媒體＋事件。
+  **cache key 升版 `fund:4:<id>:<date>`**（schema 變動使舊快取自然失效）。`/live`、`/chips` 舊回傳
+  零改動、無新 cron（維持 3 條）、三站同步函式零改動。前端配合：news 站每日新聞改讀此 news、月營收
+  柱標金額、季財報加股利列、自選股顯示代號＋名稱。**未解/續作**：新聞窗 5 日為避 500 列截斷的權衡，
+  極端爆量日（單股 >100 則/日 × 5 日 >500）仍可能截到，屬 FinMind Free 限制；殖利率欄（現金股利÷股價）
+  暫未做（需股價來源）。
 - **個股追蹤籌碼面端點 `/chips`**（2026-07-20 完工部署；供「新聞晨報」站個股追蹤第二批）：
   - **Worker**（`worker/src/index.js`，`fundamentalsBatch` 後、`FUND_RE` 後）：additive 新端點
     `/chips?id=2330`（單股回物件）或 `?ids=a,b,c`（批次回 `{stocks,date}`，上限 30 檔）。回傳每股
