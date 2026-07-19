@@ -1549,7 +1549,11 @@ function ovDashboard(){
     const label=ratio==null?'<span class="mut">—</span>':ratio>=1.15?'<span class="up">放量</span>':ratio<=0.87?'<span class="down">縮量</span>':'<span class="mut">持平</span>';
     rateHtml=`<div class="sub">近10分 ${r10.toFixed(2)}億/分 · 近30分 ${r30.toFixed(2)}億/分 ${label}</div>`;
   }else rateHtml=`<div class="sub mut">短窗資金：盤中生效</div>`;
-  const amtCard=`<div class="ovcard"><div class="h">${rp?"當時":"今日"}累計成交值</div><div class="v">${yi(totalAmt)}</div>${rateHtml}</div>`;
+  // 加權/櫃買分開呈現（2026-07-19 使用者指示）；回放時 split 來自 frame 分類加總（近似），合計優先 series 實際值
+  const tseAmt=rp?rp.mkt.tseYi:(t.amt_yi||0), otcAmt=rp?rp.mkt.otcYi:(o.amt_yi||0);
+  const amtCard=`<div class="ovcard"><div class="h">${rp?"當時":"今日"}累計成交值</div>`+
+    `<div class="v" style="font-size:15px">加權 ${yi(tseAmt)}／櫃買 ${yi(otcAmt)}</div>`+
+    `<div class="sub mut">合計 ${yi(totalAmt)}</div>${rateHtml}</div>`;
   const up=rp?rp.mkt.up:(m.tse&&m.tse.up||0)+(m.otc&&m.otc.up||0);
   const down=rp?rp.mkt.down:(m.tse&&m.tse.down||0)+(m.otc&&m.otc.down||0);
   const flat=rp?rp.mkt.flat:(m.tse&&m.tse.flat||0)+(m.otc&&m.otc.flat||0);
