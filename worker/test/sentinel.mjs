@@ -1,7 +1,7 @@
 // FinMind 哨兵離線單元測試（無需 token、不打網路）
 // 執行：cd worker && node test/sentinel.mjs
 import { taipeiParts, scheduledRole, sentinelKey, signalLanded, ghDispatchRequest,
-  FRAME_CRON, dispatchNews }
+  FRAME_CRON, dispatchNews, dispatchMorning }
   from "../src/index.js";
 
 let pass = 0, fail = 0;
@@ -137,11 +137,72 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
   // 無 token → 安靜跳過、不打網路
   const skipped = await dispatchNews({}, mock204);
   chk("dispatchNews 無 token → 跳過不打網路", skipped === false && calls.length === 1);
-  // 非 204 → 丟錯（scheduled handler 端只 log，備援 cron 兜底）
+  // 兩次都非 204 → 重試 1 次後仍丟錯（scheduled handler 端只 log，備援 cron 兜底）
+  // 用 noSleep 略過重試間隔實際等待，測試不需真的卡 3 秒
+  const noSleep = async () => {};
   let threw = false;
-  try { await dispatchNews({ GH_DISPATCH_TOKEN: "T" }, async () => ({ status: 401 })); }
+  try {
+    await dispatchNews({ GH_DISPATCH_TOKEN: "T" }, async () => ({ status: 401 }), noSleep);
+  } catch { threw = true; }
+  chk("dispatchNews 兩次都401 → 重試後仍丟錯", threw);
+}
+
+// ---- dispatchNews：失敗重試 1 次 ----
+{
+  const noSleep = async () => {};
+  // 第1次失敗、第2次成功 → 應送出（呼叫2次 fetch）且不 throw、回傳 true
+  {
+    const calls = [];
+    let n = 0;
+    const flaky = async (url, init) => {
+      n++; calls.push({ url, init });
+      if (n === 1) return { status: 500 };
+      return { status: 204 };
+    };
+    const ok = await dispatchNews({ GH_DISPATCH_TOKEN: "TOK" }, flaky, noSleep);
+    chk("dispatchNews 重試：第1次失敗第2次成功 → 不丟錯", ok === true);
+    chk("dispatchNews 重試：實際打了2次 fetch", n === 2, String(n));
+  }
+  // 兩次都失敗 → 仍 throw，且確實重試過（打了2次）
+  {
+    let n = 0;
+    const alwaysFail = async () => { n++; return { status: 500 }; };
+    let threw = false;
+    try { await dispatchNews({ GH_DISPATCH_TOKEN: "TOK" }, alwaysFail, noSleep); }
+    catch { threw = true; }
+    chk("dispatchNews 重試：兩次都失敗 → 仍丟錯", threw);
+    chk("dispatchNews 重試：兩次都失敗仍只重試1次（共打2次）", n === 2, String(n));
+  }
+  // sleepFn 真的被呼叫過一次（驗證重試間確實有等待這個步驟，不是跳過）
+  {
+    let sleptMs = null;
+    const sleepSpy = async (ms) => { sleptMs = ms; };
+    let n = 0;
+    const failThenOk = async () => { n++; return n === 1 ? { status: 500 } : { status: 204 }; };
+    await dispatchNews({ GH_DISPATCH_TOKEN: "TOK" }, failThenOk, sleepSpy);
+    chk("dispatchNews 重試：有呼叫 sleepFn 等待", sleptMs === 3000, String(sleptMs));
+  }
+}
+
+// ---- dispatchMorning：同樣結構的失敗重試 1 次 ----
+{
+  const noSleep = async () => {};
+  let n = 0;
+  const flaky = async () => { n++; return n === 1 ? { status: 500 } : { status: 204 }; };
+  const ok = await dispatchMorning({ GH_DISPATCH_TOKEN: "TOK" }, flaky, noSleep);
+  chk("dispatchMorning 重試：第1次失敗第2次成功 → 不丟錯", ok === true);
+  chk("dispatchMorning 重試：實際打了2次 fetch", n === 2, String(n));
+
+  let n2 = 0;
+  const alwaysFail = async () => { n2++; return { status: 500 }; };
+  let threw = false;
+  try { await dispatchMorning({ GH_DISPATCH_TOKEN: "TOK" }, alwaysFail, noSleep); }
   catch { threw = true; }
-  chk("dispatchNews 401 → 丟錯", threw);
+  chk("dispatchMorning 重試：兩次都失敗 → 仍丟錯", threw);
+  chk("dispatchMorning 重試：兩次都失敗仍只重試1次（共打2次）", n2 === 2, String(n2));
+
+  const skipped = await dispatchMorning({}, flaky, noSleep);
+  chk("dispatchMorning 無 token → 跳過不打網路", skipped === false);
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

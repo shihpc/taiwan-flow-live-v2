@@ -625,6 +625,19 @@ async function ghDispatch(env, repo, wf, fetchFn = fetch) {
   const r = await fetchFn(url, init);
   if (r.status !== 204) throw new Error(`dispatch ${repo}/${wf} HTTP ${r.status}`);
 }
+// 共用：dispatch 失敗重試 1 次（間隔 3 秒，沿用 storeFrame 同款 sleep()），
+// 兩次都失敗才把錯誤丟給呼叫端（呼叫端既有 .catch(log) 兜底，日後再靠下一輪
+// 定點班/備援 cron 自然重試）。sleepFn 供測試注入（略過實際等待）。
+const DISPATCH_RETRY_MS = 3000;
+async function ghDispatchWithRetry(env, repo, wf, fetchFn = fetch, sleepFn = sleep) {
+  try {
+    await ghDispatch(env, repo, wf, fetchFn);
+  } catch (e) {
+    console.log(`dispatch ${repo}/${wf} 第1次失敗（${e && e.message}），${DISPATCH_RETRY_MS / 1000}秒後重試一次`);
+    await sleepFn(DISPATCH_RETRY_MS);
+    await ghDispatch(env, repo, wf, fetchFn);   // 仍失敗就往外丟
+  }
+}
 async function probeSignal(env, sig, date) {
   // 最便宜探測：data_id=2330、start=end=今日。不掛 cf 快取——要看的是「剛剛落地了沒」
   const u = `${FIN_BASE}?dataset=${sig.dataset}&data_id=2330&start_date=${date}&end_date=${date}&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
@@ -659,13 +672,14 @@ async function runSentinel(env, tp) {
 
 // ---- 新聞定點班（每天台北 06:07–22:07 每小時 :07 → dispatch taiwan-stock-news）----
 // 與哨兵不同：新聞週末也收（抓的是日曆日新聞，不分交易日），且採定點制——
-// 每個時點只有新聞 cron 一次醒來，不需 KV 去重。dispatch 失敗只 log 不重試：
-// 下一小時自然再觸發，且 news repo 保留 22:37 台北 GitHub cron 當備援兜底。
+// 每個時點只有新聞 cron 一次醒來，不需 KV 去重。dispatch 失敗會重試 1 次（見
+// ghDispatchWithRetry）；仍失敗才 log，下一小時自然再觸發，且 news repo 保留
+// 22:37 台北 GitHub cron 當備援兜底。
 const NEWS_REPO = "taiwan-stock-news";
 const NEWS_WF = "build-news.yml";
-export async function dispatchNews(env, fetchFn = fetch) {
+export async function dispatchNews(env, fetchFn = fetch, sleepFn = sleep) {
   if (!env.GH_DISPATCH_TOKEN) return false;   // secret 未設 → 安靜跳過（同哨兵）
-  await ghDispatch(env, NEWS_REPO, NEWS_WF, fetchFn);
+  await ghDispatchWithRetry(env, NEWS_REPO, NEWS_WF, fetchFn, sleepFn);
   console.log(`news: dispatched ${NEWS_REPO}/${NEWS_WF}`);
   return true;
 }
@@ -673,9 +687,9 @@ export async function dispatchNews(env, fetchFn = fetch) {
 // GitHub cron 06:00（延遲後 ~07:00 跑）保留當備援，晨報建置冪等、多跑無害。
 const MORNING_REPO = "taiwan-flow-live-v2";
 const MORNING_WF = "morning.yml";
-export async function dispatchMorning(env, fetchFn = fetch) {
+export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
   if (!env.GH_DISPATCH_TOKEN) return false;
-  await ghDispatch(env, MORNING_REPO, MORNING_WF, fetchFn);
+  await ghDispatchWithRetry(env, MORNING_REPO, MORNING_WF, fetchFn, sleepFn);
   console.log(`morning: dispatched ${MORNING_REPO}/${MORNING_WF}`);
   return true;
 }
