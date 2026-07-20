@@ -72,7 +72,7 @@ def list_active_etfs() -> list[tuple[str, str]]:
 
 def grab_holding(code: str) -> dict:
     """FinMind TaiwanStockActiveETFHolding：取最近有資料日的逐持股。
-    回 {stocks:{code:[股數,名稱,權重%]}, src_date, units:None, aum(市值加總,元)}。"""
+    回 {stocks:{code:[股數,名稱,權重%,市值元]}, src_date, units:None, aum(市值加總,元)}。"""
     start = (date.today() - timedelta(days=14)).isoformat()
     rows = fin.api_get("TaiwanStockActiveETFHolding", data_id=code, start_date=start)
     if not rows:
@@ -90,8 +90,8 @@ def grab_holding(code: str) -> dict:
         sh = fnum(r.get("shares"))
         if sh is None or sh == 0:
             continue
-        stocks[c] = [round(sh), r.get("component_stock_name") or "", fnum(r.get("weight"))]
         mv = fnum(r.get("market_value"))
+        stocks[c] = [round(sh), r.get("component_stock_name") or "", fnum(r.get("weight")), mv]
         if mv:
             aum += mv
     if not stocks:

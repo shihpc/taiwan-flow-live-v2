@@ -4,6 +4,12 @@
 
 ## 快速接手
 
+- **build_aetf.py 逐股加市值（2026-07-21，`grab_holding()`）**：`stocks[c]` 由 `[股數,名稱,權重%]`
+  改 `[股數,名稱,權重%, mv]`（mv=`fnum(r.get("market_value"))`，同列 FinMind 回應本就有、原只拿去加總 aum
+  現多存一個數字，零額外抓取）。缺 market_value 的 ETF（如 00400A，FinMind 回 0/None）mv 存 None，
+  前端顯「—」不炸。postmkt renderAETF 持股表新增「市值(億)」欄消費 `stocks[code][3]/1e8`，資料源＝
+  本 repo raw `data/aetf/latest.json`（postmkt V2_BASE），故 postmkt 該欄要等本 repo 排程重跑 build_aetf
+  push 新 latest.json 後才有值。**驗證**：本機跑 build_aetf.py，00991A 2330 mv=97.44億、逐股 mv 加總≈aum。
 - **即時一覽前端四項改進（2026-07-21，純前端 index.html）**：①今日總結（`ovSummaryCard`）貢獻/拖累前5
   每檔改「代號 名稱 漲跌%（紅漲綠跌）貢獻點」，`fmtStk`／`fmtP`（copy 文字同步）；漲跌%＝`sval(code).chg`。
   ②treemap 格內改兩行：`.ovtname`（名稱）＋`.ovtmeta`（佔比% 漲跌%）；`.ovtcell{min-height:32px}`、
