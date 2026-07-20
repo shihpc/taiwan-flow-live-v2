@@ -1201,7 +1201,9 @@ function ovMarketPhase(){
   try{staleSec=(Date.now()-Date.parse(state.live.generated_at))/1000;}catch(e){}
   const afterClose = min>=13*60+35 || (min>=13*60+30 && staleSec!=null && staleSec>180);
   if(afterClose)return {badge:"收盤定格 13:30", closed:true};
-  if(min<9*60)return {badge:"盤前", closed:false};
+  // 凌晨盤前（00:00–09:00）：市場尚未開盤，/live 仍握上一交易日收盤資料 → 視同收盤定格，
+  // 徽章帶上該收盤資料日期（state.live.ts 的 MM-DD），避免誤以為是「盤前無資料」而隱藏今日總結
+  if(min<9*60)return {badge:`${(state.live.ts||"").slice(5,10)} 收盤定格`, closed:true};
   return null;
 }
 // series 太短時 sparkline 顯示的替代文字：收盤後（今日已無盤可等）用「明日」；盤前/盤中用「盤中累積後」
