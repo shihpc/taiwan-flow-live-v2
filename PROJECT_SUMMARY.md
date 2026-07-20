@@ -4,6 +4,16 @@
 
 ## 快速接手
 
+- **即時一覽前端四項改進（2026-07-21，純前端 index.html）**：①今日總結（`ovSummaryCard`）貢獻/拖累前5
+  每檔改「代號 名稱 漲跌%（紅漲綠跌）貢獻點」，`fmtStk`／`fmtP`（copy 文字同步）；漲跌%＝`sval(code).chg`。
+  ②treemap 格內改兩行：`.ovtname`（名稱）＋`.ovtmeta`（佔比% 漲跌%）；`.ovtcell{min-height:32px}`、
+  `OV_TREE_MIN_PX=16→32`（autosplit 盡量容兩行，不足者 min-height 墊高，極小格可小幅超出精確面積、大格面積仍＝佔比）。
+  ③象限圖（`ovQuadrantHtml`）加大（H 420→456、字 10/11→12.5/13、泡半徑 k 34→40）＋pinch/pan 縮放：
+  `.ovquadzoom#ovQuadZoom{touch-action:none}`＋`ovQuadZoomInit()`（pointer/wheel/dblclick，狀態 `OV_QUAD_TF` 跨重繪保留，
+  renderOverview 末呼叫）；平移逾閾值以 stopPropagation 取消該次 click，泡泡下鑽不受影響。
+  ④盤中異動雷達移除「提醒設定」整套（`ovAlert*`／`OV_ALERT_*`／`data-ovalert-*` handler／pull 內 `ovAlertCheck` 呼叫／
+  state `alertOpen` 全刪；`ovToast` 保留給 copy）；三表加 `@media(max-width:560px){.ovradar{flex-direction:column}}` 手機全幅。
+  **驗證**：本機 http.server + 瀏覽器 JS 實測四項＋7 tab 零 error（mobile/desktop）；**與 Worker LINE alert 無關**（純前端頁內提醒，移除不影響 Worker）。
 - **Worker 排程備援（2026-07-20，升 Cloudflare Paid 後）**：治「GitHub Actions schedule 延遲/漏發」
   （07-20 aetf 延遲 2h 為觸發實例）。對 6 條純靠 GH cron 的每日班，Worker 於「排定＋緩衝」的準點
   fetch 該班線上產物 raw JSON、檢查日期欄是否今日，非今日就 workflow_dispatch 補發。
