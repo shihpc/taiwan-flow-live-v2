@@ -1,21 +1,21 @@
 # src/build_aetf.py — 主動式ETF 每日投組快照 → data/aetf/YYYY-MM-DD.json + latest.json
 #
-# 追蹤 8 檔（6 家投信，端點驗證見 memory aetf-tab-plan 與 docs/aetf-expansion-research.md）：
-#   統一 00981A(49YTW)/00403A(63YTW)：ezmoney 頁面內嵌 JSON（需 cookie session；無單位數→P3 用權重差法）
-#   群益 00982A/00992A：POST /CFWeb/api/etf/buyback {"fundId":"399"/"500","date":null}（全量+nav+totUnit）
-#   野村 00980A：正式 POST API（GetFundTradeInfoDate → GetFundTradeInfo）
-#   復華 00991A：GET /api/assets?fundID=ETF23&qDate=...
-#   富邦 00405A：伺服器端渲染HTML表格（無units/aum）
-#   國泰 00400A：正式 API 但僅回權重無股數，diff.py 用權重×AUM÷收盤價反推股數
-# 另抓 TWSE ETFortune 資產規模（集保，全 ETF 統一口徑的 AUM）。
+# 資料源：FinMind（2026-07-20 遷移，取代原 6 套逐家投信 PCF 逆向工程）
+#   TaiwanStockActiveETFInfo   — 主動ETF清單（category/type），動態取「持台股的主動股票型」
+#   TaiwanStockActiveETFHolding— 每日逐持股（component_stock_id/name/shares/weight/market_value）
+#   （申贖含總變動 TaiwanStockActiveETFHoldingChange 由 build_aetf_diff.py 另抓，見該檔）
 #
-# 快照格式（每檔）：{date, aum, units, stocks:{code:[股數, 名稱]}, src_date}
-#   units=流通/發行單位數（主動加減碼公式的分母；統一/群益暫缺 → null，P3 以 TWSE AUM 與淨值近似）
+# 納入條件：Info 中 category=='domestic' 且 type=='twse' 且代號 A 結尾（主動台股股票型，
+#   排除 foreign 美股型／D 結尾債券型／bfIncome 平衡入息型——它們不持台股、不適用主動加減碼）。
+#   原追蹤 8 檔（00400A/00403A/00405A/00980A/00981A/00982A/00991A/00992A）全數涵蓋於此規則內。
 #
-# 用法：python src/build_aetf.py   （無需 FinMind token）
+# 快照格式（每檔）：{date, aum, units, stocks:{code:[股數, 名稱, 權重%]}, src_date, name, twse_aum_yi}
+#   units=null（FinMind 無總單位數；主動加減碼改用「逐持股股數比中位數」估申贖比，見 diff.py）
+#   aum=當日成分股 market_value 加總（元，僅供估算，前端規模欄仍用 twse_aum_yi 集保口徑）
+#
+# 起始日 2025-05-05（FinMind ActiveETFHolding 最早）。用法：python src/build_aetf.py（需 FINMIND_TOKEN）
 
 from __future__ import annotations
-import html as html_
 import json
 import re
 import sys
@@ -25,10 +25,19 @@ from pathlib import Path
 
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fin
+
 ROOT = Path(__file__).resolve().parent.parent
 OUTDIR = ROOT / "data" / "aetf"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36"}
 TPE = timezone(timedelta(hours=8))
+STOCK_RE = re.compile(r"^\d{4,6}$")   # 台股普通股/ETF 代號（排除現金/期貨/外幣部位）
+
+# 若 Info 抓取失敗時的備援清單（原 8 檔＋已知擴充；平時走動態）
+FALLBACK_ETFS = ["00400A", "00401A", "00403A", "00404A", "00405A", "00406A", "00407A",
+                 "00408A", "00980A", "00981A", "00982A", "00984A", "00985A", "00987A",
+                 "00991A", "00992A", "00993A", "00994A", "00995A", "00996A", "00999A"]
 
 
 def fnum(v):
@@ -38,174 +47,60 @@ def fnum(v):
         return None
 
 
-# ---------- 統一（ezmoney，頁面內嵌 JSON） ----------
-def grab_uni(code: str, fund_code: str) -> dict:
-    s = requests.Session()
-    s.headers.update(UA)
-    r = s.get(f"https://www.ezmoney.com.tw/ETF/Fund/Info?FundCode={fund_code}", timeout=60)
-    r.raise_for_status()
-    h = html_.unescape(r.text)
-    objs = re.findall(r'\{[^{}]*"DetailCode"[^{}]*\}', h)
-    stocks, src_date = {}, None
-    for o in objs:
-        try:
-            d = json.loads(o)
-        except json.JSONDecodeError:
-            continue
-        if d.get("AssetCode") != "ST" or d.get("FundCode") != fund_code:
-            continue
-        src_date = src_date or str(d.get("TranDate", ""))[:10]
-        c = str(d.get("DetailCode") or "")
-        sh = fnum(d.get("Share"))
-        if c and sh:
-            stocks[c] = [round(sh), d.get("DetailName") or "", fnum(d.get("NavRate"))]
-    if not stocks:
-        raise RuntimeError("內嵌 JSON 無 ST 持股（頁面改版?）")
-    return {"stocks": stocks, "src_date": src_date, "units": None, "aum": None}
-
-
-# ---------- 群益（正式 API：POST /CFWeb/api/etf/buyback） ----------
-def grab_capital(fund_id: str) -> dict:
-    s = requests.Session()
-    s.headers.update(UA)
-    r = s.post("https://www.capitalfund.com.tw/CFWeb/api/etf/buyback",
-               json={"fundId": fund_id, "date": None}, timeout=60)
-    r.raise_for_status()
-    data = r.json().get("data") or {}
-    pcf = data.get("pcf") or {}
-    stocks = {}
-    for row in data.get("stocks") or []:
-        c = str(row.get("stocNo") or "")
-        sh = fnum(row.get("share"))
-        if c and sh:
-            stocks[c] = [round(sh), row.get("stocName") or "", fnum(row.get("weight"))]
-    if not stocks:
-        raise RuntimeError("buyback stocks 為空")
-    return {"stocks": stocks, "src_date": str(pcf.get("date1") or "").replace("-", "/")[:10],
-            "units": fnum(pcf.get("totUnit")), "aum": fnum(pcf.get("nav"))}
-
-
-# ---------- 野村（正式 API） ----------
-def grab_nomura(code: str) -> dict:
-    s = requests.Session()
-    s.headers.update(UA)
-    # 野村憑證鏈缺 SKI 導致部分環境 verify 失敗（curl 可過）→ 先試正常驗證，失敗退 verify=False
+def list_active_etfs() -> list[tuple[str, str]]:
+    """回 [(code, name)]：FinMind Info 中 domestic 主動台股股票型（type=twse、A 結尾）。
+    失敗時退回 FALLBACK_ETFS（名稱留空，後續由 Holding 補）。"""
     try:
-        s.get("https://www.nomurafunds.com.tw/ETFWEB/", timeout=30)
-    except requests.exceptions.SSLError:
-        s.verify = False
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    base = "https://www.nomurafunds.com.tw/API/ETFAPI/api/Fund/"
-    body = {"FundNo": code, "Type": 2}
-    d1 = s.post(base + "GetFundTradeInfoDate", json=body, timeout=60).json()
-    latest = (d1.get("Entries") or {}).get("LatestDate")
-    if not latest:
-        raise RuntimeError("GetFundTradeInfoDate 無 LatestDate")
-    body["Date"] = latest
-    d2 = s.post(base + "GetFundTradeInfo", json=body, timeout=60).json()
-    e = d2.get("Entries") or {}
-    stocks = {}
-    for r in e.get("Stocks") or []:
-        c = str(r.get("CStockCode") or "")
-        q = fnum(r.get("CQuantity"))
-        if c and q:
-            stocks[c] = [round(q), r.get("CStockName") or "", fnum(r.get("CWeightsPct"))]
-    if not stocks:
-        raise RuntimeError("GetFundTradeInfo Stocks 為空")
-    return {"stocks": stocks, "src_date": str(e.get("CPcfdate", ""))[:10].replace("-", "/"),
-            "units": fnum(e.get("CAnceTotalIssues")), "aum": fnum(e.get("CAnceTotalAv")),
-            "futures": [{"c": r.get("CFuturesCode"), "q": r.get("CQuantity"), "w": r.get("CWeightsPct")}
-                        for r in (e.get("Futures") or [])]}
+        rows = fin.api_get("TaiwanStockActiveETFInfo", start_date=date.today().isoformat())
+        if not rows:   # 當日可能無列，往回抓一週
+            rows = fin.api_get("TaiwanStockActiveETFInfo",
+                               start_date=(date.today() - timedelta(days=7)).isoformat())
+        latest = {}
+        for r in rows:
+            latest[str(r.get("stock_id"))] = r   # 同代號後者覆蓋（取最新一列）
+        out = []
+        for code, r in sorted(latest.items()):
+            if (r.get("category") == "domestic" and r.get("type") == "twse"
+                    and code.endswith("A")):
+                out.append((code, str(r.get("stock_name") or "")))
+        if out:
+            return out
+    except Exception as e:
+        print(f"list_active_etfs 失敗（{e}）→ 用備援清單", flush=True)
+    return [(c, "") for c in FALLBACK_ETFS]
 
 
-# ---------- 復華（/api/assets） ----------
-def grab_fh(fund_id: str) -> dict:
-    s = requests.Session()
-    s.headers.update(UA)
-    res = None
-    for back in range(0, 8):   # 週末/假日往回找最近有資料的一天
-        q = (date.today() - timedelta(days=back)).strftime("%Y/%m/%d")
-        r = s.get(f"https://www.fhtrust.com.tw/api/assets?fundID={fund_id}&qDate={q}", timeout=60)
-        r.raise_for_status()
-        cand = (r.json().get("result") or [None])[0]
-        if cand and any(x.get("ftype") == "股票" for x in (cand.get("detail") or [])):
-            res = cand
-            break
-    if not res:
-        raise RuntimeError("近 8 日皆無持股資料")
-    stocks = {}
-    for row in res.get("detail") or []:
-        if row.get("ftype") != "股票":
+def grab_holding(code: str) -> dict:
+    """FinMind TaiwanStockActiveETFHolding：取最近有資料日的逐持股。
+    回 {stocks:{code:[股數,名稱,權重%]}, src_date, units:None, aum(市值加總,元)}。"""
+    start = (date.today() - timedelta(days=14)).isoformat()
+    rows = fin.api_get("TaiwanStockActiveETFHolding", data_id=code, start_date=start)
+    if not rows:
+        raise RuntimeError("Holding 近 14 日無資料")
+    latest = max(str(r["date"]) for r in rows if r.get("date"))
+    stocks, aum = {}, 0.0
+    for r in rows:
+        if str(r.get("date")) != latest:
             continue
-        c = str(row.get("stockid") or "")
-        sh = fnum(row.get("qshare"))
-        if c and sh:
-            mv, nv = fnum(row.get("mvalue")), fnum(res.get("pcf_FundNav"))
-            w = round(mv / nv * 10000) / 100 if (mv and nv) else None
-            stocks[c] = [round(sh), row.get("stockname") or "", w]
+        if str(r.get("asset_type") or "") not in ("stock", ""):
+            continue
+        c = str(r.get("component_stock_id") or "").strip()
+        if not STOCK_RE.match(c):
+            continue
+        sh = fnum(r.get("shares"))
+        if sh is None or sh == 0:
+            continue
+        stocks[c] = [round(sh), r.get("component_stock_name") or "", fnum(r.get("weight"))]
+        mv = fnum(r.get("market_value"))
+        if mv:
+            aum += mv
     if not stocks:
-        raise RuntimeError("detail 無股票")
-    return {"stocks": stocks, "src_date": res.get("dDate"),
-            "units": fnum(res.get("pcf_FundQissue")), "aum": fnum(res.get("pcf_FundNav")),
-            "diff_raw": res.get("diff")}
+        raise RuntimeError(f"{latest} 無台股持股（asset_type/代號過濾後為空）")
+    return {"stocks": stocks, "src_date": latest, "units": None,
+            "aum": round(aum) if aum else None}
 
 
-# ---------- 富邦（伺服器端渲染 HTML 表格） ----------
-def grab_fubon(code: str) -> dict:
-    url = f"https://websys.fsit.com.tw/FubonETF/Fund/Assets.aspx?stkId={code}"
-    try:
-        r = requests.get(url, headers=UA, timeout=60)
-    except requests.exceptions.SSLError:
-        # 憑證鏈缺 Subject Key Identifier（同野村的環境相依問題，curl 可過、requests 預設驗證會擋）
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        r = requests.get(url, headers=UA, timeout=60, verify=False)
-    r.raise_for_status()
-    h = r.text
-    m = re.search(r"資料日期[：:]\s*(\d{4}/\d{1,2}/\d{1,2})", h)
-    src_date = m.group(1) if m else None
-    pattern = re.compile(
-        r'<tr>\s*<td class="tac">(\d{4,6})</td>\s*<td>([^<]*)</td>\s*'
-        r'<td class="tac">([\d,]+)</td>\s*<td class="tac">[\d,]+</td>\s*'
-        r'<td class="tac">([\d.]+)</td>\s*</tr>')
-    stocks = {}
-    for c, name, sh, w in pattern.findall(h):
-        sh = fnum(sh)
-        if c and sh:
-            stocks[c] = [round(sh), name.strip(), fnum(w)]
-    if not stocks:
-        raise RuntimeError("持股表格無匹配列（頁面改版?）")
-    return {"stocks": stocks, "src_date": src_date, "units": None, "aum": None}
-
-
-# ---------- 國泰（正式 API，僅回權重無股數） ----------
-def grab_cathay(fund_code: str) -> dict:
-    """GetIndexStockWeights 只回代號/名稱/權重(%)，無股數/units。
-    股數由 build_aetf_diff.py 用 權重%×TWSE集保AUM÷收盤價 反推（見該檔 NO_SHARES_ETFS）。
-    需帶 Referer，否則被 Akamai WAF 擋（bare curl 會 403 Access Denied）。"""
-    headers = dict(UA)
-    headers["Referer"] = "https://www.cathaysite.com.tw/"
-    r = requests.get("https://cwapi.cathaysite.com.tw/api/ETF/GetIndexStockWeights",
-                      params={"fundCode": fund_code}, headers=headers, timeout=60)
-    r.raise_for_status()
-    j = r.json()
-    if not j.get("success"):
-        raise RuntimeError(f"API success=false（returnCode={j.get('returnCode')}）")
-    res = j.get("result") or {}
-    stocks = {}
-    for row in res.get("stockWeights") or []:
-        c = str(row.get("stockCode") or "").strip()
-        w = fnum(row.get("weights"))
-        name = re.sub(r"\s+", "", row.get("stockName") or "")
-        if c and w:
-            stocks[c] = [None, name, w]
-    if not stocks:
-        raise RuntimeError("stockWeights 為空")
-    return {"stocks": stocks, "src_date": res.get("date"), "units": None, "aum": None}
-
-
-# ---------- TWSE ETFortune AUM（集保口徑，全 ETF 通用） ----------
+# ---------- TWSE ETFortune AUM（集保口徑，全 ETF 通用；前端規模欄顯示用） ----------
 def grab_twse_aum(code: str):
     try:
         r = requests.get(f"https://www.twse.com.tw/zh/ETFortune/etfInfo/{code}", headers=UA, timeout=60)
@@ -215,46 +110,33 @@ def grab_twse_aum(code: str):
         return None
 
 
-ETFS = [
-    ("00981A", "統一台股增長", lambda: grab_uni("00981A", "49YTW")),
-    ("00403A", "統一台股升級50", lambda: grab_uni("00403A", "63YTW")),
-    ("00982A", "群益台灣強棒", lambda: grab_capital("399")),
-    ("00980A", "野村臺灣優選", lambda: grab_nomura("00980A")),
-    ("00991A", "復華未來50", lambda: grab_fh("ETF23")),
-    ("00992A", "群益台灣科技創新", lambda: grab_capital("500")),
-    ("00405A", "富邦台灣龍耀", lambda: grab_fubon("00405A")),
-    ("00400A", "國泰台股動能高息", lambda: grab_cathay("EA")),
-]
-
-
 def main():
     OUTDIR.mkdir(parents=True, exist_ok=True)
+    etfs = list_active_etfs()
     out = {"run_date": date.today().isoformat(),
-           "generated_at": datetime.now(TPE).isoformat(), "etfs": {}, "errors": {}}
-    # 前一份快照（供某檔全數重試仍失敗時沿用上次持股，避免 diff 因該檔缺席而錯亂/單邊）
-    prev = {}
+           "generated_at": datetime.now(TPE).isoformat(),
+           "source": "finmind", "etfs": {}, "errors": {}}
+    # 前一份快照（供某檔重試仍失敗時沿用上次持股，避免 diff 因該檔缺席而錯亂）
     try:
         prev = (json.loads((OUTDIR / "latest.json").read_text(encoding="utf-8"))).get("etfs", {})
     except Exception:
         prev = {}
-    for code, name, fn in ETFS:
-        # PCF 端點偶發暫時性失敗（07-07 復華 RemoteDisconnected）→ 重試 3 次、退避 5/10 秒
+    for code, name in etfs:
         last = None
         for attempt in range(3):
             try:
-                d = fn()
-                d["name"] = name
+                d = grab_holding(code)
+                d["name"] = name or (prev.get(code) or {}).get("name") or code
                 d["twse_aum_yi"] = grab_twse_aum(code)
-                # A2 未更新偵測：抓取成功但 src_date 未較上一份快照前進 → 標 not_advanced
-                # （投信 16:30 常回前一日資料，成功但沒更新；下游/補抓班據此辨識）
+                # 未更新偵測：抓取成功但 src_date 未較上一份快照前進 → 標 not_advanced
                 pe = prev.get(code) or {}
                 ps = str(pe.get("src_date") or "").replace("-", "/")
                 cs = str(d.get("src_date") or "").replace("-", "/")
                 if ps and cs and cs <= ps:
                     d["not_advanced"] = True
                 out["etfs"][code] = d
-                print(f"{code} {name}: {len(d['stocks'])}檔 src={d.get('src_date')} "
-                      f"units={d.get('units')} aum={d.get('aum')} twse_aum={d.get('twse_aum_yi')}億"
+                print(f"{code} {d['name']}: {len(d['stocks'])}檔 src={d.get('src_date')} "
+                      f"aum={d.get('aum')} twse_aum={d.get('twse_aum_yi')}億"
                       f"{' [未更新]' if d.get('not_advanced') else ''}", flush=True)
                 last = None
                 break
@@ -262,19 +144,20 @@ def main():
                 last = e
                 print(f"{code} {name}: 第{attempt + 1}次失敗 {e}", flush=True)
                 if attempt < 2:
-                    time.sleep(5 * (attempt + 1))
+                    time.sleep(3 * (attempt + 1))
         if last is not None:
             out["errors"][code] = str(last)
-            if code in prev:  # 沿用上次快照，並標記 stale 供前端/診斷辨識
+            if code in prev:   # 沿用上次快照，並標記 stale 供前端/診斷辨識
                 carried = dict(prev[code]); carried["stale"] = True
                 out["etfs"][code] = carried
                 print(f"{code} {name}: 全數重試失敗，沿用上次快照（src={carried.get('src_date')}）", flush=True)
+        time.sleep(0.3)   # FinMind 請求間節流（擴充後檔數上升）
     if not out["etfs"]:
         raise RuntimeError("全部失敗，不寫檔")
     body = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
     (OUTDIR / f"{out['run_date']}.json").write_text(body, encoding="utf-8")
     (OUTDIR / "latest.json").write_text(body, encoding="utf-8")
-    print(f"寫入 data/aetf/{out['run_date']}.json（{len(out['etfs'])}/{len(ETFS)} 檔成功）")
+    print(f"寫入 data/aetf/{out['run_date']}.json（{len(out['etfs'])}/{len(etfs)} 檔成功）")
 
 
 if __name__ == "__main__":
