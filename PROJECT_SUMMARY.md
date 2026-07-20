@@ -4,6 +4,14 @@
 
 ## 快速接手
 
+- **Worker dispatch 失敗重試（2026-07-20，deploy version `750a81c9`）**：`dispatchNews`/
+  `dispatchMorning` 原本 `ghDispatch` 非 204 就丟錯，呼叫端只 `.catch(log)` 不重試——曾有一班
+  （07-20 08:07）無聲消失過一次。新增共用 `ghDispatchWithRetry()`：第一次失敗 log 後等 3 秒
+  重試一次，兩次都失敗才往外丟（呼叫端既有 catch(log) 兜底，日後靠下一小時定點班/22:37 GitHub
+  cron 備援自然重試）。additive、cron 維持 3 條、無新增 `.list(`、`/live` 舊回傳零改動。
+  `worker/test/sentinel.mjs` 補上「第1次失敗第2次成功」「兩次都失敗」案例（dispatchNews/
+  dispatchMorning 各一組，共 69 通過）。commit `bf8a9e3`。配套修正見
+  taiwan-stock-news `README.md`「快速接手」時區修正（`build_news.py` 改台北日判定今天）。
 - **個股追蹤技術面端點 `/technical`**（2026-07-20 完工部署 version 9567508f；供「新聞晨報」站個股追蹤第三批，三批＝基本/籌碼/技術至此完整）：
   - **Worker**（`worker/src/index.js`，`chipsBatch` 後、`FUND_RE`/美股同步前）：additive 新端點
     `/technical?id=2330`（單股回物件）或 `?ids=a,b,c`（批次回 `{stocks,date}`，上限 30 檔）。資料源
