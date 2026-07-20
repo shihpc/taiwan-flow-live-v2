@@ -21,9 +21,24 @@ compatibility_date = "2024-11-01"
 #    → workflow_dispatch 觸發本 repo morning.yml（GitHub cron 06:00 保留當備援，
 #    夜盤 05:00 收盤後留 ~1.5 小時給 FinMind 入庫；晨報建置冪等、多跑無害）。
 #    其他小時的 :47 喚醒一律 idle（見 scheduledRole）
+# 5) 排程備援（2026-07-20）：對純靠 GitHub schedule 的每日管線準點檢查產物新鮮度、未更新則
+#    workflow_dispatch 補發（治 GH 排程延遲/漏發，如 07-20 aetf 延遲 2h）。每班一條專屬 cron，
+#    event.cron 命中即進 runBackup（見 src/index.js BACKUP_CRONS / backupPipelineForCron）。
+#    即使與哨兵 cron 同分觸發（如 aetf 10:50 UTC），兩者各帶自己的 event.cron、互不干擾。
 [triggers]
-# ※ CF 免費方案每 Worker 上限 3 條 cron——新聞(:07)與晨報(:47)共用第三條，程式內分流
-crons = ["* 1-5 * * 1-5", "*/5 9-14 * * 1-5", "7,47 0-14,22-23 * * *"]
+# ※ Cron Triggers 為帳戶層級額度：Free 5 條／Paid 250 條（Cloudflare 官方文件）；本帳戶已升 Paid。
+#   新聞(:07)與晨報(:47)仍共用第三條、程式內分流（沿用既有設計，不因升 Paid 而拆分）。
+crons = [
+  "* 1-5 * * 1-5",           # 1) 盤中每分鐘 frame（09:00-13:59 台北，週一~五）
+  "*/5 9-14 * * 1-5",        # 2) FinMind 哨兵（17:00-22:55 台北每 5 分）
+  "7,47 0-14,22-23 * * *",   # 3) 新聞定點班(:07) / 晨報準點班(:47)，程式內分流
+  "25 6 * * 1-5",            # 4) daysummary 備援（台北 14:25；GH 14:05）
+  "50 10 * * 1-5",           # 5) aetf 備援（台北 18:50；GH 18:30）
+  "10 13 * * 1-5",           # 6) baseline 備援（台北 21:10；GH 20:41）
+  "35 14 * * 1-5",           # 7) diag 備援 postmkt（台北 22:35；GH 22:10）
+  "45 14 * * 1-5",           # 8) mktbal 備援 postmkt（台北 22:45；GH 22:20）
+  "30 21 * * 0-4",           # 9) us 備援（台北平日 05:30；GH 05:00，UTC dow 0-4）
+]
 
 [[kv_namespaces]]
 binding = "FLOW_KV"

@@ -694,6 +694,100 @@ export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
   return true;
 }
 
+// ---- 排程備援（2026-07-20）：純靠 GitHub schedule 的每日管線，準點檢查產物新鮮度 → 未更新則補發 ----
+// 動機：GitHub Actions schedule 常延遲甚至漏發（2026-07-20 aetf 延遲 2 小時實例）。Worker 在各班
+//   「排定＋緩衝」的準點檢查該班線上產物的日期欄是否為今日；非今日 → workflow_dispatch 補發。
+//   只解「GH 排程延遲/漏發」——上游 FinMind 資料公布時點與異常仍是天花板，備援不會讓資料比來源更早，
+//   只保證「一旦來源有了，最多晚幾分鐘就被抓」。
+// 機制：①產物新鮮度（fetch 線上 raw JSON 檢查日期欄，不需 GH token 權限、直接量到資料有沒有更新）
+//   ②冪等（KV bkfired:<date>:<name>，同班每日至多補發一次，GH 原班已跑則跳過不發）
+//   ③交易日守門（TW 班用「當日 frame series 是否存在」＝當日盤中有無資料；假日/週末無 series → 不補發。
+//     us 為美股班，僅靠 cron dow 守門，比照其原排程日）④GH_DISPATCH_TOKEN 未設 → 整段靜默（同哨兵/news）。
+// cron：每班一條專屬 cron（見 wrangler.toml；Paid 帳戶 cron 上限 250，additive 新增）。event.cron 命中
+//   備援 cron → backupPipelineForCron 取對應設定；即使與哨兵 cron 同分觸發，兩者各帶自己的 event.cron、
+//   互不干擾（既有 frame/哨兵/news/morning 路由零改動）。
+// 跨 repo：mktbal/diag 在 postmkt repo——既有 GH_DISPATCH_TOKEN 已含 postmkt actions:write（見 wrangler.toml
+//   secret 註解與哨兵 postmkt dispatch），故跨 repo 補發沿用同一 token，無需額外授權。
+const POSTMKT_BASE = "https://raw.githubusercontent.com/shihpc/postmkt/main";
+// 六條每日高價值班設定：
+//   mode "date"     → 產物 field（前 10 碼）=== 今日台北交易日；
+//   mode "genToday" → generated_at 的台北日 === 今日（us 產物 date 欄是美股交易日、天生落後一日，
+//                     改判「今天有沒有跑過」）。
+//   tw true  → 交易日守門用當日 frame series（假日無 → 不補發）；us 為 false（美股班，cron dow 已守門）。
+export function backupPipelines(env) {
+  const V2 = env.DATA_BASE;
+  return [
+    { name: "daysummary", repo: "taiwan-flow-live-v2", wf: "daysummary.yml", url: `${V2}/daysummary/latest.json`, field: "date",       mode: "date",     tw: true  },
+    { name: "aetf",       repo: "taiwan-flow-live-v2", wf: "aetf.yml",       url: `${V2}/aetf/latest.json`,       field: "run_date",   mode: "date",     tw: true  },
+    { name: "baseline",   repo: "taiwan-flow-live-v2", wf: "baseline.yml",   url: `${V2}/baseline.json`,          field: "date",       mode: "date",     tw: true  },
+    { name: "us",         repo: "taiwan-flow-live-v2", wf: "us.yml",         url: `${V2}/us.json`,                field: "generated_at", mode: "genToday", tw: false },
+    { name: "diag",       repo: "postmkt",             wf: "diag.yml",       url: `${POSTMKT_BASE}/data/diag/diag.json`,                 field: "date",       mode: "date", tw: true },
+    { name: "mktbal",     repo: "postmkt",             wf: "mktbal.yml",     url: `${POSTMKT_BASE}/data/market_balance_history.json`,    field: "latest_date", mode: "date", tw: true },
+  ];
+}
+// event.cron → pipeline 名（cron 字串需與 wrangler.toml crons[] 完全一致）
+export const BACKUP_CRONS = {
+  "25 6 * * 1-5":  "daysummary",   // 台北 14:25（daysummary GH 14:05）
+  "50 10 * * 1-5": "aetf",         // 台北 18:50（aetf GH 18:30）
+  "10 13 * * 1-5": "baseline",     // 台北 21:10（baseline GH 20:41）
+  "35 14 * * 1-5": "diag",         // 台北 22:35（diag GH 22:10，postmkt）
+  "45 14 * * 1-5": "mktbal",       // 台北 22:45（mktbal GH 22:20，postmkt）
+  "30 21 * * 0-4": "us",           // 台北平日 05:30（us GH 05:00；UTC dow 0-4 = 台北一~五晨）
+};
+export function backupPipelineForCron(cron, env) {
+  const name = BACKUP_CRONS[cron];
+  if (!name) return null;
+  return backupPipelines(env).find((p) => p.name === name) || null;
+}
+export const BKFIRED_TTL = 172800;   // 2 天（同 sentinel/frame）
+export const bkfiredKey = (dateISO, name) => `bkfired:${dateISO.replaceAll("-", "")}:${name}`;
+// 產物新鮮度判定（純函式，可離線測）：fresh=true 代表今日已跑、不需補發
+export function productFresh(obj, pipe, today) {
+  if (!obj) return false;
+  if (pipe.mode === "genToday") {
+    const g = obj[pipe.field];
+    if (!g) return false;
+    const t = new Date(g);
+    if (isNaN(t.getTime())) return false;
+    return taipeiParts(t).date === today;   // generated_at 帶 +08:00，正規化後取台北日
+  }
+  return String(obj[pipe.field] || "").slice(0, 10) === today;
+}
+// 產物抓取：cache-buster（?_=）繞開 GitHub raw CDN ~5 分快取，要看的是「當下最新狀態」
+async function fetchProduct(url, fetchFn = fetch) {
+  const r = await fetchFn(`${url}?_=${Date.now()}`);
+  if (!r.ok) throw new Error(`product HTTP ${r.status}`);
+  return r.json();
+}
+// 單班備援：token 守門 → 交易日守門 → 冪等 → 新鮮度 → 非今日補發。
+// 回傳決策物件（供 /backup 端點觀察與單元測試）；opts.dry=true 只回決策、不真的 dispatch。
+export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
+  if (!env.GH_DISPATCH_TOKEN) return { name: pipe.name, skipped: "no-token" };   // 靜默（同哨兵/news/morning）
+  const today = tp.date;
+  if (pipe.tw && env.FLOW_KV) {
+    const series = await env.FLOW_KV.get(`series:${today}`, "json");
+    if (!series || !series.length) return { name: pipe.name, skipped: "non-trading-day" };   // 假日/週末無盤中資料
+  }
+  const key = bkfiredKey(today, pipe.name);
+  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: pipe.name, skipped: "already-fired" };   // 冪等
+  let obj = null, fetchErr = null;
+  try { obj = await fetchProduct(pipe.url, fetchFn); }
+  catch (e) { fetchErr = String((e && e.message) || e); }
+  const productDate = obj ? String(obj[pipe.field] || "") : null;
+  if (productFresh(obj, pipe, today)) return { name: pipe.name, fresh: true, productDate };   // 原班已跑 → 不發
+  if (opts.dry) return { name: pipe.name, fresh: false, wouldDispatch: true, productDate, today, fetchErr };
+  try {
+    await ghDispatchWithRetry(env, pipe.repo, pipe.wf, fetchFn, opts.sleepFn || sleep);
+    if (env.FLOW_KV) await env.FLOW_KV.put(key, "fired", { expirationTtl: BKFIRED_TTL });
+    console.log(`backup: ${pipe.name} 產物非今日(${productDate}) → dispatched ${pipe.repo}/${pipe.wf}`);
+    return { name: pipe.name, fired: true, productDate };
+  } catch (e) {
+    // dispatch 兩次都失敗 → log 後放棄該班（KV 不記，理論上明日同班 cron 再檢查；當日 aetf 另有 21:37 二次排程兜底）
+    console.log(`backup dispatch ${pipe.name}:`, e && e.message);
+    return { name: pipe.name, error: String((e && e.message) || e), productDate };
+  }
+}
+
 // ---- 第九期：離線提醒（盤中事件偵測 → webhook 外送；頁面關著也能收到）----
 // 誠實前提：只推「有依據」的保守事件集，訊號擴充等 8 月 7b 回測結果。
 //   ①加權指數 5 分變動 ≥ 門檻（預設 40 點）——大盤大幅波動，門檻 KV 可調（alerts:cfg）
@@ -1519,6 +1613,13 @@ export default {
   //   每天每小時 :07（台北 06–22 時）→ dispatch taiwan-stock-news 新聞管線
   async scheduled(event, env, ctx) {
     const tp = taipeiParts(new Date(event.scheduledTime));
+    // 排程備援班（additive，最先判斷）：event.cron 命中專屬備援 cron → 檢查該管線產物新鮮度、
+    // 非今日補發。與既有 frame/哨兵/news/morning 路由互斥（各 cron 各自的 event，不搶不改既有行為）。
+    const bpipe = backupPipelineForCron(event.cron, env);
+    if (bpipe) {
+      ctx.waitUntil(runBackup(env, tp, bpipe).catch((e) => console.log("backup:", e && e.message)));
+      return;
+    }
     const role = scheduledRole(tp, event.cron);
     if (role === "idle") return;   // 哨兵窗口內的非 %5 分鐘：直接省下
     if (role === "news") {
@@ -1642,6 +1743,18 @@ export default {
         return json({ ok: true, error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
       }
     }
+    if (url.pathname === "/backup") {  // 排程備援手動檢查（dry 預設 1：只回決策不真的 dispatch；dry=0 才真的補發）
+      const name = url.searchParams.get("name");
+      const pipe = backupPipelines(env).find((p) => p.name === name);
+      if (!pipe) return json({ error: "name 需為 " + backupPipelines(env).map((p) => p.name).join("/") }, { "Cache-Control": "no-store" });
+      const dry = url.searchParams.get("dry") !== "0";
+      try {
+        const out = await runBackup(env, taipeiParts(), pipe, fetch, { dry });
+        return json({ dry, ...out }, { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
     if (url.pathname === "/alerts/log") {  // 第九期：近 24h 事件紀錄（單 key 1 get，無 list）
       try {
         const lg = (await env.FLOW_KV.get(ALERTS_LOG_KEY, "json")) || { ev: [] };
@@ -1654,7 +1767,7 @@ export default {
       }
     }
     if (url.pathname !== "/live") {
-      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/alerts/test", "/alerts/log"] };
+      const out = { ok: true, service: "taiwan-flow-v2", endpoints: ["/live", "/snap", "/uswatch", "/fundamentals", "/chips", "/replay", "/alerts/test", "/alerts/log", "/backup"] };
       // 輕量健康資訊（僅根路徑；2 次 KV get，讀既有 fi 索引與 err key，無 list）：
       // 當日 frame 數＋最後 storeFrame 錯誤——07-16/17 斷檔兩天無人知的可見化補課
       if (url.pathname === "/" && env.FLOW_KV) {

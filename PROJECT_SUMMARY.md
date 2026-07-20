@@ -1,9 +1,32 @@
 # Taiwan Flow Live V2 — 專案總結（供 Claude Project 使用）
 
-最後更新：2026-07-20（個股追蹤第三批技術面 `/technical` 上線部署 version 9567508f）
+最後更新：2026-07-20（Worker 排程備援上線：6 條每日班準點檢查產物新鮮度、GH 排程延遲/漏發時補發 dispatch）
 
 ## 快速接手
 
+- **Worker 排程備援（2026-07-20，升 Cloudflare Paid 後）**：治「GitHub Actions schedule 延遲/漏發」
+  （07-20 aetf 延遲 2h 為觸發實例）。對 6 條純靠 GH cron 的每日班，Worker 於「排定＋緩衝」的準點
+  fetch 該班線上產物 raw JSON、檢查日期欄是否今日，非今日就 workflow_dispatch 補發。
+  - **覆蓋 6 條班（檢查點台北時間）**：daysummary 14:25、aetf 18:50、baseline 21:10（本 repo）；
+    us 05:30（本 repo，美股班）；diag 22:35、mktbal 22:45（**跨 repo → postmkt**）。
+  - **機制**：①產物新鮮度（不需 GH token，直接量資料有沒有更新；us 因 date 欄是美股交易日會落後，
+    改判 `generated_at` 是否今天跑過）②冪等 KV `bkfired:<date>:<name>`（成功 dispatch 才寫、每日至多補一次；
+    失敗不寫保留重試）③交易日守門（TW 班看當日 `series:<date>` frame 是否存在，假日/週末無→不補；us 靠 cron dow）
+    ④`GH_DISPATCH_TOKEN` 未設整段靜默。程式：`worker/src/index.js` `backupPipelines`/`BACKUP_CRONS`/
+    `backupPipelineForCron`/`runBackup`（`dispatchMorning` 之後）；`scheduled` 入口最先判 `backupPipelineForCron`。
+  - **cron**：`wrangler.toml` 新增 6 條專屬 cron（3→9 條；Paid 上限 250）。與哨兵 cron 同分觸發時各帶
+    自己的 `event.cron`、互不干擾，**既有 frame/哨兵/news/morning 路由與 dispatch 零改動**。
+  - **跨 repo token**：mktbal/diag 在 postmkt——沿用**既有** `GH_DISPATCH_TOKEN`（本來就含 taiwan-flows＋
+    postmkt＋taiwan-stock-news 三 repo actions:write，見 wrangler.toml secret 註解、哨兵也 dispatch postmkt），
+    無需額外授權。
+  - **手動驗證端點**：`GET /backup?name=<daysummary|aetf|baseline|us|diag|mktbal>`（預設 dry=1 只回決策不真發；
+    `&dry=0` 才真的補發）。測試 `worker/test/backup.mjs`（49 通過）。
+  - **天花板誠實**：只解「GH 排程延遲/漏發」；FinMind 上游資料公布時點（法人 20:00…）與異常仍是天花板，
+    備援不讓資料比來源更早，只保證「來源一有就最多晚幾分鐘被抓」。
+  - **未解/續作可選**：低頻班（lastweek 週一、meta 月）與已有機制者（intraday 前端不讀、summary 內部閘門、
+    morning/news/flows/postmkt 已有 Worker dispatch）本期未納入；如需再照同模式加 cron＋設定即可。
+    另 postmkt 的 mktbal/diag 上游是 build.yml（21:53），若 build.yml 本身漏跑，補跑 mktbal/diag 可能拿到舊資料
+    （本備援只保 mktbal/diag 自身排程，不含上游）。
 - **Worker dispatch 失敗重試（2026-07-20，deploy version `750a81c9`）**：`dispatchNews`/
   `dispatchMorning` 原本 `ghDispatch` 非 204 就丟錯，呼叫端只 `.catch(log)` 不重試——曾有一班
   （07-20 08:07）無聲消失過一次。新增共用 `ghDispatchWithRetry()`：第一次失敗 log 後等 3 秒
