@@ -732,7 +732,9 @@ export const BACKUP_CRONS = {
   "10 13 * * 1-5": "baseline",     // 台北 21:10（baseline GH 20:41）
   "35 14 * * 1-5": "diag",         // 台北 22:35（diag GH 22:10，postmkt）
   "45 14 * * 1-5": "mktbal",       // 台北 22:45（mktbal GH 22:20，postmkt）
-  "30 21 * * 0-4": "us",           // 台北平日 05:30（us GH 05:00；UTC dow 0-4 = 台北一~五晨）
+  // us 檢查點 05:30 台北 = 21:30 UTC 前一日；CF cron 拒收 dow 0-4（code 10100），改用 dow *、
+  // 週末守門移到 runBackup 內用台北 dow（21:30 UTC 只在台北一~五晨落在平日）：
+  "30 21 * * *":   "us",           // 台北 05:30（us GH 05:00）；weekend 由 runBackup dow 守門
 };
 export function backupPipelineForCron(cron, env) {
   const name = BACKUP_CRONS[cron];
@@ -764,9 +766,14 @@ async function fetchProduct(url, fetchFn = fetch) {
 export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
   if (!env.GH_DISPATCH_TOKEN) return { name: pipe.name, skipped: "no-token" };   // 靜默（同哨兵/news/morning）
   const today = tp.date;
-  if (pipe.tw && env.FLOW_KV) {
-    const series = await env.FLOW_KV.get(`series:${today}`, "json");
-    if (!series || !series.length) return { name: pipe.name, skipped: "non-trading-day" };   // 假日/週末無盤中資料
+  if (pipe.tw) {
+    // TW 班：當日 frame series 存在＝盤中有資料＝交易日（假日/週末無 → 不補發）
+    const series = env.FLOW_KV ? await env.FLOW_KV.get(`series:${today}`, "json") : null;
+    if (!series || !series.length) return { name: pipe.name, skipped: "non-trading-day" };
+  } else if (tp.dow != null && (tp.dow < 1 || tp.dow > 5)) {
+    // us（美股班）：cron 用 dow *（CF 拒收 0-4），週末守門改在此用台北 dow——21:30 UTC 只在
+    // 台北一~五晨落平日；台北六/日晨（UTC 五/六）不補發，避免週末對無新資料的 us.yml 空轉補發
+    return { name: pipe.name, skipped: "non-trading-day" };
   }
   const key = bkfiredKey(today, pipe.name);
   if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: pipe.name, skipped: "already-fired" };   // 冪等

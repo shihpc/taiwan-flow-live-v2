@@ -32,7 +32,7 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
 {
   chk("BACKUP_CRONS 六條", Object.keys(BACKUP_CRONS).length === 6);
   chk("cron 命中 baseline", backupPipelineForCron("10 13 * * 1-5", ENV)?.name === "baseline");
-  chk("cron 命中 us", backupPipelineForCron("30 21 * * 0-4", ENV)?.name === "us");
+  chk("cron 命中 us（dow *，CF 拒收 0-4）", backupPipelineForCron("30 21 * * *", ENV)?.name === "us");
   chk("cron 命中 diag(postmkt)", backupPipelineForCron("35 14 * * 1-5", ENV)?.name === "diag");
   chk("既有 frame cron → null（不誤判備援）", backupPipelineForCron("* 1-5 * * 1-5", ENV) === null);
   chk("既有哨兵 cron → null", backupPipelineForCron("*/5 9-14 * * 1-5", ENV) === null);
@@ -78,7 +78,7 @@ const mkFetch = (productObj, dispatchStatus = 204, spy) => async (u, init) => {
   if (String(u).includes("/dispatches")) { if (spy) spy.push(String(u)); return { status: dispatchStatus }; }
   return { ok: productObj != null, status: productObj ? 200 : 404, json: async () => productObj };
 };
-const TP = { date: "2026-07-20" };
+const TP = { date: "2026-07-20", dow: 1 };   // 2026-07-20 = 週一（台北 dow 1）
 const TRADING_KV = () => fakeKV({ "series:2026-07-20": [{ t: "09:00", amt: 100 }] });
 
 // 1) GH_DISPATCH_TOKEN 未設 → 靜默跳過（不打任何網路）
@@ -135,6 +135,14 @@ const TRADING_KV = () => fakeKV({ "series:2026-07-20": [{ t: "09:00", amt: 100 }
     mkFetch({ generated_at: "2026-07-19T05:49:58+08:00", date: "2026-07-17" }, 204, spy));
   chk("us 無 series 仍不被守門擋（tw:false）", out.fired === true);
   chk("us 補發打 us.yml", spy[0].includes("/us.yml/dispatches"), spy[0]);
+}
+// 6a2) us 週末守門：台北 dow=6（週六晨）→ 不補發（cron dow * 由 runBackup 台北 dow 擋週末）
+{
+  const spy = [];
+  const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: fakeKV() }, { date: "2026-07-25", dow: 6 }, byName.us,
+    mkFetch({ generated_at: "2026-07-24T05:49:58+08:00", date: "2026-07-17" }, 204, spy));
+  chk("us 週末（台北 dow6）→ skipped non-trading-day", out.skipped === "non-trading-day");
+  chk("us 週末 → 不打 dispatch", spy.length === 0);
 }
 // 6b) us generated_at 今日 → fresh
 {

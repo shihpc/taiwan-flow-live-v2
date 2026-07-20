@@ -11,7 +11,7 @@
     us 05:30（本 repo，美股班）；diag 22:35、mktbal 22:45（**跨 repo → postmkt**）。
   - **機制**：①產物新鮮度（不需 GH token，直接量資料有沒有更新；us 因 date 欄是美股交易日會落後，
     改判 `generated_at` 是否今天跑過）②冪等 KV `bkfired:<date>:<name>`（成功 dispatch 才寫、每日至多補一次；
-    失敗不寫保留重試）③交易日守門（TW 班看當日 `series:<date>` frame 是否存在，假日/週末無→不補；us 靠 cron dow）
+    失敗不寫保留重試）③交易日守門（TW 班看當日 `series:<date>` frame 是否存在，假日/週末無→不補；us 靠 runBackup 內台北 dow 守週末——CF cron 拒收 dow 0-4 code 10100，us cron 改用 dow *）
     ④`GH_DISPATCH_TOKEN` 未設整段靜默。程式：`worker/src/index.js` `backupPipelines`/`BACKUP_CRONS`/
     `backupPipelineForCron`/`runBackup`（`dispatchMorning` 之後）；`scheduled` 入口最先判 `backupPipelineForCron`。
   - **cron**：`wrangler.toml` 新增 6 條專屬 cron（3→9 條；Paid 上限 250）。與哨兵 cron 同分觸發時各帶

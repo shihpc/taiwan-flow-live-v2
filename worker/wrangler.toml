@@ -37,7 +37,9 @@ crons = [
   "10 13 * * 1-5",           # 6) baseline 備援（台北 21:10；GH 20:41）
   "35 14 * * 1-5",           # 7) diag 備援 postmkt（台北 22:35；GH 22:10）
   "45 14 * * 1-5",           # 8) mktbal 備援 postmkt（台北 22:45；GH 22:20）
-  "30 21 * * 0-4",           # 9) us 備援（台北平日 05:30；GH 05:00，UTC dow 0-4）
+  # 9) us 備援（台北 05:30 = 21:30 UTC 前一日；GH 05:00）。CF cron 拒收 dow 0-4（code 10100），
+  #    故用 dow *、週末守門移到 runBackup 內以台北 dow 判（見 src/index.js runBackup us 分支）
+  "30 21 * * *",
 ]
 
 [[kv_namespaces]]
