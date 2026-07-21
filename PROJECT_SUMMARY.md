@@ -4,6 +4,19 @@
 
 ## 快速接手
 
+- **Worker 升格全系統主排程（2026-07-22，deploy version `485a7717`，commit `689f7ff`）**：
+  治 GH cron 常態延遲 60-90 分。CF cron 9→12 條：summary am/pm 事件驅動（上游全齊即 dispatch
+  postmkt/summary.yml 帶 inputs.slot；pm 三源＝flows+postmkt+news晚班、am＝morning.json）、
+  四單體班（daysummary 13:35/aetf 18:35/baseline 20:05/us 05:05）挪至上游就緒時點主觸發、
+  晚場協調班（21:00-23:55 每5分）串 pm summary→diag 鏈→mktbal 鏈→aetf2（21:45）、intraday
+  納管備援 14:40。GH cron 全數保留挪後為兜底（不變式：一條不刪）。新端點 /sumcheck /evening。
+  **全貌見 `Harness/site-architecture-20260722.md`**。測試 test/summary.mjs 64 綠、backup.mjs 58 綠。
+  **未解/待觀察**：隔交易日驗證 summary pm 應 workflow_dispatch 觸發 ~22:0x 起跑、22:47 GH cron
+  run 被已產出守門秒退；四單體班觸發來源與落地時間對齊預期表。
+- **intraday 歸檔修復＋搶救（2026-07-22，commit `d85e49f`）**：archive_intraday.py 補格邏輯
+  IndexError——既有次產業第二個命中時點必炸，**7a 上線後排程 run 全 failure**（07-18「成功」
+  僅因命中 1/54 格倖存，該檔對回測近乎無用）。修復後本機補跑 07-20/07-21 各 54/54 全命中
+  （frame TTL 2 天內搶救）。07-18 frame 已過期無法補，回測樣本自 07-20 起算。
 - **/live 資料時間改取 max(date)（2026-07-21，deploy version `572399a2`）**：`aggregate()`
   原 `ts = ts || r.date`（`worker/src/index.js:188`）取「第一檔有分類個股」的 date 當全站資料時間，
   一旦第一檔是冷門股（如 6680，最後成交定格 13:12:51、量僅 1 張），整站「資料時間」就被拖成盤中舊值、
