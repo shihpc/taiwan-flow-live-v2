@@ -1,13 +1,13 @@
 name: aetf
 # 主動式ETF 每日投組快照：資料源 FinMind（2026-07-20 遷移，取代逐家投信 PCF 逆向工程）。
-# 18:30 台北抓（10:30 UTC 週一~五）。累積 data/aetf/YYYY-MM-DD.json（跨日 diff 算主動加減碼）。
-# 補抓班 21:37 台北（13:37 UTC）：第一班若有 ETF 仍回前一基準日（latest.json not_advanced），
-# 第二班重抓補齊。冪等：日檔以 run_date 命名，同日重跑覆蓋同一檔（不累積）；
+# 主觸發＝Worker（2026-07-22 翻轉）：一段 18:35 新鮮度檢查 dispatch、二段 21:45 晚場協調班
+# aetf2 無條件補抓（治部分投信 T+1 揭露）。本檔 GH cron 挪後為備援（19:05／22:15 台北）。
+# 冪等：日檔以 run_date 命名，同日重跑覆蓋同一檔（不累積）；
 # diff 依 src_date 去重取最新 run，故重跑不壞資料。build_aetf 與 diff 皆需 FINMIND_TOKEN。
 on:
   schedule:
-    - cron: '30 10 * * 1-5'
-    - cron: '37 13 * * 1-5'
+    - cron: '5 11 * * 1-5'    # 一段備援 19:05 台北
+    - cron: '15 14 * * 1-5'   # 二段備援 22:15 台北
   workflow_dispatch:
 
 permissions:

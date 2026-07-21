@@ -21,25 +21,28 @@ compatibility_date = "2024-11-01"
 #    → workflow_dispatch 觸發本 repo morning.yml（GitHub cron 06:00 保留當備援，
 #    夜盤 05:00 收盤後留 ~1.5 小時給 FinMind 入庫；晨報建置冪等、多跑無害）。
 #    其他小時的 :47 喚醒一律 idle（見 scheduledRole）
-# 5) 排程備援（2026-07-20）：對純靠 GitHub schedule 的每日管線準點檢查產物新鮮度、未更新則
-#    workflow_dispatch 補發（治 GH 排程延遲/漏發，如 07-20 aetf 延遲 2h）。每班一條專屬 cron，
-#    event.cron 命中即進 runBackup（見 src/index.js BACKUP_CRONS / backupPipelineForCron）。
-#    即使與哨兵 cron 同分觸發（如 aetf 10:50 UTC），兩者各帶自己的 event.cron、互不干擾。
+# 5) Worker 主排程（2026-07-22 翻轉；前身為 07-20「排程備援」）：GH Actions cron 常態延遲
+#    60-90 分，Worker 升格主觸發者——CF cron 排在「上游資料就緒的理想時點」檢查產物新鮮度、
+#    未更新即 workflow_dispatch；GH cron 挪後降級為兜底備援（一條不刪＝CF 單點故障防線）。
+#    單體班見 src/index.js BACKUP_CRONS；晚場協調班/am summary 窗見 DISPATCH_ROLES。
+#    即使與哨兵 cron 同分觸發，兩者各帶自己的 event.cron、互不干擾（dispatchRoleForCron 最先攔截）。
 [triggers]
 # ※ Cron Triggers 為帳戶層級額度：Free 5 條／Paid 250 條（Cloudflare 官方文件）；本帳戶已升 Paid。
 #   新聞(:07)與晨報(:47)仍共用第三條、程式內分流（沿用既有設計，不因升 Paid 而拆分）。
+#   CF cron 拒收 dow 0-4（code 10100）→ 凡 UTC 日跨台北日界的班一律 dow *、週末守門在程式內以台北 dow 判。
 crons = [
   "* 1-5 * * 1-5",           # 1) 盤中每分鐘 frame（09:00-13:59 台北，週一~五）
   "*/5 9-14 * * 1-5",        # 2) FinMind 哨兵（17:00-22:55 台北每 5 分）
   "7,47 0-14,22-23 * * *",   # 3) 新聞定點班(:07) / 晨報準點班(:47)，程式內分流
-  "25 6 * * 1-5",            # 4) daysummary 備援（台北 14:25；GH 14:05）
-  "50 10 * * 1-5",           # 5) aetf 備援（台北 18:50；GH 18:30）
-  "10 13 * * 1-5",           # 6) baseline 備援（台北 21:10；GH 20:41）
-  "35 14 * * 1-5",           # 7) diag 備援 postmkt（台北 22:35；GH 22:10）
-  "45 14 * * 1-5",           # 8) mktbal 備援 postmkt（台北 22:45；GH 22:20）
-  # 9) us 備援（台北 05:30 = 21:30 UTC 前一日；GH 05:00）。CF cron 拒收 dow 0-4（code 10100），
-  #    故用 dow *、週末守門移到 runBackup 內以台北 dow 判（見 src/index.js runBackup us 分支）
-  "30 21 * * *",
+  "35 5 * * 1-5",            # 4) daysummary 主觸發（台北 13:35；/live 13:30 定格後即備。GH 備援 14:35）
+  "40 6 * * 1-5",            # 5) intraday 備援（台北 14:40；GH 主班 14:10 先跑先贏，缺當日檔才補發——KV frame TTL 2 天，漏發即永久掉回測樣本）
+  "35 10 * * 1-5",           # 6) aetf 一段主觸發（台北 18:35；GH 備援 19:05。二段 21:45 併入晚場協調班 aetf2）
+  "5 12 * * 1-5",            # 7) baseline 主觸發（台北 20:05；法人官方 20:00＋腳本自帶重試。GH 備援 21:15）
+  "*/5 13-15 * * 1-5",       # 8) 晚場協調班（台北 21:00-23:55 每 5 分）：pm summary 事件驅動＋diag→mktbal 鏈＋aetf2
+  "5 21 * * *",              # 9) us 主觸發（台北 05:05；dow * + 程式守門。GH 備援 06:10）
+  "50,55 22 * * *",          # 10) am summary 起手（台北 06:50/06:55；dow * + 程式守門）
+  "*/5 23 * * *",            # 11) am summary 主窗（台北 07:00-07:55；morning 常態 07:1x 落地）
+  "*/10 0 * * *",            # 12) am summary 尾窗（台北 08:00-08:50；morning 遲到仍趕 09:00 前）
 ]
 
 [[kv_namespaces]]

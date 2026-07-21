@@ -12,28 +12,36 @@ const ENV = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-l
 const pipes = backupPipelines(ENV);
 const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
 
-// ---- 設定表：六條班、repo、workflow 檔、產物 URL、日期欄、模式、交易日守門 ----
+// ---- 設定表：七條班、repo、workflow 檔、產物 URL、日期欄、模式、交易日守門 ----
 {
-  chk("六條班齊全", pipes.length === 6 && ["daysummary","aetf","baseline","us","diag","mktbal"].every((n) => byName[n]));
+  chk("七條班齊全", pipes.length === 7 && ["daysummary","aetf","baseline","us","intraday","diag","mktbal"].every((n) => byName[n]));
   chk("daysummary 設定", byName.daysummary.wf === "daysummary.yml" && byName.daysummary.field === "date" &&
     byName.daysummary.url.endsWith("/daysummary/latest.json") && byName.daysummary.repo === "taiwan-flow-live-v2");
   chk("aetf 用 run_date 欄", byName.aetf.field === "run_date" && byName.aetf.wf === "aetf.yml");
   chk("baseline 用 date 欄", byName.baseline.field === "date" && byName.baseline.url.endsWith("/baseline.json"));
   chk("us genToday＋非TW守門", byName.us.mode === "genToday" && byName.us.field === "generated_at" && byName.us.tw === false);
-  chk("diag 跨 repo postmkt", byName.diag.repo === "postmkt" && byName.diag.wf === "diag.yml" &&
-    byName.diag.url === "https://raw.githubusercontent.com/shihpc/postmkt/main/data/diag/diag.json");
-  chk("mktbal 跨 repo＋latest_date 欄", byName.mktbal.repo === "postmkt" && byName.mktbal.wf === "mktbal.yml" &&
+  chk("intraday {date} 佔位＋tw 守門", byName.intraday.url.endsWith("/intraday/{date}.json") &&
+    byName.intraday.wf === "intraday.yml" && byName.intraday.tw === true);
+  chk("diag 跨 repo postmkt＋dep=postmkt.json", byName.diag.repo === "postmkt" && byName.diag.wf === "diag.yml" &&
+    byName.diag.url === "https://raw.githubusercontent.com/shihpc/postmkt/main/data/diag/diag.json" &&
+    byName.diag.dep?.url.endsWith("/data/postmkt.json") && byName.diag.dep?.field === "date");
+  chk("mktbal 跨 repo＋latest_date 欄＋dep=diag.json", byName.mktbal.repo === "postmkt" && byName.mktbal.wf === "mktbal.yml" &&
     byName.mktbal.field === "latest_date" &&
-    byName.mktbal.url === "https://raw.githubusercontent.com/shihpc/postmkt/main/data/market_balance_history.json");
-  chk("TW 班皆 tw:true", ["daysummary","aetf","baseline","diag","mktbal"].every((n) => byName[n].tw === true));
+    byName.mktbal.url === "https://raw.githubusercontent.com/shihpc/postmkt/main/data/market_balance_history.json" &&
+    byName.mktbal.dep?.url.endsWith("/data/diag/diag.json") && byName.mktbal.dep?.field === "date");
+  chk("TW 班皆 tw:true", ["daysummary","aetf","baseline","intraday","diag","mktbal"].every((n) => byName[n].tw === true));
 }
 
-// ---- event.cron → pipeline 對應 ----
+// ---- event.cron → pipeline 對應（2026-07-22 主排程化：單體班五條；diag/mktbal 併入晚場協調班無專屬 cron）----
 {
-  chk("BACKUP_CRONS 六條", Object.keys(BACKUP_CRONS).length === 6);
-  chk("cron 命中 baseline", backupPipelineForCron("10 13 * * 1-5", ENV)?.name === "baseline");
-  chk("cron 命中 us（dow *，CF 拒收 0-4）", backupPipelineForCron("30 21 * * *", ENV)?.name === "us");
-  chk("cron 命中 diag(postmkt)", backupPipelineForCron("35 14 * * 1-5", ENV)?.name === "diag");
+  chk("BACKUP_CRONS 五條", Object.keys(BACKUP_CRONS).length === 5);
+  chk("cron 命中 daysummary（主觸發 13:35）", backupPipelineForCron("35 5 * * 1-5", ENV)?.name === "daysummary");
+  chk("cron 命中 intraday（備援 14:40）", backupPipelineForCron("40 6 * * 1-5", ENV)?.name === "intraday");
+  chk("cron 命中 aetf（主觸發 18:35）", backupPipelineForCron("35 10 * * 1-5", ENV)?.name === "aetf");
+  chk("cron 命中 baseline（主觸發 20:05）", backupPipelineForCron("5 12 * * 1-5", ENV)?.name === "baseline");
+  chk("cron 命中 us（dow *，CF 拒收 0-4）", backupPipelineForCron("5 21 * * *", ENV)?.name === "us");
+  chk("舊 diag 備援 cron 已除役 → null", backupPipelineForCron("35 14 * * 1-5", ENV) === null);
+  chk("舊 mktbal 備援 cron 已除役 → null", backupPipelineForCron("45 14 * * 1-5", ENV) === null);
   chk("既有 frame cron → null（不誤判備援）", backupPipelineForCron("* 1-5 * * 1-5", ENV) === null);
   chk("既有哨兵 cron → null", backupPipelineForCron("*/5 9-14 * * 1-5", ENV) === null);
   chk("既有新聞/晨報 cron → null", backupPipelineForCron("7,47 0-14,22-23 * * *", ENV) === null);
@@ -173,6 +181,19 @@ const TRADING_KV = () => fakeKV({ "series:2026-07-20": [{ t: "09:00", amt: 100 }
   const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv }, TP, byName.baseline, mkFetch({ date: "2026-07-17" }, 401, spy), { sleepFn: async () => {} });
   chk("dispatch 失敗 → 回 error", !!out.error);
   chk("dispatch 失敗 → KV 不記 bkfired（保留重試）", kv._m.get("bkfired:20260720:baseline") === undefined);
+}
+
+// 10) intraday {date} 佔位：產物 URL 以今日代入；當日檔 404 → 補發
+{
+  const spy = [], prodUrls = [];
+  const f = async (u, init) => {
+    if (String(u).includes("/dispatches")) { spy.push(String(u)); return { status: 204 }; }
+    prodUrls.push(String(u));
+    return { ok: false, status: 404, json: async () => null };
+  };
+  const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: TRADING_KV() }, TP, byName.intraday, f);
+  chk("intraday URL 代入今日", prodUrls[0]?.includes("/intraday/2026-07-20.json"), prodUrls[0]);
+  chk("intraday 當日檔 404 → 補發 intraday.yml", out.fired === true && spy[0].includes("/intraday.yml/dispatches"), spy[0]);
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

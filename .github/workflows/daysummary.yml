@@ -2,11 +2,12 @@ name: daysummary
 # 第八期：收盤總結落檔。收盤後拉 Worker /live（13:30 收盤定格）重算收盤總結卡
 # 同口徑的全日總結 → data/daysummary/YYYY-MM-DD.json＋latest.json，
 # 供 taiwan-stock-news 晨報「昨日資金流向」段跨 repo raw 讀取。
-# 排 14:05 台北（06:05 UTC），與 intraday 14:10 錯開。非交易日 /live 定格日期
+# 主觸發＝Worker 13:35 台北（2026-07-22 翻轉；/live 13:30 定格後即備）。本 cron 為
+# 備援 14:35 台北，與 intraday 14:10/14:40 錯開。非交易日 /live 定格日期
 # 不符 → 腳本優雅退出（不寫檔、不 commit）。保留近 30 個交易日檔。
 on:
   schedule:
-    - cron: '5 6 * * 1-5'   # 週一~五 06:05 UTC = 14:05 台北
+    - cron: '35 6 * * 1-5'   # 週一~五 06:35 UTC = 14:35 台北（備援；主觸發＝Worker 13:35 新鮮度檢查 dispatch，2026-07-22 翻轉）
   workflow_dispatch:
     inputs:
       date:

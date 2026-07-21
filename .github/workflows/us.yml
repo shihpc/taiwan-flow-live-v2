@@ -1,9 +1,10 @@
 name: us
 # 台股開盤前「昨夜美股速覽」：美股收盤(台北凌晨4/5點)後產 data/us.json，目標 08:00 台北前完成。
-# 21:00 UTC 週日~四 = 05:00 台北 週一~五（cron 常延遲 ~70 分鐘 → 約 06:10 起跑，重試最多 2 小時等 FinMind 入庫）。
+# 主觸發＝Worker 05:05 台北（2026-07-22 翻轉；generated_at 非今日即 dispatch，重試最多 2 小時等 FinMind 入庫）。
+# 本 cron 為備援 06:10 台北。
 on:
   schedule:
-    - cron: '0 21 * * 0-4'
+    - cron: '10 22 * * 0-4'   # 週日~四 22:10 UTC = 06:10 台北（備援；主觸發＝Worker 05:05 新鮮度檢查 dispatch，2026-07-22 翻轉。Worker 故障日此班 +延遲仍趕 08:00 前，us 為最緊班、壓線已知）
   workflow_dispatch:
 
 permissions:

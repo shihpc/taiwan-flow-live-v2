@@ -1,12 +1,12 @@
 name: baseline
 # 每交易日收盤後重建 data/baseline.json（5日均額 + 投信/外資近3日買超日數）。
-# 三大法人買賣超官方 20:00 台北更新 → 排 20:41 台北（12:41 UTC）留緩衝＋冷門分鐘
-# 避開半點壅塞（2026-07-14 依審計調整，原 20:30；build_baseline.py 另有 freshness
-# 重試，法人資料未入庫時每 10 分重試最多 40 分）。
+# 三大法人買賣超官方 20:00 台北更新 → 主觸發＝Worker 20:05 台北（2026-07-22 翻轉；
+# build_baseline.py 另有 freshness 重試，法人資料未入庫時每 10 分重試最多 40 分，
+# 扛官方落地抖動）。本 cron 為備援 21:15 台北。
 # Worker 從 repo raw 抓此檔當「資金湧入」偵測的常態基準。
 on:
   schedule:
-    - cron: '41 12 * * 1-5'   # 週一~五 12:41 UTC = 20:41 台北
+    - cron: '15 13 * * 1-5'   # 週一~五 13:15 UTC = 21:15 台北（備援；主觸發＝Worker 20:05 新鮮度檢查 dispatch，2026-07-22 翻轉）
   workflow_dispatch:
 
 permissions:
