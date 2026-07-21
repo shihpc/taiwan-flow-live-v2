@@ -100,9 +100,13 @@ def build(date: str) -> int:
         total.append(round(tot))
         nstk.append(cnt)
         for sname, a in agg.items():
-            if sname not in groups:
-                groups[sname] = [None] * i + [None]   # 補齊前面缺的時點
-            groups[sname][i] = round(a)
+            # 既有次產業的陣列此刻長度是 i（前輪補到 i-1 為止），新出現的是空/更短——
+            # 一律先補 None 到長度 i+1 再賦值。舊寫法只在 sname 不存在時建陣列，
+            # 既有 sname 直接 groups[sname][i] 賦值必炸 IndexError（第二個命中時點起），
+            # 導致 7a 上線後 07-20/07-21 排程 run 全 failure、07-18 僅因命中 1 格倖存。
+            arr = groups.setdefault(sname, [])
+            arr.extend([None] * (i + 1 - len(arr)))
+            arr[i] = round(a)
         for sname, arr in groups.items():
             if len(arr) <= i:
                 arr.append(None)
