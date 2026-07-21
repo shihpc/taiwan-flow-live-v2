@@ -185,7 +185,9 @@ export function aggregate(cl, rows, limits, lw) {
     const dp = num(r.change_price);
     const bv = num(r.buy_volume);
     const sv = num(r.sell_volume);
-    ts = ts || r.date;
+    // 取全體有分類個股的最新成交時戳（date 為 YYYY-MM-DD HH:MM:SS.ffffff 定寬字串，
+    // 字典序即時序），避免舊制「第一檔 date」被單一冷門股（如 6680）最後成交時刻定格。
+    if (r.date && (!ts || r.date > ts)) ts = r.date;
     const sh = num(info.sh);
     const mkt = info.t || "";
     const etf = code.startsWith("00");
