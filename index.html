@@ -1685,7 +1685,7 @@ function ovHeadline(){
   if(dragCandidates.length)dragClause=`；${dragCandidates.map(s=>cleanSub(s.name)).join("、")}小幅${isUp?"拖累":"助漲"}`;
   return `<div class="ovsent">${aiBtn}大盤 ${sgnTxt(pIdx)} 點：${topClause||"資料不足"}${shareClause}${dragClause}。</div>`;
 }
-// 貢獻點發散長條三視角：次產業(自聚合)／產業鏈(直接用 live.chain 既有加總)／個股(+其他合計殘差)
+// 貢獻點發散長條三視角：次產業(自聚合)／產業鏈(直接用 live.chain 既有加總)／個股(僅前5拉抬+前5拖累，無殘差)
 function ovContribItems(view){
   if(view==="chain"){
     if(OV_REPLAY){   // 第五期：live.chain 是即時值，回放改由回放個股值按產業鏈自聚合
@@ -1715,11 +1715,7 @@ function ovDivergingBar(view){
   let rows=[...pos,...neg];
   let noteHtml;
   if(view==="stock"){
-    const sumShown=rows.reduce((a,r)=>a+r.pts,0);
-    const ix=ovIndexView().tse;   // 第五期：回放時殘差對回放重建指數
-    const resid=(ix&&ix.chgP!=null)?ix.chgP-sumShown:null;
-    if(resid!=null&&Math.abs(resid)>0.05)rows.push({name:"其他合計",pts:resid});
-    noteHtml="";
+    noteHtml="";   // 2026-07-21：個股視角僅列前5拉抬/前5拖累個股，不再加「其他合計」殘差（使用者指定）
   }else noteHtml='<div class="note mut">分類重疊，不可直接加總。</div>';
   rows.sort((a,b)=>a.pts-b.pts);   // 左跌右漲：由最負到最正排列
   if(!rows.length)return noteHtml+'<div class="loading">暫無資料。</div>';
