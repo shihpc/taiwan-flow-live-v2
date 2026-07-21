@@ -1713,17 +1713,19 @@ function ovDivergingBar(view){
   const pos=[...items].filter(r=>r.pts>0).sort((a,b)=>b.pts-a.pts).slice(0,5);   // 2026-07-19：改拉抬前5＋拖累前5
   const neg=[...items].filter(r=>r.pts<0).sort((a,b)=>a.pts-b.pts).slice(0,5);
   let rows=[...pos,...neg];
-  let noteHtml;
+  let noteHtml,residRow=null;
   if(view==="stock"){
     const sumShown=rows.reduce((a,r)=>a+r.pts,0);
     const ix=ovIndexView().tse;   // 第五期：回放時殘差對回放重建指數
     const resid=(ix&&ix.chgP!=null)?ix.chgP-sumShown:null;
-    if(resid!=null&&Math.abs(resid)>0.05)rows.push({name:"其他合計",pts:resid});
+    // 其他合計＝殘差對帳列、非個股：僅殿底顯示，不納入排序與長條比例尺（2026-07-21 使用者回饋）
+    if(resid!=null&&Math.abs(resid)>0.05)residRow={name:"其他合計",pts:resid};
     noteHtml="";
   }else noteHtml='<div class="note mut">分類重疊，不可直接加總。</div>';
   rows.sort((a,b)=>a.pts-b.pts);   // 左跌右漲：由最負到最正排列
+  if(residRow)rows.push(residRow);   // 其他合計固定殿底，不參與上方排序
   if(!rows.length)return noteHtml+'<div class="loading">暫無資料。</div>';
-  const maxAbs=Math.max(1,...rows.map(r=>Math.abs(r.pts)));
+  const maxAbs=Math.max(1,...rows.filter(r=>r!==residRow).map(r=>Math.abs(r.pts)));
   const barRow=r=>{
     const w=Math.min(100,Math.abs(r.pts)/maxAbs*100)/2;
     const bar=r.pts>=0?`<div class="ovbarpos" style="width:${w}%"></div>`:`<div class="ovbarneg" style="width:${w}%"></div>`;
