@@ -11,8 +11,21 @@
   晚場協調班（21:00-23:55 每5分）串 pm summary→diag 鏈→mktbal 鏈→aetf2（21:45）、intraday
   納管備援 14:40。GH cron 全數保留挪後為兜底（不變式：一條不刪）。新端點 /sumcheck /evening。
   **全貌見 `Harness/site-architecture-20260722.md`**。測試 test/summary.mjs 64 綠、backup.mjs 58 綠。
-  **未解/待觀察**：隔交易日驗證 summary pm 應 workflow_dispatch 觸發 ~22:0x 起跑、22:47 GH cron
-  run 被已產出守門秒退；四單體班觸發來源與落地時間對齊預期表。
+  **首日實測（2026-07-22 白天～07-23 晨，07-24 核對）**：全班 workflow_dispatch 主觸發準點、
+  conclusion 全 success。亮點——① summary pm dispatch 21:20 起、產物 21:25 落地（`generated_at
+  21:25:24`），較原制常拖午夜提前約 2.5h；② summary am dispatch 06:50 起、06:55 落地，提前約
+  1-1.5h；③ summary GH cron 兜底 run 皆被「已產出守門」秒退（pm 午夜 cron 10s／am 07:17 18s，
+  零 LLM），守門如設計；④ intraday 07-22 IndexError 修復後排程班首跑 **54/54 全命中**（dispatch
+  14:40，產物 16:41）；⑤ 事件驅動鏈準時串起（news 晚班 21:07→build 21:07→flows 21:15→diag
+  21:03→mktbal 21:11→pm summary 21:25），aetf2 21:45 無條件二段 success。
+  **待改進（非阻斷）**：① GH cron 兜底 schedule run 仍延遲約 1.5-2.5h（daysummary 17:12／aetf
+  23:52／baseline 23:17／pm summary 午夜）——正好印證翻轉必要性，功能無礙（Worker 已準點主發）；
+  ② daysummary／aetf／intraday 三單體班**無「已產出守門」**，延遲的 GH 兜底 run 會冪等重跑並把產物
+  `generated_at` 覆寫成較晚時點（如 daysummary 17:12）；因 generated_at 每跑必變→必有 diff→必
+  commit，架構原設「無 diff 不 commit 空跑」不成立，會產生多餘 commit＋產物時間戳失真。建議比照
+  summary 加「今日產物已存在即秒退」守門，或產物時間戳改用資料日而非 wall-clock。③ 待眼：diag
+  dispatch（21:00）略早於 postmkt build（21:05 起/21:07 落），需下個交易日確認 chainStep
+  dep=postmkt.json 今日守門確實生效、diag 未吃到前日資料（首日成功落地暫判無礙）。
 - **intraday 歸檔修復＋搶救（2026-07-22，commit `d85e49f`）**：archive_intraday.py 補格邏輯
   IndexError——既有次產業第二個命中時點必炸，**7a 上線後排程 run 全 failure**（07-18「成功」
   僅因命中 1/54 格倖存，該檔對回測近乎無用）。修復後本機補跑 07-20/07-21 各 54/54 全命中
