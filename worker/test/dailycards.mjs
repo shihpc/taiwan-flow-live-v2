@@ -67,6 +67,12 @@ const FIX = () => ({
     subs_top5: [{ n: "電信服務業", pts: 7.64, amt_yi: 55.6, share_pct: 0.7, n_stk: 4 },
       { n: "貨櫃航運", pts: 5.13, amt_yi: 46.7, share_pct: 0.6, n_stk: 5 }],
     subs_bot3: [{ n: "晶圓製造", pts: -544.89, amt_yi: 1483.9, share_pct: 19.1, n_stk: 15 }],
+    subs_stocks: {   // 2026-08-16 新欄（ov-6 改版）：每業貢獻絕對值前 3 檔
+      "電信服務業": [{ c: "2412", n: "中華電", pts: 5.1 }, { c: "3045", n: "台灣大", pts: 1.8 },
+        { c: "4904", n: "遠傳", pts: 0.7 }],
+      "晶圓製造": [{ c: "2330", n: "台積電", pts: -451.39 }, { c: "2303", n: "聯電", pts: -12.2 },
+        { c: "6770", n: "力積電", pts: -3.1 }],
+    },
     chain_top5: [{ n: "電信網路", pts: 8.1, amt_yi: 60.2, share_pct: 0.8, n_stk: 6 }],   // Phase A 補欄
     chain_bot3: [{ n: "半導體", pts: -600.4, amt_yi: 2100.5, share_pct: 27.0, n_stk: 40 }],
     subs_all: [{ n: "電信服務業", pts: 7.64, amt_yi: 55.6, share_pct: 0.7, n_stk: 4 },
@@ -177,11 +183,11 @@ const B_IDS = ["v2-rank-1", "flows-foreign-1", "flows-trust-1", "pm-aetf-2", "pm
   "pm-aetf-5", "pm-lending-3", "pm-lending-4", "pm-lending-6"];
 const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low", "sig-exit-sell", "sig-surge-warn"];
 
-// ---- 1. 完整 fixture → 34 張全產出 ----
+// ---- 1. 完整 fixture → 35 張全產出 ----
 {
   const { cards, skipped } = buildDailyCards(FIX());
-  chk("builder 表共 34 張", FX_CARD_BUILDERS.length === 34, `${FX_CARD_BUILDERS.length}`);
-  chk("完整 fixture 34 張全產出", cards.length === 34, `cards=${cards.length} skipped=${JSON.stringify(skipped)}`);
+  chk("builder 表共 35 張", FX_CARD_BUILDERS.length === 35, `${FX_CARD_BUILDERS.length}`);
+  chk("完整 fixture 35 張全產出", cards.length === 35, `cards=${cards.length} skipped=${JSON.stringify(skipped)}`);
   chk("skipped 空", skipped.length === 0, JSON.stringify(skipped));
   chk("id 集合與 builder 表一致", JSON.stringify(cards.map((c) => c.id)) === JSON.stringify(ALL_IDS));
   chk("每張卡 sub 帶資料日", cards.every((c) => /資料日/.test(c.sub || "")),
@@ -225,6 +231,79 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   chk("ff-1 近5日新→舊＋本週累計（本週=07-21..24 共4日）",
     ff.rows[0].m === "07-24" && /本週累計（4日）/.test(ff.rows[ff.rows.length - 1].m), JSON.stringify(ff.rows.map((r) => r.m)));
 }
+// ---- 2b. 2026-08-16 改版卡：v2-dash-1 三合一看板／ov-6 個股小字／aetf-5 排行形 ----
+{
+  const { cards } = buildDailyCards(FIX());
+  const by = (id) => cards.find((c) => c.id === id);
+  // ① v2-dash-1：三源齊 → 9 列（加權/櫃買/成交值/漲跌家數/外資/投信/自營/期指OI/較上月底）
+  const dash = by("v2-dash-1");
+  chk("dash-1 三源齊 → 9 列", dash && dash.rows.length === 9,
+    dash && JSON.stringify(dash.rows.map((r) => r.m)));
+  chk("dash-1 列序＝加權→櫃買→成交值→漲跌家數→法人→期指",
+    dash && dash.rows.map((r) => r.m).join("|")
+      === "加權|櫃買|成交值|漲跌家數|外資|投信|自營|台指期外資淨未平倉|較上月底（2026-06-30）",
+    dash && dash.rows.map((r) => r.m).join("|"));
+  chk("dash-1 成交值＝上市＋櫃買成交金額（億）",
+    dash && dash.rows[2].r === "上市7780.1億｜櫃買1862.0億", dash && dash.rows[2].r);
+  chk("dash-1 法人淨額沿 hdr-1 口徑（外資 tse+otc 合計 -672.0 億）",
+    dash && dash.rows[4].r === "-672.0億" && dash.rows[4].c === "down", dash && JSON.stringify(dash.rows[4]));
+  chk("dash-1 期指沿 hdr-2 口徑（-76260口／較上月底+6803口）",
+    dash && dash.rows[7].r === "-76260口" && dash.rows[8].r === "+6803口",
+    dash && JSON.stringify(dash.rows.slice(7)));
+  chk("dash-1 標題＝今日總結、sub 帶資料日", dash && dash.title === "今日總結" && /資料日 2026-07-24/.test(dash.sub));
+  // ② ov-6：每列附該業貢獻絕對值前 3 檔（r2 小字）；無 subs_stocks 的業別不帶 r2
+  const ov6 = by("v2-ov-6");
+  chk("ov-6 首列帶個股小字（電信服務業前3檔）",
+    ov6 && ov6.rows[0].r2 === "中華電+5.1、台灣大+1.8、遠傳+0.7", ov6 && ov6.rows[0].r2);
+  chk("ov-6 晶圓製造列帶負貢獻個股", ov6 && ov6.rows[2].r2 === "台積電-451.4、聯電-12.2、力積電-3.1",
+    ov6 && ov6.rows[2].r2);
+  chk("ov-6 subs_stocks 無該業（貨櫃航運）→ 該列無 r2", ov6 && ov6.rows[1].r2 === undefined,
+    ov6 && JSON.stringify(ov6.rows[1]));
+  // ③ aetf-5：paras → rows 排行形（加碼前5＋減碼前5，{l,m,r,r2,c}）
+  const a5 = by("pm-aetf-5");
+  chk("aetf-5 改 rows 形（無 paras）", a5 && (a5.rows || []).length === 3 && !(a5.paras || []).length,
+    a5 && JSON.stringify(a5));
+  chk("aetf-5 首列＝加碼金額最大（6669 +8.0億／+140張）",
+    a5 && a5.rows[0].l === "6669" && a5.rows[0].r === "+8.0億" && a5.rows[0].r2 === "+140張"
+      && a5.rows[0].c === "up", a5 && JSON.stringify(a5.rows[0]));
+  chk("aetf-5 減碼組依 val 升序（2330 在 8210 前）且 c=down",
+    a5 && a5.rows[1].l === "2330" && a5.rows[2].l === "8210" && a5.rows[1].c === "down",
+    a5 && JSON.stringify(a5.rows.slice(1)));
+}
+// ---- 2c. v2-dash-1 部分降級：某源缺→省該組列；三源全缺才 skip ----
+{
+  const dashOf = (fx) => {
+    const { cards, skipped } = buildDailyCards(fx);
+    return { card: cards.find((c) => c.id === "v2-dash-1"), skipped };
+  };
+  const noDs = FIX(); noDs.daysummary = null;
+  const a = dashOf(noDs);
+  chk("缺 daysummary → dash 照發、無加權/成交值列（5 列）", a.card && a.card.rows.length === 5
+    && !a.card.rows.some((r) => r.m === "加權" || r.m === "成交值"),
+    a.card && JSON.stringify(a.card.rows.map((r) => r.m)));
+  chk("缺 daysummary → sub 退 totals 末日", a.card && /資料日 2026-06-22/.test(a.card.sub), a.card && a.card.sub);
+  const noTot = FIX(); noTot.totals = null;
+  const b = dashOf(noTot);
+  chk("缺 totals → dash 照發、無法人列（6 列）", b.card && b.card.rows.length === 6
+    && !b.card.rows.some((r) => r.m === "外資"), b.card && JSON.stringify(b.card.rows.map((r) => r.m)));
+  const noFl = FIX(); noFl.flowsLatest = null;
+  const c = dashOf(noFl);
+  chk("缺 flowsLatest → dash 照發、無期指列（7 列）", c.card && c.card.rows.length === 7
+    && !c.card.rows.some((r) => /台指期/.test(r.m)), c.card && JSON.stringify(c.card.rows.map((r) => r.m)));
+  const none = FIX(); none.daysummary = null; none.totals = null; none.flowsLatest = null;
+  const d = dashOf(none);
+  chk("三源全缺 → dash skip（理由標三源全缺）", !d.card
+    && /三源全缺/.test((d.skipped.find((s) => s.id === "v2-dash-1") || {}).reason || ""),
+    JSON.stringify(d.skipped.find((s) => s.id === "v2-dash-1")));
+}
+// ---- 2d. ov-6 對舊資料（無 subs_stocks 欄）優雅降級：退回現行純次產業列 ----
+{
+  const fx = FIX(); delete fx.daysummary.subs_stocks;
+  const { cards } = buildDailyCards(fx);
+  const ov6 = cards.find((c) => c.id === "v2-ov-6");
+  chk("無 subs_stocks 欄 → ov-6 照發、全列無 r2", ov6 && ov6.rows.length === 3
+    && ov6.rows.every((r) => r.r2 === undefined), ov6 && JSON.stringify(ov6.rows));
+}
 // ---- 3. B 類 9 張 note 標排序欄位 ----
 {
   const { cards } = buildDailyCards(FIX());
@@ -246,7 +325,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   chk("空頭：卡2 skipped reason=regime-bear", sk["sig-dual-buy"] === "regime-bear");
   chk("空頭：卡3-6 照常產出", ["sig-new-high", "sig-new-low", "sig-exit-sell", "sig-surge-warn"]
     .every((id) => cards.some((c) => c.id === id)));
-  chk("空頭：其餘 32 張不受影響", cards.length === 32, `${cards.length}`);
+  chk("空頭：其餘 33 張不受影響", cards.length === 33, `${cards.length}`);
   // regime 未判定 → 卡1/2 照發並在 note 標註
   const fx2 = FIX(); fx2.totals = mkTotals({ days: 10 });
   const r2 = buildDailyCards(fx2);
@@ -277,13 +356,13 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     const skIds = skipped.map((s) => s.id).sort();
     chk(`缺 ${src} → 只有對應卡 skipped`, JSON.stringify(skIds) === JSON.stringify([...ids].sort()),
       `skipped=${JSON.stringify(skIds)}`);
-    chk(`缺 ${src} → 其餘 ${34 - ids.length} 張照常`, cards.length === 34 - ids.length, `${cards.length}`);
+    chk(`缺 ${src} → 其餘 ${35 - ids.length} 張照常`, cards.length === 35 - ids.length, `${cards.length}`);
   }
   // totals 缺：flows-hdr-1 skipped，卡1/2 因 regime 未判定仍照發
   { const fx = FIX(); fx.totals = null;
     const { cards, skipped } = buildDailyCards(fx);
     chk("缺 totals → 只有 flows-hdr-1 skipped（卡1/2 視為未判定照發）",
-      skipped.length === 1 && skipped[0].id === "flows-hdr-1" && cards.length === 33,
+      skipped.length === 1 && skipped[0].id === "flows-hdr-1" && cards.length === 34,
       JSON.stringify(skipped)); }
   // vix 缺：v2-global-1 照發、VIX 欄顯「—」
   { const fx = FIX(); fx.vix = null;
@@ -296,9 +375,9 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     const { cards, skipped } = buildDailyCards(fx);
     const r = cards.find((c) => c.id === "v2-rank-1");
     chk("缺 lastweek → rank-1 照發、無上週括號", skipped.length === 0 && r && !/上週 /.test(r.rows[0].r)); }
-  // 全空 src：34 張全 skipped、不炸
+  // 全空 src：35 張全 skipped、不炸
   { const { cards, skipped } = buildDailyCards({});
-    chk("全空 src → 0 卡、34 skipped、不拋例外", cards.length === 0 && skipped.length === 34,
+    chk("全空 src → 0 卡、35 skipped、不拋例外", cards.length === 0 && skipped.length === 35,
       `cards=${cards.length} skipped=${skipped.length}`); }
   // 舊 schema baseline（Phase A 前，8 欄）→ 卡3/4 skipped 並說明缺欄
   { const fx = FIX();
@@ -314,11 +393,11 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   const { cards } = buildDailyCards(FIX());
   let bubbleErr = null;
   for (const c of cards) { try { cardBubble(c); } catch (e) { bubbleErr = `${c.id}: ${e.message}`; break; } }
-  chk("34 張逐卡過 cardBubble（含誠實原則守門）", bubbleErr === null, bubbleErr);
+  chk("35 張逐卡過 cardBubble（含誠實原則守門）", bubbleErr === null, bubbleErr);
   let msgs = null, carErr = null;
   try { msgs = buildCardCarousels(cards, "股市雷達 2026-07-24 盤後圖卡"); } catch (e) { carErr = e.message; }
   chk("buildCardCarousels 整包不炸", carErr === null, carErr);
-  chk("35 bubble（含免責）→ 3 carousel ≤5 message", msgs && msgs.length === 3, msgs && `${msgs.length}`);
+  chk("35 bubble（無免責卡，2026-08-16 移除）→ 3 carousel ≤5 message", msgs && msgs.length === 3, msgs && `${msgs.length}`);
   chk("每 carousel ≤12 bubble", msgs && msgs.every((m) => m.contents.contents.length <= 12));
   let fb = null, fbErr = null;
   try { fb = cardsFallbackText(cards, "2026-07-24"); } catch (e) { fbErr = e.message; }
@@ -360,7 +439,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
 
 // ---- 8. 形狀壞的源不得全滅（B1 驗收 A2 缺口的回歸測試）----
 // 「非 null 但形狀歪」：rows=42、buy_by_amt={}、dates=42——修正前這三種都會讓
-// 共用 ctx 建構（fxNameMap/fxRegime）拋例外、34 張全滅。
+// 共用 ctx 建構（fxNameMap/fxRegime）拋例外、35 張全滅。
 {
   for (const [label, mut] of [
     ["lending.rows=42", (f) => { f.postmkt.lending.rows = 42; }],
@@ -411,8 +490,8 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   chk("pm-summary-1 不在 FX_ACTIVE_CARDS", !FX_ACTIVE_CARDS.has(FX_LONGFORM_CARD),
     [...FX_ACTIVE_CARDS].join(","));
   chk("FX_LONGFORM_CARD 常數＝pm-summary-1", FX_LONGFORM_CARD === "pm-summary-1");
-  chk("長文卡在 builder 表內（第 34 項）",
-    FX_CARD_BUILDERS.length === 34 && FX_CARD_BUILDERS[33][0] === FX_LONGFORM_CARD,
+  chk("長文卡在 builder 表內（第 35 項）",
+    FX_CARD_BUILDERS.length === 35 && FX_CARD_BUILDERS[34][0] === FX_LONGFORM_CARD,
     FX_CARD_BUILDERS[FX_CARD_BUILDERS.length - 1][0]);
 }
 {
@@ -422,7 +501,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   const sk = Object.fromEntries(skipped.map((s) => [s.id, s.reason]));
   chk("摘要日≠資料日 → skip、理由含「日期不符」", /日期不符/.test(sk[FX_LONGFORM_CARD] || ""),
     sk[FX_LONGFORM_CARD]);
-  chk("摘要日≠資料日 → 只影響長文卡，其餘 33 張照常", cards.length === 33 && skipped.length === 1,
+  chk("摘要日≠資料日 → 只影響長文卡，其餘 34 張照常", cards.length === 34 && skipped.length === 1,
     `cards=${cards.length} skipped=${JSON.stringify(skipped)}`);
 }
 {
@@ -439,7 +518,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     const r = (out.skipped.find((x) => x.id === FX_LONGFORM_CARD) || {}).reason;
     chk(`${label} → 長文卡 skip`, typeof r === "string" && r.length > 0
       && !out.cards.some((c) => c.id === FX_LONGFORM_CARD), JSON.stringify(r));
-    chk(`${label} → 其餘 33 張不連坐`, out.cards.length === 33, `${out.cards.length}`);
+    chk(`${label} → 其餘 34 張不連坐`, out.cards.length === 34, `${out.cards.length}`);
   }
   // 缺 baseline ＝ 沒有可信資料日，無從核對摘要是不是當日的 → 一律 skip（2026-08-07 收緊，
   // 與 buildCardsData「baseline 缺 → date:null → Python 拒渲染」同一套保守立場）。

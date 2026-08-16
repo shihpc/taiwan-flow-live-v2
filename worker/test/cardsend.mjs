@@ -69,8 +69,8 @@ function mkTotals(days = 22) {   // taiex 緩升 → 末日 > 20MA → bull；�
 const IMG = (id, d = TODAY) =>
   `https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/${id}.png?d=${d}`;
 const MANIFEST = (date = TODAY) => ({ date, generated_at: `${date}T22:14:00+08:00`,
-  images: { "sig-dual-buy": IMG("sig-dual-buy", date), "v2-ov-1": IMG("v2-ov-1", date) },
-  ratios: { "sig-dual-buy": "1040:1216" } });
+  images: { "v2-ov-6": IMG("v2-ov-6", date), "v2-dash-1": IMG("v2-dash-1", date) },
+  ratios: { "v2-ov-6": "1040:1216" } });
 const FULL = () => ({
   [URLS.manifest]: MANIFEST(),
   [URLS.baseline]: {   // Phase A 後 schema：stocks [a5,it,fi,y1,y2,ints,nl,its,nh,a20]
@@ -111,6 +111,23 @@ const FULL = () => ({
     subs_all: [{ n: "電信服務業", pts: 7.64, amt_yi: 55.6, share_pct: 0.7, n_stk: 4 }],
     share_top: { n: "晶圓製造", pts: -544.89, amt_yi: 1483.9, share_pct: 19.1, n_stk: 15 },
     pts_top: { n: "電信服務業", pts: 7.64, amt_yi: 55.6, share_pct: 0.7, n_stk: 4 },
+  },
+  // flowsLatest（2026-08-16 加入 FULL：活躍卡裁到 5 張後，需要它才有排行卡驗
+  // 「無圖卡維持文字版型」與 flex 退純文字的資料列）
+  [URLS.flowsLatest]: {
+    date: TODAY,
+    pages: {
+      foreign: {
+        buy_by_amt: [{ code: "3231", name: "緯創", net_amt_k: 5805883 }, { code: "6488", name: "環球晶", net_amt_k: 3290026 }],
+        sell_by_amt: [{ code: "2330", name: "台積電", net_amt_k: -30160000 }],
+        futures_card: { date: TODAY, oi_net_lots: -76260, oi_net_amount_k: -668364,
+          vs_prev_month_lots: 6803, prev_month_end: "2026-06-30" },
+      },
+      trust: {
+        buy_by_amt: [{ code: "2454", name: "聯發科", net_amt_k: 1500000 }],
+        sell_by_amt: [{ code: "2303", name: "聯電", net_amt_k: -800000 }],
+      },
+    },
   },
 });
 
@@ -212,7 +229,9 @@ const FULL = () => ({
   chk("單源失敗 → 該源卡進 skipped（較全源多）", out.skippedCards > withDs.skippedCards,
     `missing=${out.skippedCards} full=${withDs.skippedCards}`);
   const flexStr = JSON.stringify(lineCalls(spy)[0].body);
-  chk("單源失敗 → 該源卡不在 payload", !flexStr.includes("市場指數") && !flexStr.includes("今日總結"));
+  chk("單源失敗 → 該源獨佔卡不在 payload（ov-6 隨 daysummary 缺席）", !flexStr.includes("指數貢獻"), flexStr.slice(0, 120));
+  chk("單源失敗 → 看板卡部分降級（無加權/成交值列、法人列仍在）",
+    flexStr.includes("今日總結") && !flexStr.includes("加權") && flexStr.includes("外資"), flexStr.slice(0, 200));
   chk("單源失敗 → 仍寫 KV pushed", kv._m.get(DEDUP_KEY) === "pushed");
 }
 
@@ -332,11 +351,11 @@ const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.co
     heroed.every((b) => b.hero.type === "image" && b.hero.size === "full"
       && b.hero.aspectMode === "cover" && b.hero.url.includes("/data/cards/latest/")
       && b.hero.url.includes(`?d=${TODAY}`)), JSON.stringify(heroed[0] && heroed[0].hero));
-  const dual = heroed.find((b) => b.hero.url.includes("sig-dual-buy"));
-  chk("有 ratios 的卡用實際圖比例", dual && dual.hero.aspectRatio === "1040:1216",
-    dual && dual.hero.aspectRatio);
-  const ov1 = heroed.find((b) => b.hero.url.includes("v2-ov-1"));
-  chk("無 ratios 的卡退預設 3:4", ov1 && ov1.hero.aspectRatio === "3:4", ov1 && ov1.hero.aspectRatio);
+  const ov6 = heroed.find((b) => b.hero.url.includes("v2-ov-6"));
+  chk("有 ratios 的卡用實際圖比例", ov6 && ov6.hero.aspectRatio === "1040:1216",
+    ov6 && ov6.hero.aspectRatio);
+  const dash = heroed.find((b) => b.hero.url.includes("v2-dash-1"));
+  chk("無 ratios 的卡退預設 3:4", dash && dash.hero.aspectRatio === "3:4", dash && dash.hero.aspectRatio);
   chk("hero bubble body 精簡（無 fxRow 的 l 欄 flex:2 結構、仍有標題）",
     heroed.every((b) => !JSON.stringify(b.body).includes('"layout":"horizontal"')
       && JSON.stringify(b.body).includes("資料日")), JSON.stringify(heroed[0] && heroed[0].body).slice(0, 120));
@@ -364,7 +383,7 @@ const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.co
   await pushDailyCards({ ...ENV_LINE, FLOW_KV: fakeKV() }, TP, mkFetch(byUrl2, spy2, { lineFailFlex: true }));
   const txt = lineCalls(spy2)[1].body.messages[0].text;
   chk("flex 失敗退純文字 → hero 卡的資料列仍在（卡物件保留 rows）",
-    txt.includes("土洋同買") && txt.includes("3231"), txt.slice(0, 200));
+    txt.includes("外資買賣超排行") && txt.includes("3231"), txt.slice(0, 200));
 }
 {
   // attachCardImages 邊界：非 https URL 不掛、壞 ratio 不掛 imgRatio、images 非物件不掛
@@ -385,10 +404,13 @@ const flexBubbles = (spy) => lineCalls(spy)[0].body.messages.flatMap((m) => m.co
   chk("卡片全在 FX_ACTIVE_CARDS 白名單內（長文卡除外）", out.cards.length > 0
     && out.cards.every((c) => FX_ACTIVE_CARDS.has(c.id) || c.id === FX_LONGFORM_CARD),
   out.cards.map((c) => c.id).join(","));
-  chk("含活躍卡 v2-ov-1／sig-dual-buy", ["v2-ov-1", "sig-dual-buy"].every((id) =>
-    out.cards.some((c) => c.id === id)));
+  chk("含活躍卡 v2-dash-1／v2-ov-6／flows-foreign-1", ["v2-dash-1", "v2-ov-6", "flows-foreign-1"]
+    .every((id) => out.cards.some((c) => c.id === id)), out.cards.map((c) => c.id).join(","));
   chk("不含被裁剪卡（v2-ov-5／sig-new-high 有源也不出）",
     !out.cards.some((c) => c.id === "v2-ov-5" || c.id === "sig-new-high"));
+  chk("不含 2026-08-16 移出的卡（sig-dual-buy／v2-ov-1／flows-hdr-1／flows-hdr-2）",
+    !out.cards.some((c) => ["sig-dual-buy", "sig-sub-surge", "sig-exit-sell", "sig-surge-warn",
+      "v2-ov-1", "flows-hdr-1", "flows-hdr-2"].includes(c.id)), out.cards.map((c) => c.id).join(","));
   chk("卡片帶渲染所需欄位（title＋rows|paras）", out.cards.every((c) =>
     c.title && ((c.rows || []).length || (c.paras || []).length)));
   chk("有 FINMIND_TOKEN 也不打 FinMind（noVix）", !spy.some((c) => c.url.includes("finmind")));
@@ -429,7 +451,7 @@ const imgMsgs = (spy) => lineCalls(spy)[0].body.messages.filter((m) => m.type ==
     ["缺 images 整段", { date: TODAY, previews: M.previews }, TODAY],
     ["images 缺長文卡", { date: TODAY, images: MANIFEST().images, previews: M.previews }, TODAY],
     ["缺 previews 整段", { date: TODAY, images: M.images }, TODAY],
-    ["previews 缺長文卡", { date: TODAY, images: M.images, previews: { "v2-ov-1": LF_PRV } }, TODAY],
+    ["previews 缺長文卡", { date: TODAY, images: M.images, previews: { "v2-ov-6": LF_PRV } }, TODAY],
     ["url 非 https", { date: TODAY, images: { [FX_LONGFORM_CARD]: "http://x/lf.png" }, previews: M.previews }, TODAY],
     ["preview 非 https", { date: TODAY, images: M.images, previews: { [FX_LONGFORM_CARD]: "http://x/p.png" } }, TODAY],
     ["url 非字串", { date: TODAY, images: { [FX_LONGFORM_CARD]: 42 }, previews: M.previews }, TODAY],

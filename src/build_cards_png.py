@@ -9,8 +9,8 @@
 #   排行卡：深藍漸層底、白色粗體標題＋右上資料日、每列＝名次（前三名金/銀/銅圓章）＋
 #           代號（小字藍）＋名稱（白粗）＋金色漸層橫條（比例化於該卡最大絕對值）＋
 #           右側數值（正紅負綠、千分位）；底部灰字 note＋免責句。
-#   看板卡（DASH_IDS：ov-1 總結／hdr-1 三大法人／hdr-2 台指期）：同色系 2 欄大數字格。
-#   paras 卡（如 pm-aetf-5）：置中大字逐段。
+#   看板卡（DASH_IDS：dash-1 三合一看板；舊 ov-1／hdr-1／hdr-2）：同色系 2 欄大數字格。
+#   paras 卡（如 v2-ov-5 定調句）：置中大字逐段。
 #   以 1040px 寬設計、高依內容動態（排行每列 96px）；**輸出前一律縮到 LINE Flex image
 #   的 1024×1024 上限內**（fit_line_limit，兩軸都限，官方三處一致），PNG <1MB。
 #
@@ -70,8 +70,9 @@ LONGFORM_COLORS = 64              # palette 量化（實測 1.2MB→0.29MB，PSN
 LINE_IMG_MAX = 1024           # LINE Flex image 官方上限 1024×1024 px（兩軸都限）
 DISCLAIMER = "數據僅供參考，不代表投資建議"
 
-# 看板卡（非排行型）：大數字格版型
-DASH_IDS = {"v2-ov-1", "flows-hdr-1", "flows-hdr-2"}
+# 看板卡（非排行型）：大數字格版型。v2-dash-1＝三合一看板（2026-08-16 取代
+# ov-1/hdr-1/hdr-2 三張，舊三張 id 留著無害——builder 保留、隨白名單復活即用）
+DASH_IDS = {"v2-ov-1", "flows-hdr-1", "flows-hdr-2", "v2-dash-1"}
 
 # 色票（深藍＋金；正紅負綠沿用全站慣例、亮度調高配深底）
 C_BG_TOP = (26, 58, 107)      # #1A3A6B
@@ -351,7 +352,7 @@ def render_ranking(card, F_B, F_R):
 
 
 def render_dashboard(card, F_B, F_R):
-    """看板卡（ov-1／hdr-1／hdr-2）：2 欄大數字格。"""
+    """看板卡（DASH_IDS：dash-1 三合一看板；舊 ov-1／hdr-1／hdr-2）：2 欄大數字格。"""
     from PIL import Image, ImageDraw
     rows = card.get("rows") or []
     probe = ImageDraw.Draw(Image.new("RGB", (W, 8)))
@@ -380,7 +381,7 @@ def render_dashboard(card, F_B, F_R):
 
 
 def render_paras(card, F_B, F_R):
-    """paras 卡（如 pm-aetf-5 進出個股）：置中大字逐段。"""
+    """paras 卡（如 v2-ov-5 定調句；pm-aetf-5 2026-08-16 改 rows 後不再走此型）：置中大字逐段。"""
     from PIL import Image, ImageDraw
     paras = [str(p) for p in (card.get("paras") or [])]
     probe = ImageDraw.Draw(Image.new("RGB", (W, 8)))

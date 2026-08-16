@@ -173,9 +173,37 @@ def test_chain_dedup():
     check("組裝（3 檔）通過門檻", zu is not None and zu["n_stk"] == 3)
 
 
+# ---------- 5. daysummary subs_stocks：次產業內貢獻絕對值前 3 檔（2026-08-16，ov-6 改版）----------
+
+def test_sub_stocks_top():
+    cl = {
+        "3101": {"n": "甲", "t": "twse", "p": [["半導體", "IC設計"], ["半導體", "IC封測"]]},
+        "3102": {"n": "乙", "t": "twse", "p": [["半導體", "IC設計"]]},
+        "3103": {"n": "丙", "t": "twse", "p": [["半導體", "IC設計（含IP）"]]},   # clean_sub 測點
+        "3104": {"n": "丁", "t": "tpex", "p": [["半導體", "IC設計"]]},           # 上櫃 → 不進
+        "3105": {"n": "戊", "t": "twse", "p": [["半導體", "IC設計"]]},
+        "3106": {"n": "己", "t": "twse", "p": [["半導體", "IC設計"]]},
+        "3107": {"n": "庚", "t": "twse", "p": [["電子", "組裝"]]},               # 非目標次產業
+    }
+    stocks = {   # [amt, pts]（i_pts=1）
+        "3101": [1e8, 5.0], "3102": [1e8, -8.0], "3103": [1e8, 2.0],
+        "3104": [1e8, 99.0], "3105": [1e8, 0], "3106": [1e8, 1.0], "3107": [1e8, 7.0],
+    }
+    got = bd.sub_stocks_top(stocks, cl, 1, {"IC設計"})
+    check("只含目標次產業", set(got) == {"IC設計"})
+    lst = got.get("IC設計") or []
+    check("依貢獻絕對值降序取前 3（-8.0 居首）", [r["c"] for r in lst] == ["3102", "3101", "3103"])
+    check("pts 保留正負且 round 2 位", lst and lst[0]["pts"] == -8.0 and lst[1]["pts"] == 5.0)
+    check("clean_sub 對齊（3103 的「IC設計（含IP）」歸入 IC設計）", any(r["c"] == "3103" for r in lst))
+    check("上櫃股不進（3104 排除）", all(r["c"] != "3104" for r in lst))
+    check("pts=0 不進（3105 排除）", all(r["c"] != "3105" for r in lst))
+    check("帶股名 n", lst and lst[0]["n"] == "乙")
+    check("目標次產業無成員 → 不出現該鍵", bd.sub_stocks_top(stocks, cl, 1, {"不存在"}) == {})
+
+
 def main():
     for fn in [test_nh_nl_symmetry, test_sub_signal_stats,
-               test_a20_denominator, test_chain_dedup]:
+               test_a20_denominator, test_chain_dedup, test_sub_stocks_top]:
         print(f"\n--- {fn.__name__} ---")
         fn()
     print(f"\n{'=' * 50}")

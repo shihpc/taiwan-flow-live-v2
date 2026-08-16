@@ -105,16 +105,18 @@ def test_render_end_to_end():
                   manifest["images"][cid]
                   == f"{bc.RAW_BASE}/{cid}.png?d={data['date']}")
         # 版型分派：排行卡高度隨列數走。落檔會經 fit_line_limit 等比縮放，
-        # 逐列高度的算術只在**縮放前**精確成立，故拆成兩條分開驗：
+        # 逐列高度的算術只在**縮放前**精確成立，故拆成兩條分開驗。
+        # （2026-08-16 白名單裁剪後 sig-dual-buy 不在 fixture，改用同為排行型且
+        # 仍在白名單的 flows-trust-1（5 列）對照 flows-foreign-1（10 列））
         card_f = next(c for c in data["cards"] if c["id"] == "flows-foreign-1")
-        card_d = next(c for c in data["cards"] if c["id"] == "sig-dual-buy")
+        card_t = next(c for c in data["cards"] if c["id"] == "flows-trust-1")
         raw_f = bc.render_card(card_f, F_B, F_R).height
-        raw_d = bc.render_card(card_d, F_B, F_R).height
-        check("（縮放前）排行卡高度隨列數動態：10 列較 3 列高 ≥6 個列高",
-              raw_f - raw_d >= 6 * bc.ROW_H)
+        raw_t = bc.render_card(card_t, F_B, F_R).height
+        check("（縮放前）排行卡高度隨列數動態：10 列較 5 列高 ≥4 個列高",
+              raw_f - raw_t >= 4 * bc.ROW_H)
         h_foreign = Image.open(out / "flows-foreign-1.png").height
-        h_dual = Image.open(out / "sig-dual-buy.png").height
-        check(f"（落檔後）列多者仍較高（{h_foreign} > {h_dual}）", h_foreign > h_dual)
+        h_trust = Image.open(out / "flows-trust-1.png").height
+        check(f"（落檔後）列多者仍較高（{h_foreign} > {h_trust}）", h_foreign > h_trust)
         mf = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         check("manifest.json 落地且含 generated_at（+08:00）",
               mf["images"] == manifest["images"] and "+08:00" in mf["generated_at"])

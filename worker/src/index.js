@@ -1727,10 +1727,11 @@ export function disclaimerBubble() {
   return cardBubble({ id: "_disclaimer", title: "關於這份清單",
     paras: [FX_DISCLAIMER], foot: "口徑與回測依據：backtest/report_sorting.md" });
 }
-// 卡片陣列 → messages 陣列（每 carousel ≤12 bubble、≤50KB；≤5 message；免責卡固定壓底）
+// 卡片陣列 → messages 陣列（每 carousel ≤12 bubble、≤50KB；≤5 message）。
+// 2026-08-16（使用者指示）：不再壓底免責卡——disclaimerBubble／FX_DISCLAIMER 保留
+// （純文字降級版 cardsFallbackText 仍帶免責句），只有 carousel 不再附這張卡。
 export function buildCardCarousels(cards, altText) {
   const bubbles = cards.map(cardBubble);
-  bubbles.push(disclaimerBubble());
   const messages = [];
   for (let i = 0; i < bubbles.length; i += 12) {
     const contents = bubbles.slice(i, i + 12);
@@ -1984,11 +1985,21 @@ function fxCardOv5(s) {             // v2-ov-5 規則式定調句
   const d = fxNeed(s.daysummary, "daysummary");
   return { title: "今日定調", sub: `資料日 ${d.date}`, paras: [fxSanitize(fxNeed(d.tone, "daysummary.tone"))] };
 }
-function fxCardOv6(s) {             // v2-ov-6 貢獻點發散·次產業
+function fxCardOv6(s) {             // v2-ov-6 貢獻點發散·次產業（2026-08-16 附每業貢獻前 3 檔個股）
   const d = fxNeed(s.daysummary, "daysummary");
-  const rows = [...(fxNeed(d.subs_top5, "daysummary.subs_top5")).slice(0, 5), ...(d.subs_bot3 || []).slice(0, 3)].map(fxPtsRow);
+  // subs_stocks＝daysummary 新欄（{次產業名:[{c,n,pts}…]}，build_daysummary.py 2026-08-16 起產出）。
+  // 欄位不存在（舊資料）→ 退回現行純次產業列，合併上線當晚舊 latest.json 不會壞。
+  const ss = d.subs_stocks && typeof d.subs_stocks === "object" ? d.subs_stocks : null;
+  const mk = (r) => {
+    const row = fxPtsRow(r);
+    const st = ss && Array.isArray(ss[r.n]) ? ss[r.n].slice(0, 3) : [];
+    if (st.length) row.r2 = st.map((o) => `${o.n}${fxSgn(o.pts)}`).join("、");
+    return row;
+  };
+  const rows = [...(fxNeed(d.subs_top5, "daysummary.subs_top5")).slice(0, 5), ...(d.subs_bot3 || []).slice(0, 3)].map(mk);
   if (!rows.length) throw new Error("subs_top5/subs_bot3 空");
-  return { title: "指數貢獻·次產業", sub: `資料日 ${d.date}`, rows, note: "貢獻點＝權重×漲跌的會計分解，全市場加總＝指數漲跌點" };
+  return { title: "指數貢獻·次產業", sub: `資料日 ${d.date}`, rows,
+    note: "貢獻點＝權重×漲跌的會計分解，全市場加總＝指數漲跌點；小字＝該業貢獻絕對值前 3 檔" };
 }
 function fxCardOv7(s) {             // v2-ov-7 貢獻點發散·產業鏈（daysummary Phase A 補欄）
   const d = fxNeed(s.daysummary, "daysummary");
@@ -2038,6 +2049,51 @@ function fxCardFlowsHdr2(s) {       // flows-hdr-2 台指期外資未平倉
   if (fc.vs_prev_month_lots != null)
     rows.push({ m: `較上月底（${fc.prev_month_end || "—"}）`, r: `${fc.vs_prev_month_lots > 0 ? "+" : ""}${fc.vs_prev_month_lots}口`, c: fxC(fc.vs_prev_month_lots) });
   return { title: "台指期外資未平倉", sub: `資料日 ${fc.date}`, rows };
+}
+// v2-dash-1 三合一看板（2026-08-16）：ov-1 今日總結＋flows-hdr-1 三大法人＋flows-hdr-2
+// 台指期合併成一張（舊三張 builder 保留、僅移出白名單）。降級語意：三源（daysummary／
+// totals／flowsLatest.futures_card）各自獨立，某源缺→省略該組列，三源全缺才 skip 整卡。
+function fxCardDash1(s) {
+  const rows = [];
+  let sub = null;
+  const d = s.daysummary;                       // ── daysummary 組：加權／櫃買／成交值／漲跌家數
+  if (d && d.index) {
+    const tse = d.index.tse || {}, otc = d.index.otc || {};
+    if (tse.chgP != null) rows.push({ m: "加權", r: `${fxSgn(tse.chgP, "點")}（${fxSgn(tse.chg, "%")}）`, c: fxC(tse.chg) });
+    if (otc.chgP != null) rows.push({ m: "櫃買", r: `${fxSgn(otc.chgP, "點")}（${fxSgn(otc.chg, "%")}）`, c: fxC(otc.chg) });
+    // 成交值＝成交金額口徑（使用者 2026-08-16 裁定）：上市＋櫃買各標億元
+    const amt = [];
+    if (tse.amt_yi != null) amt.push(`上市${fxR1(tse.amt_yi)}億`);
+    if (otc.amt_yi != null) amt.push(`櫃買${fxR1(otc.amt_yi)}億`);
+    if (amt.length) rows.push({ m: "成交值", r: amt.join("｜"), c: "neutral" });
+    if (d.breadth) rows.push({ m: "漲跌家數", r: `漲${d.breadth.up}／跌${d.breadth.down}`, c: "neutral" });
+    sub = sub || d.date;
+  }
+  const t = s.totals;                           // ── totals 組：三大法人淨額（沿 fxCardFlowsHdr1 邏輯）
+  const td = t && Array.isArray(t.dates) ? t.dates[t.dates.length - 1] : null;
+  const trow = td && t.rows ? t.rows[td] : null;
+  if (trow) {
+    const sum = (f) => {
+      const a = trow.tse ? trow.tse[f] : null, b = trow.otc ? trow.otc[f] : null;
+      return a == null && b == null ? null : (a || 0) + (b || 0);
+    };
+    for (const [n, f] of [["外資", "f_net_k"], ["投信", "t_net_k"], ["自營", "d_net_k"]]) {
+      const v = sum(f);
+      rows.push({ m: n, r: v == null ? "—" : fxSgn(fxYiK(v), "億"), c: v == null ? "neutral" : fxC(v) });
+    }
+    sub = sub || td;
+  }
+  const fc = s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages.foreign
+    && s.flowsLatest.pages.foreign.futures_card;  // ── futures 組：台指期外資未平倉（沿 fxCardFlowsHdr2）
+  if (fc && fc.oi_net_lots != null) {
+    rows.push({ m: "台指期外資淨未平倉", r: `${fc.oi_net_lots > 0 ? "+" : ""}${fc.oi_net_lots}口`, c: fxC(fc.oi_net_lots) });
+    if (fc.vs_prev_month_lots != null)
+      rows.push({ m: `較上月底（${fc.prev_month_end || "—"}）`, r: `${fc.vs_prev_month_lots > 0 ? "+" : ""}${fc.vs_prev_month_lots}口`, c: fxC(fc.vs_prev_month_lots) });
+    sub = sub || fc.date;
+  }
+  if (!rows.length) return { skip: "daysummary/totals/flowsLatest 三源全缺" };
+  return { title: "今日總結", sub: `資料日 ${sub}`, rows,
+    note: "外資／投信／自營＝當日買賣超淨額（上市＋上櫃）" };
 }
 function fxCardFlowsEtf1(s) {       // flows-etf-1 ETF 概況三組
   const st = fxNeed(s.flowsLatest && s.flowsLatest.pages && s.flowsLatest.pages.etf
@@ -2180,16 +2236,16 @@ function fxCardAetf4(s) {           // pm-aetf-4 主動ETF 加減碼明細（aet
   return { title: "主動ETF 加減碼明細", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`,
     rows: [...up.map(mk), ...dn.map(mk)], note: "依加減碼金額（val）排序：加碼前 4、減碼前 4" };
 }
-function fxCardAetf5(s) {           // pm-aetf-5 主動ETF 進出個股（依 zh 正負分組）
+function fxCardAetf5(s) {           // pm-aetf-5 主動ETF 進出個股（2026-08-16 改排行 rows 形，比照 fxCardInstRank）
   const st = fxNeed(s.aetfDiff && s.aetfDiff.stocks, "aetfDiff.stocks");
-  const up = st.filter((o) => (o.zh || 0) > 0).sort((a, b) => (b.val || 0) - (a.val || 0));
-  const dn = st.filter((o) => (o.zh || 0) < 0).sort((a, b) => (a.val || 0) - (b.val || 0));
+  const up = st.filter((o) => (o.zh || 0) > 0).sort((a, b) => (b.val || 0) - (a.val || 0)).slice(0, 5);
+  const dn = st.filter((o) => (o.zh || 0) < 0).sort((a, b) => (a.val || 0) - (b.val || 0)).slice(0, 5);
   if (!up.length && !dn.length) return { skip: "本日無主動ETF進出個股" };
-  const paras = [];
-  if (up.length) paras.push(`加碼（${up.length}檔）：${up.slice(0, 8).map((o) => o.n || o.c).join("、")}`);
-  if (dn.length) paras.push(`減碼（${dn.length}檔）：${dn.slice(0, 8).map((o) => o.n || o.c).join("、")}`);
-  return { title: "主動ETF 進出個股", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`, paras,
-    note: "依持股張數變化（zh）正負分組，組內依金額（val）降序" };
+  const mk = (o) => ({ l: o.c, m: o.n || o.c, r: fxSgn(fxYi(o.val || 0), "億"),
+    c: fxC(o.val || 0), r2: fxLots(o.zh || 0) });
+  return { title: "主動ETF 進出個股", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`,
+    rows: [...up.map(mk), ...dn.map(mk)],
+    note: "依加減碼金額（val）排序：加碼前 5、減碼前 5，張數為佐證量體" };
 }
 function fxCardLending(s, field, title, fieldLabel) {   // pm-lending-3/4/6 共用（單位：張）
   const ld = fxNeed(s.postmkt && s.postmkt.lending, "postmkt.lending");
@@ -2201,7 +2257,7 @@ function fxCardLending(s, field, title, fieldLabel) {   // pm-lending-3/4/6 共�
   return { title, sub: `資料日 ${ld.date}`, rows, note: `依${fieldLabel}（${field}）降序` };
 }
 
-// 33 張逐卡建構表（id → builder）。順序＝規格 3B.5 主題分組的粗排；C 類 5 張與
+// 35 張逐卡建構表（id → builder）。順序＝規格 3B.5 主題分組的粗排；C 類 5 張與
 // 第二期圖表卡（v2-ov-9/10）不在表內。
 export const FX_CARD_BUILDERS = [
   ["sig-sub-surge", fxCardSubSurge], ["sig-dual-buy", fxCardDualBuy],
@@ -2211,6 +2267,7 @@ export const FX_CARD_BUILDERS = [
   ["v2-ov-6", fxCardOv6], ["v2-ov-7", fxCardOv7], ["v2-ov-8", fxCardOv8],
   ["v2-ov-14", fxCardOv14], ["v2-chain-1", fxCardChain1],
   ["flows-hdr-1", fxCardFlowsHdr1], ["flows-hdr-2", fxCardFlowsHdr2],
+  ["v2-dash-1", fxCardDash1],
   ["flows-etf-1", fxCardFlowsEtf1], ["flows-ff-1", fxCardFF1],
   ["pm-block-1", fxCardBlock1], ["pm-mktbal-1", fxCardMktbal1], ["pm-mktbal-2", fxCardMktbal2],
   ["news-morning-2", fxCardMorning2], ["news-morning-3", fxCardMorning3], ["news-morning-4", fxCardMorning4],
@@ -2228,14 +2285,14 @@ export const FX_CARD_BUILDERS = [
 // 觀測值，也違反「晚間路徑零改動」）。AM 場由 buildCardsData(slot=am) 另行組裝。
 // 2026-07-30 內容裁剪（使用者授權以投資人角度評選）：39→11 張，判準＝
 // 「不開網站也想送到眼前、會影響明天的決定、更新頻率配得上每日推播」。
+// 2026-08-16 二次裁剪（使用者指示）：11→5 張——sig 四張（sub-surge／dual-buy／
+// exit-sell／surge-warn）移出；v2-ov-1＋flows-hdr-1＋flows-hdr-2 合併成 v2-dash-1。
 // builder 全保留——砍掉的卡加回這個清單即復活。詳見 spec 3C 節。
 export const FX_ACTIVE_CARDS = new Set([
-  "v2-ov-1", "v2-ov-6",                       // 大盤總結、次產業貢獻發散
-  "flows-hdr-1", "flows-hdr-2",               // 三大法人、台指期未平倉
+  "v2-dash-1",                                // 三合一看板（大盤總結＋三大法人＋台指期）
+  "v2-ov-6",                                  // 次產業貢獻發散（附每業前 3 檔個股）
   "flows-foreign-1", "flows-trust-1",         // 外資／投信買賣超排行
   "pm-aetf-5",                                // 主動ETF進出個股（差異化資訊）
-  "sig-sub-surge", "sig-dual-buy",            // 卡1 次產業湧入、卡2 土洋同買
-  "sig-exit-sell", "sig-surge-warn",          // 卡5 退出＋法人賣、卡6 追高警示
 ]);
 // 盤後分析摘要長文卡：postmkt data/summary/<date>-pm.json 的 synthesis 全文。
 // 使用者 2026-08-07 定案採「保留全文＋改免責句」（另兩案為改 prompt／只取綜合研判節）：
@@ -2329,7 +2386,7 @@ export function fxCardMorningBrief(s) {
 export function buildDailyCards(src) {
   const s = src || {};
   // ctx 三件各自帶保底：任何一件建構失敗只降級該件（names 空 Map／regime 未判定／
-  // flows null），逐卡 builder 自行面對降級後的 ctx——不讓共用層拖垮 33 張
+  // flows null），逐卡 builder 自行面對降級後的 ctx——不讓共用層拖垮全表卡片
   const ctx = {};
   try { ctx.names = fxNameMap(s); } catch { ctx.names = new Map(); }
   try { ctx.regime = fxRegime(s.totals); } catch { ctx.regime = { regime: "bull", undetermined: true }; }
@@ -2399,7 +2456,7 @@ export function cardSourceUrls(env, dateISO, slot = "pm") {
 // 喚醒已抓過，這裡直接吃快取不重抓（快取鍵＝原始 URL，fetchProduct 的 cache-buster 不影響）。
 // VIX 走既有 finFuturesVix（其內部用全域 fetch、非注入式）——僅在 FINMIND_TOKEN 有設時打，
 // 失敗給 null（v2-global-1 顯「—」不擋卡）；離線測試不設 token 即零真實網路。
-// opts.noVix：/cards/data 端點用（FX_ACTIVE_CARDS 11 張皆不用 vix，公開端點不必打 FinMind）。
+// opts.noVix：/cards/data 端點用（FX_ACTIVE_CARDS 活躍卡皆不用 vix，公開端點不必打 FinMind）。
 export async function fetchCardSources(env, tp, fetchFn = fetch, opts = {}) {
   const getP = opts.getProduct || ((u) => fetchProduct(u, fetchFn).catch(() => null));
   const urls = cardSourceUrls(env, tp.date, opts.slot || "pm");
@@ -2416,7 +2473,7 @@ export async function fetchCardSources(env, tp, fetchFn = fetch, opts = {}) {
 // /cards/data 端點主體（PNG 渲染管線的上游，spec 3C）：卡片邏輯唯一來源＝
 // buildDailyCards，Python 只渲染不算數。輸出＝FX_ACTIVE_CARDS 過濾＋assertCardAllowed
 // 縱深過濾後的卡片資料（與 pushDailyCards ⑤ 同一套守門——PNG 與文字版看到同一份內容）。
-// 資料全是公開 raw JSON 的加工，無需鑑權；noVix＝活躍 11 張皆不用 vix，不打 FinMind。
+// 資料全是公開 raw JSON 的加工，無需鑑權；noVix＝活躍卡皆不用 vix，不打 FinMind。
 export async function buildCardsData(env, tp, fetchFn = fetch, opts = {}) {
   const slot = opts.slot === "am" ? "am" : "pm";
   const src = await fetchCardSources(env, tp, fetchFn, { ...opts, slot, noVix: true });

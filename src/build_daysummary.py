@@ -113,6 +113,29 @@ def agg_multi(stocks: dict, cl: dict, i_amt: int, i_pts: int, i_chg, level: int)
     return [s for s in agg.values() if s["n_stk"] >= 3]
 
 
+def sub_stocks_top(stocks: dict, cl: dict, i_pts: int, target_subs: set, k: int = 3) -> dict:
+    """次產業 → 該業內指數貢獻絕對值前 k 檔個股（純函式，離線可測；LINE 圖卡 ov-6 用）。
+
+    只算 target_subs（呼叫端傳 subs_top5＋subs_bot3 出現的次產業，控制檔案大小）；
+    個股→次產業歸屬同 agg_multi level=1（{p[1]} 去重），比對前先 clean_sub——
+    subs_top5/bot3 的名稱是 clean_sub 過的，兩邊口徑要一致。
+    回傳 {次產業名: [{c,n,pts}…]}，無成員的次產業不出現。"""
+    per: dict[str, list] = {n: [] for n in target_subs}
+    for code, v in stocks.items():
+        info = cl.get(code)
+        if not info or info.get("t") != "twse" or not info.get("p"):
+            continue
+        if not isinstance(v, (list, tuple)) or len(v) <= i_pts:
+            continue
+        pts = v[i_pts] or 0
+        if not pts:
+            continue
+        for name in {clean_sub(p[1]) for p in info["p"]}:
+            if name in per:
+                per[name].append({"c": code, "n": info.get("n") or code, "pts": round(pts, 2)})
+    return {n: sorted(lst, key=lambda r: -abs(r["pts"]))[:k] for n, lst in per.items() if lst}
+
+
 def build(date: str) -> int:
     live = get_json(f"{WORKER}/live?t={int(time.time()*1000)}")
     ts = (live.get("ts") or "")[:10]
@@ -168,6 +191,11 @@ def build(date: str) -> int:
     chain_top5 = [sub_row(s) for s in sorted(chains, key=lambda s: -s["pts"])[:5] if s["pts"] > 0]
     chain_bot3 = [sub_row(s) for s in sorted(chains, key=lambda s: s["pts"])[:3] if s["pts"] < 0]
     subs_all = [sub_row(s) for s in sorted(subs, key=lambda s: -s["pts"])]
+    # ---- subs_stocks（2026-08-16，LINE 圖卡 ov-6 改版）：只含 subs_top5＋subs_bot3
+    # 出現的次產業，每業取貢獻絕對值前 3 檔（控制檔案大小；additive，舊消費者不受影響）
+    subs_stocks = sub_stocks_top(
+        live.get("stocks") or {}, cl, i_pts,
+        {r["n"] for r in subs_top5 + subs_bot3})
     share_top = sub_row(max(subs, key=lambda s: s["amt"])) if subs else None
     pts_top_cand = max(subs, key=lambda s: s["pts"]) if subs else None
     pts_top = sub_row(pts_top_cand) if pts_top_cand and pts_top_cand["pts"] > 0 else None
@@ -228,6 +256,7 @@ def build(date: str) -> int:
         "stocks_bot3": stocks_bot3,
         "subs_top5": subs_top5,
         "subs_bot3": subs_bot3,
+        "subs_stocks": subs_stocks,
         "share_top": share_top,
         "pts_top": pts_top,
         "chain_top5": chain_top5,

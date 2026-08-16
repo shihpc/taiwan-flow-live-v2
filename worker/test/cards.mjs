@@ -107,27 +107,26 @@ const mkCard = (i) => ({
   chk("白名單恰為 5 張", FX_BLOCKED_CARDS.size === 5);
 }
 
-// ---- carousel 切分與上限 ----
+// ---- carousel 切分與上限（2026-08-16 起不再壓底免責卡）----
 {
   const cards14 = Array.from({ length: 14 }, (_, i) => mkCard(i));
   const msgs = buildCardCarousels(cards14, "股市雷達 07-28");
-  // 14 卡 + 1 免責 = 15 bubble → 12 + 3
-  chk("15 bubble 切成 2 carousel", msgs.length === 2);
+  // 14 卡 = 14 bubble → 12 + 2（無免責卡）
+  chk("14 bubble 切成 2 carousel", msgs.length === 2);
   chk("首個 carousel 恰 12 bubble", msgs[0].contents.contents.length === 12);
-  chk("次個 carousel 3 bubble", msgs[1].contents.contents.length === 3);
-  const last = msgs[1].contents.contents.at(-1);
-  chk("免責卡固定壓底", JSON.stringify(last).includes("關於這份清單"));
+  chk("次個 carousel 2 bubble", msgs[1].contents.contents.length === 2);
+  chk("payload 不含免責卡", !JSON.stringify(msgs).includes("關於這份清單"));
   chk("每則有 altText 且 ≤1500", msgs.every((m) => m.altText && m.altText.length <= 1500));
   chk("同 carousel 內 size 一致",
     msgs.every((m) => new Set(m.contents.contents.map((b) => b.size)).size === 1));
   chk("每 carousel < 50KB", msgs.every((m) => JSON.stringify(m.contents).length < 50000));
-  // 38 張（第一期實際卡數）→ 39 bubble → 4 carousel，仍 ≤5 message
+  // 38 張（第一期實際卡數）→ 38 bubble → 4 carousel，仍 ≤5 message
   const msgs38 = buildCardCarousels(Array.from({ length: 38 }, (_, i) => mkCard(i)), "alt");
-  chk("38 卡 → 4 carousel（12/12/12/3）", msgs38.length === 4
-    && msgs38.map((m) => m.contents.contents.length).join(",") === "12,12,12,3");
-  // 60 卡 → 61 bubble → 6 carousel → 超過 5 要炸
+  chk("38 卡 → 4 carousel（12/12/12/2）", msgs38.length === 4
+    && msgs38.map((m) => m.contents.contents.length).join(",") === "12,12,12,2");
+  // 61 卡 → 61 bubble → 6 carousel → 超過 5 要炸（60 卡恰 5 carousel 已合法）
   let threw = false;
-  try { buildCardCarousels(Array.from({ length: 60 }, (_, i) => mkCard(i)), "alt"); } catch { threw = true; }
+  try { buildCardCarousels(Array.from({ length: 61 }, (_, i) => mkCard(i)), "alt"); } catch { threw = true; }
   chk("超過 5 message 上限拋錯", threw);
 }
 
@@ -172,15 +171,15 @@ const mkCard = (i) => ({
   chk("assertCardAllowed 可獨立供發送層預過濾", typeof assertCardAllowed === "function");
 }
 
-// ---- 行為釘住：空陣列與 12 倍數切分 ----
+// ---- 行為釘住：空陣列與 12 倍數切分（2026-08-16 起無免責卡）----
 {
   const empty = buildCardCarousels([], "alt");
-  chk("空 cards → 1 message 僅免責卡（發送層應先判空跳過）",
-    empty.length === 1 && empty[0].contents.contents.length === 1);
+  chk("空 cards → 0 message（無免責卡可湊，發送層應先判空跳過）", empty.length === 0,
+    JSON.stringify(empty));
   const m12 = buildCardCarousels(Array.from({ length: 12 }, (_, i) => mkCard(i)), "alt");
-  chk("恰 12 卡 → 12/1（免責卡單獨成末 carousel、仍壓底）",
-    m12.length === 2 && m12[1].contents.contents.length === 1
-    && JSON.stringify(m12[1]).includes("關於這份清單"));
+  chk("恰 12 卡 → 單一 carousel 恰 12 bubble（不再多出免責卡尾車）",
+    m12.length === 1 && m12[0].contents.contents.length === 12
+    && !JSON.stringify(m12).includes("關於這份清單"), JSON.stringify(m12.map((m) => m.contents.contents.length)));
 }
 
 // ---- lineRequest 多 message ----
