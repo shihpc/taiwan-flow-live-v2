@@ -514,14 +514,33 @@ def fit_line_limit(img):
     return img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
 
 
-def build_all(data: dict, out_dir: Path, F_B, F_R, raw_base: str = RAW_BASE) -> dict:
+def warn_gate_skip(date_repr: str) -> None:
+    """守門攔截（資料不新鮮）＝預期內跳過，非故障。
+
+    印 ::warning::（Actions 顯示黃色 annotation）＋寫 step summary（環境變數
+    GITHUB_STEP_SUMMARY 存在時），呼叫端以 exit 0 收場——run 綠燈帶警告。
+    真故障（例外、網路錯、渲染錯）維持非零 exit：兩者在 run 顏色上必須可區分
+    （2026-08-11 實例：守門攔截也亮紅，與真故障混在一起無法分辨）。
+    """
+    msg = f"/cards/data 未回可信資料日（date={date_repr}）——守門攔截，拒渲染，該場退純文字"
+    print(f"::warning::{msg}")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as fh:
+            fh.write(f"### cards 渲染守門攔截\n\n{msg}\n")
+
+
+def build_all(data: dict, out_dir: Path, F_B, F_R, raw_base: str = RAW_BASE) -> dict | None:
     from PIL import Image
     # date ＝ Worker /cards/data 回的**資料日**（baseline.date），非渲染當日。
     # 缺或格式不對就拒渲染：manifest 沒有可信日期時，寧可當晚退文字版，
     # 也不能產出「日期不明」的圖讓 attachCardImages 有機會誤放行。
+    # 回 None（守門攔截）而非 SystemExit：這是預期內的資料不新鮮，main 以 exit 0 收場；
+    # return 在 mkdir／清場之前——攔截時既有 PNG 與 manifest 一律不動，commit step 自然 no-op。
     date = str(data.get("date") or "")
     if not _DATE_RE.match(date):
-        raise SystemExit(f"ERROR: /cards/data 未回可信資料日（date={date!r}）——拒渲染，當晚退文字版")
+        warn_gate_skip(repr(date))
+        return None
     out_dir.mkdir(parents=True, exist_ok=True)
     for p in out_dir.glob("*.png"):   # 清掉上一日殘圖（manifest 是唯一權威，殘檔只會誤導）
         p.unlink()
@@ -603,6 +622,11 @@ def main(argv=None):
         raise SystemExit(f"ERROR: /cards/data 回應非預期：{str(data)[:200]}")
     out_dir = Path(args.out) if args.out else out_dir_for(args.slot)
     manifest = build_all(data, out_dir, F_B, F_R, raw_base=raw_base_for(args.slot))
+    if manifest is None:
+        # 守門攔截（build_all 已印 ::warning:: ＋ step summary）→ exit 0：
+        # run 綠燈帶警告，與真故障（非零 exit）區分；am/pm 兩 slot 行為一致
+        print(f"守門攔截：本場（slot={args.slot}）不渲染，既有產物不動")
+        return
     print(f"完成：{len(manifest['images'])} 張 → {out_dir}（slot={args.slot} date={manifest['date']}）")
 
 

@@ -134,12 +134,65 @@ def test_id_guard():
               and not list(Path(td).glob("*.png")))
 
 
+def test_freshness_gate():
+    """守門攔截（date 缺/不新鮮）＝成功＋警告：回 None、不動既有產物、exit 0；
+    真故障（回應非預期）仍為非零 exit。"""
+    import os
+
+    F_B, F_R = bc.load_fonts(ROOT / "fonts",
+                             fallback=not (ROOT / "fonts" / "NotoSansTC-Bold.otf").exists())
+    stale = {"date": None, "cards": [
+        {"id": "x1", "title": "x", "rows": [{"m": "a", "r": "+1.0億", "c": "up"}]}]}
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "cards"
+        out.mkdir()
+        keep = out / "keep-old.png"
+        keep.write_bytes(b"x")
+        summary = Path(td) / "step_summary.md"
+        os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+        try:
+            manifest = bc.build_all(stale, out, F_B, F_R)
+        finally:
+            del os.environ["GITHUB_STEP_SUMMARY"]
+        check("守門攔截：build_all 回 None（不 raise）", manifest is None)
+        check("守門攔截：既有產物不動（舊 PNG 仍在、無 manifest）",
+              keep.exists() and not (out / "manifest.json").exists())
+        check("守門攔截：step summary 有寫入攔截說明",
+              summary.exists() and "守門攔截" in summary.read_text(encoding="utf-8"))
+
+        # main 端對端：--offline 餵 date 空 payload → 正常 return（exit 0），兩 slot 一致
+        fx = Path(td) / "stale_fixture.json"
+        fx.write_text(json.dumps(stale), encoding="utf-8")
+        for slot in ("pm", "am"):
+            code = None
+            try:
+                bc.main(["--offline", str(fx), "--slot", slot,
+                         "--out", str(out), "--font-fallback"])
+                code = 0
+            except SystemExit as e:
+                code = e.code
+            check(f"守門攔截：main（slot={slot}）以 exit 0 收場", code in (0, None))
+
+        # 真故障對照組：回應非預期（無 cards 鍵）→ 仍是 SystemExit 非零
+        # （SystemExit 帶訊息字串時實際 exit code 為 1）
+        bad = Path(td) / "bad_fixture.json"
+        bad.write_text(json.dumps({"whatever": 1}), encoding="utf-8")
+        nonzero = False
+        try:
+            bc.main(["--offline", str(bad), "--slot", "pm",
+                     "--out", str(out), "--font-fallback"])
+        except SystemExit as e:
+            nonzero = e.code not in (0, None)
+        check("真故障：回應非預期仍以非零 exit 收場", nonzero)
+
+
 if __name__ == "__main__":
     test_parse_value()
     test_bar_width()
     test_fmt_thousands()
     test_render_end_to_end()
     test_id_guard()
+    test_freshness_gate()
     print()
     if FAILED:
         print(f"FAIL：{len(FAILED)} 項未過")
