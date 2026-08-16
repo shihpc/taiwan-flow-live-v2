@@ -1,7 +1,7 @@
 // frame 落格斷檔修復（2026-07-18）離線單元測試：牆鐘 key / 重試 / stale 標記 / err 可見化 /
 // computeFlow stale 降級 / replay src_ts。執行：cd worker && node test/frames.mjs
 import { readFile } from "node:fs/promises";
-import { storeFrame, recordFrameErr, computeFlow, replayFrame } from "../src/index.js";
+import { storeFrame, recordFrameErr, computeFlow, replayFrame, pickFrames } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -53,6 +53,25 @@ const rows = (ts) => [
   const se = await env.FLOW_KV.get("series:2026-07-20", "json");
   chk("series 兩點（牆鐘分鐘）", se && se.length === 2 && se[1].t === "09:10", JSON.stringify(se));
   chk("frame TTL 2 天", env.FLOW_KV.puts[0].opts.expirationTtl === 172800);
+  const fiPut = env.FLOW_KV.puts.find((p) => p.key.startsWith("fi:"));
+  chk("fi 索引 TTL 5 天（週五索引撐過週末，statusSiteLive 週末不誤紅）",
+    fiPut && fiPut.opts.expirationTtl === 432000, JSON.stringify(fiPut && fiPut.opts));
+}
+
+// ---- 1d. fi 索引在、f frame 已過期（TTL 不對稱：fi 5 天 > f 2 天）→ pickFrames 不炸、缺格窗自動略過 ----
+{
+  const D = "2026-07-20";
+  const kv = mockKV({
+    [`fi:${D}`]: JSON.stringify(["09:30", "09:50"]),
+    [`f:${D}:09:50`]: JSON.stringify({ "2330": [100e6, 1000] }),   // 09:30 的 frame 已過期蒸發
+  });
+  const NOW_MIN = 10 * 60;   // 10:00
+  const out = await pickFrames({ FLOW_KV: kv }, D, NOW_MIN, [10, 30]);
+  chk("frame 在的窗（10 分）正常回", out[10] && out[10].name === `f:${D}:09:50`, JSON.stringify(out[10]));
+  chk("frame 缺的窗（30 分）靜默略過不炸", !(30 in out), JSON.stringify(Object.keys(out)));
+  const none = await pickFrames({ FLOW_KV: mockKV({ [`fi:${D}`]: JSON.stringify(["09:30"]) }) },
+    D, NOW_MIN, [10]);
+  chk("索引在但 frame 全缺 → 回空物件", Object.keys(none).length === 0, JSON.stringify(none));
 }
 
 // ---- 1b. 跨日停滯（07-17 整天壞掉型：FinMind 還在吐前一日時戳）→ 照存、標 stale ----

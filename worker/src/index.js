@@ -302,7 +302,10 @@ export async function storeFrame(env, scheduledTime, opts = {}) {
   const idx = (await env.FLOW_KV.get(idxKey, "json")) || [];
   if (!idx.includes(hm)) {
     idx.push(hm);
-    await env.FLOW_KV.put(idxKey, JSON.stringify(idx.sort()), { expirationTtl: 172800 });
+    // fi 索引 TTL 拉到 120h（5 天）：48h 會讓週五索引在週日下午蒸發，statusSiteLive 週末誤判紅燈。
+    // frame 本體（f:）維持 48h 不動（資料量大，拉長會倍增 KV 儲存）；「索引在、frame 已過期」安全：
+    // pickFrames 對 null body 已 filter、detectSubEvents 對 !old 回空、statusSiteLive/health 只讀索引。
+    await env.FLOW_KV.put(idxKey, JSON.stringify(idx.sort()), { expirationTtl: 432000 });
   }
   // 分鐘動能序列（即時一覽 tab 第二期）：單一 rolling key，繞開 fi 索引最終一致性偶爾漏筆的問題
   // （fi 用 get-modify-put 也會漏，但 series 只需「近60分連續走勢」，單筆漏格不影響判讀；
@@ -428,7 +431,7 @@ export function seriesTail(arr, n = 60) {
 // 窗長取「最接近目標的既有 frame」，佔比法對實際窗長不敏感。回測依據 backtest/report_sector.md。
 const hm2min = (hm) => +hm.slice(0, 2) * 60 + +hm.slice(3, 5);
 
-async function pickFrames(env, d, nowMin, wins) {
+export async function pickFrames(env, d, nowMin, wins) {   // export 供 test/frames.mjs 直測「fi 在但 f 缺」
   // 讀索引 key（storeFrame 維護）取代 list——免費版 list 僅 1000次/日，get 有 10 萬
   const times = (await env.FLOW_KV.get(`fi:${d}`, "json")) || [];
   const chosen = {};

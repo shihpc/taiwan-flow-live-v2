@@ -131,6 +131,16 @@ const okFetch = async (u, init) => {
   const out = await buildStatus({}, TUE, okFetch, NOW);
   chk("無 KV → live red、其餘照常", out.sites[0].level === "red" && out.sites[1].level === "green");
 }
+{
+  // 週末：fi 索引 TTL 已拉到 5 天（f frame 仍 2 天）——只要週五索引還在，
+  // 即使 f: frame 本體已過期，statusSiteLive 仍以索引回報週五資料日 → green
+  const SAT_NOW = Date.parse("2026-08-08T15:00:00+08:00");
+  const kv = fakeKV({ "fi:2026-08-07": ["09:01", "13:30"] });   // 只有索引、無任何 f: 鍵
+  const out = await buildStatus({ FLOW_KV: kv }, SAT, okFetch, SAT_NOW);
+  chk("週六：週五 fi 索引在（frame 已蒸發）→ live green＋資料日=週五",
+    out.sites[0].level === "green" && out.sites[0].data_date === "2026-08-07",
+    `${out.sites[0].level} ${out.sites[0].data_date}`);
+}
 
 console.log(`status.mjs: ${pass} pass, ${fail} fail`);
 if (fail) process.exit(1);
