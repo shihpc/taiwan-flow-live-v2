@@ -1,9 +1,66 @@
-# LINE 圖卡體系實作規格
+# LINE 圖卡體系規格（依現況修訂版）
 
 目標專案：`/home/user/taiwan-flow-live-v2`（Cloudflare Worker `worker/src/index.js`）
-狀態：**規格待審，尚未實作**。回測依據已完成（`backtest/report_sorting.md`，鐵律 #8 已滿足）。
+狀態：**已上線運行**（2026-07-29 首晚實推；PNG 呈現層 2026-07-30 改向；AM 晨間場 2026-08-10；
+白名單 2026-08-16 二次裁剪至 5 張）。
+本版修訂日 **2026-08-16**，依據＝commit `69c7824`（五項改動：白名單裁至 5 張、新增三合一
+看板卡、v2-ov-6 附個股、pm-aetf-5 改排行式、carousel 移除壓底免責卡）與
+`worker/src/index.js` 程式現值（`FX_ACTIVE_CARDS`／`FX_AM_CARDS`／`FX_BLOCKED_CARDS`／
+`FX_CARD_BUILDERS`）。引用一律用符號名／章節名，不用行號（行號會漂移）。
 
-本文件是動手前的驗收條件（鐵律 #3）。實作者請先確認「未查證事項」一節沒有變成定論。
+原始規格 2026-07-28 定稿時寫「規格待審，尚未實作」——那個狀態早已翻頁；歷史裁剪沿革
+集中在第 3C 節追溯段。回測依據 `backtest/report_sorting.md`（鐵律 #8）不變。
+
+---
+
+## 0. 現況總覽（2026-08-16，程式現值）
+
+### 晚間場（pm）：`FX_ACTIVE_CARDS` 白名單 5 張 ＋ 長文卡 1 張
+
+| id | 內容 | builder（符號） |
+|---|---|---|
+| `v2-dash-1` | 三合一看板：大盤總結＋三大法人＋台指期＋成交值列（合併原 v2-ov-1／flows-hdr-1／flows-hdr-2；三源各自獨立降級、三源全缺才 skip） | `fxCardDash1` |
+| `v2-ov-6` | 次產業貢獻發散，附每業貢獻絕對值前 3 檔個股（r2 小字；上游 `build_daysummary.py` 的 `subs_stocks` 欄，欄位缺時退回純次產業列） | `fxCardOv6` |
+| `flows-foreign-1` | 外資買賣超排行（依金額） | `fxCardInstRank(s,"foreign",…)` |
+| `flows-trust-1` | 投信買賣超排行（依金額） | `fxCardInstRank(s,"trust",…)` |
+| `pm-aetf-5` | 主動ETF進出個股，排行 rows 形（加碼前 5＋減碼前 5，金額＋張數） | `fxCardAetf5` |
+| `pm-summary-1` | 盤後分析摘要長文卡（獨立 Image message，**不進 carousel、不在白名單**，見 §3D） | `fxCardSummaryLongform`（＝`FX_LONGFORM_CARD`） |
+
+**免責卡（2026-08-16 使用者指示，commit `69c7824` ⑤）**：`buildCardCarousels` 不再壓底
+免責卡；`disclaimerBubble`／`FX_DISCLAIMER` 程式保留，**純文字降級版 `cardsFallbackText`
+仍帶免責句**（`※ FX_DISCLAIMER` 收尾）。
+
+### 晨間場（am）：`FX_AM_CARDS` 白名單 4 張
+
+| id | 內容 | 資料源 |
+|---|---|---|
+| `am-brief-1` | 每日晨報長文卡（longform，＝`FX_AM_LONGFORM_CARD`） | taiwan-stock-news `daily-brief-card.json`（`DAILY_BRIEF_URL`） |
+| `news-morning-2` | 籌碼備忘 | morning.json |
+| `news-morning-3` | 昨日資金流向 | morning.json／daysummary |
+| `news-morning-4` | 美股速覽（per-card gate：us.json date 達最近預期美股交易日） | us.json |
+
+時窗：渲染 dispatch 台北 08:05–08:15（`runCardsRenderAm`）→ 推播 08:20–08:50
+（`pushMorningCards`，dedup KV `alerted:<date>:cards-am`）。晨間**無**純文字退路。
+`am-brief-1` **刻意不進 `FX_CARD_BUILDERS`**（避免污染晚間 skipped 觀測），由
+`buildCardsData(slot=am)` 單獨組裝。
+
+### C 類封鎖：`FX_BLOCKED_CARDS` 5 張（規範見 §3B.3，**回測前不得上線**）
+
+`flows-sync-1`／`flows-sync-2`／`flows-oppose-1`／`flows-oppose-2`／`pm-aetf-1`——
+`assertCardAllowed` 建構時即擋，Flex 與純文字兩通道皆過同一道守門。
+
+### builder 庫：`FX_CARD_BUILDERS` 35 張全保留
+
+白名單外的卡 builder 一律保留（含 sig 訊號卡六張、被合併的 v2-ov-1／flows-hdr-1/2 等），
+**加回 `FX_ACTIVE_CARDS` 即復活**；重啟任何一張時，本文件對該卡的約束（§3／§3B／§4）照舊適用。
+
+### 管線（spec 3C 呈現層，符號串）
+
+`buildCardsData`（`/cards/data`，卡片邏輯唯一來源）→ `cards.yml`（Actions）→
+`src/build_cards_png.py`（Pillow 渲染，Python 只渲染不算數）→ commit `data/cards/latest|am/`
+→ **raw.githubusercontent 供 HTTPS URL**（`RAW_BASE_ROOT`，**非 GitHub Pages**——Pages 不吃
+這批檔，原文誤記已更正）→ `pushDailyCards`／`pushMorningCards` 讀 manifest 掛 hero 圖；
+manifest 非當日或缺圖＝退文字版（僅 pm；am 無文字退路）。
 
 ---
 
@@ -14,28 +71,14 @@ LINE 的計費單位是**收訊人數**，不是 message object 數、也不是 
 > The number of messages is counted by the number of people you send a message to... The number of message objects in a request doesn't affect the number of messages sent.
 > — https://developers.line.biz/en/docs/messaging-api/pricing/#how-to-count-the-number-of-messages-sent
 
-推論出的兩種架構成本（收訊人只有 1 位 = `LINE_USER_ID`，每月約 22 交易日）：
-
-| 架構 | 每月計費訊息 | 佔日本免費方案 200 則 |
-|------|------|------|
-| **每日 1 次 push、1 個 carousel 裝所有卡** | **22 則** | 11% |
-| 每張卡各發一次 push（6 張） | 132 則 | 66% |
-
-**決策：採前者。** 一天一次 push，所有卡當成 carousel 內的 bubble。理由是額度餘裕從 34% 拉到 89%，且未來加卡不增加費用。
-
-**卡數擴充後的算式（2026-07-28 定案 40 張）**：單一 carousel 上限 12 bubble，但**一次 push
-可帶 5 個 message object**，每個 object 各自是一個 carousel → 上限 60 bubble。
-
-| 期別 | 卡數 | bubble（含免責卡） | carousel 數 | 計費 |
-|---|---|---|---|---|
-| 第一期（純 Flex） | 38 | 39 | 4（12/12/12/3） | **1 則** |
-| 第二期（＋2 張圖表卡） | 40 | 41 | 4（12/12/12/5） | **1 則** |
-
-計費不隨 bubble 數變動——按收訊人數算，1 位收訊人 × 1 次 push ＝ 1 則。
-每月仍是 22 則，佔日本免費方案 200 則的 11%。
-
 > ✅ **本帳號實測額度已確認（2026-07-29）**：`GET /v2/bot/message/quota` 回
-> `{"type":"limited","value":200}`——每月 200 則，與上表假設一致。22 推/月佔 11%，定案。
+> `{"type":"limited","value":200}`——每月 200 則。
+
+**現況成本（2026-08-16 起，推算）**：收訊人 1 位（`LINE_USER_ID`）；晚間 1 push
+（1 carousel ≤12 bubble ＋ 長文 image message 同一 request、零計費增量）＋晨間 1 push
+＝每交易日 2 則 → 每月約 44 則、佔 200 的 22%。一次 push 可帶 5 個 message object、
+每 carousel 上限 12 bubble；現役 5 張 flex 卡遠低於上限，加卡不增加費用。
+（歷史卡數表 38／40 張×4 carousel 屬 2026-07-28 定案版，已被 3C 裁剪取代，見 §3C。）
 
 ---
 
@@ -45,180 +88,92 @@ LINE 的計費單位是**收訊人數**，不是 message object 數、也不是 
 |------|------|------|
 | carousel 內 bubble 數 | **最多 12** | https://developers.line.biz/en/reference/messaging-api/#f-carousel |
 | carousel 內 bubble `size` | **必須全部相同** | 同上 |
-| `altText` | **必填**，上限 **1500 字**，可含 Unicode emoji | https://developers.line.biz/en/reference/messaging-api/#flex-message |
+| `altText` | **必填**，上限 **1500 字** | https://developers.line.biz/en/reference/messaging-api/#flex-message |
 | 單一 bubble JSON | 30 KB | https://developers.line.biz/en/reference/messaging-api/#bubble |
 | 單一 carousel JSON | 50 KB | https://developers.line.biz/en/reference/messaging-api/#f-carousel |
 | 整個 HTTP request | 2 MB，超過回 `413` | https://developers.line.biz/en/reference/messaging-api/#status-codes |
-| 一次 push 的 message object 數 | 1–5，超過回 400 `Size must be between 1 and 5` | https://developers.line.biz/en/reference/messaging-api/#send-push-message |
-| push rate limit | 2,000 req/s（非瓶頸） | https://developers.line.biz/en/reference/messaging-api/#rate-limits |
+| 一次 push 的 message object 數 | 1–5，超過回 400 | https://developers.line.biz/en/reference/messaging-api/#send-push-message |
 | 超出免費額度 | 回 `429`，**訊息不會送出** | https://developers.line.biz/en/docs/messaging-api/pricing/ |
 
 **注意：`altText` 上限是 1500，不是網路上流傳的 400。**
+KB 上限一律量 **UTF-8 位元組**（`utf8len`）——`JSON.stringify().length` 是 UTF-16 字元數，
+中文 1 字 3 bytes，用字元數守門會鬆 3 倍（2026-07-28 實 bug）。
 
-### 排版能力
+### 排版能力（實作時的坑）
 
-- **沒有 table 元件**。官方模型是 CSS Flexbox，表格要用 box 疊：外層 `vertical` box 當表身，
-  每列一個 `horizontal` box，欄寬用 `flex` 比例分配（預設 `flex:1`），數值欄 `align:"end"` 右對齊。
-  https://developers.line.biz/en/docs/messaging-api/flex-message-layout/
-- **`flex:0` 的坑**：元件只佔內容所需寬度，但**超出 box 寬度的部分不會顯示**（直接切掉）。
-  固定寬欄位要自己確保不溢出。
-- **`baseline` box 的子元件只能是 icon / text / filler**（box、image、button 都不行），
-  且不能用 `gravity` / `offsetBottom`。要塞色塊就得改用 `horizontal`。
-- **`wrap` 預設是 `false`，溢出文字會被省略號截斷。** 所有多字文字元件**必須顯式設 `wrap:true`**，
-  這是最容易漏的一條。`maxLines` 預設 `0` = 全部顯示。
-- 顏色可自由指定 hex（`color`），box `backgroundColor` 另支援 alpha（`#RRGGBBAA`）。
-  **紅漲綠跌做得到。** 同一段文字內要多色用 `span` 元件。
-- **LINE 貼圖式 emoji（`$` placeholder）在 Flex 內用不了**——text 元件沒有 `emojis` 屬性，
-  那是獨立 text message object 才有的功能。
+- **沒有 table 元件**：表格用 box 疊（外層 `vertical`、每列 `horizontal`、欄寬 `flex` 比例、
+  數值欄 `align:"end"`）。
+- **`wrap` 預設 `false`，溢出文字被省略號截斷**——所有多字文字元件必須顯式 `wrap:true`
+  （最容易漏的一條，測試全樹斷言守著）。
+- `flex:0` 元件超出 box 寬度的部分直接切掉；`baseline` box 子元件只能是 icon/text/filler。
+- 顏色可自由 hex，紅漲綠跌做得到；LINE 貼圖式 emoji（`$` placeholder）在 Flex 內用不了。
 
 ---
 
-## 3. 訊號卡（6 張，有回測依據）
+## 3. 訊號卡（6 張，有回測依據；**現況全數停用**）
 
-> 本節是**原始的 6 張訊號卡**，每張都有 `report_sorting.md` 的統計依據，沿革與限制記在下方。
-> 2026-07-28 另選定 34 張簡報卡，見第 3B 節——那批多數**沒有**回測依據，
-> 適用的誠實標準不同，兩節不可混為一談。
+> 現況（2026-08-16）：卡 3（`sig-new-high`）／卡 4（`sig-new-low`）於 2026-07-30 裁剪
+> 未再啟用；卡 1/2/5/6（`sig-sub-surge`／`sig-dual-buy`／`sig-exit-sell`／`sig-surge-warn`）
+> 於 2026-08-16 移出白名單（commit `69c7824` ①）。builder 與 regime 閘門程式全保留，
+> **重啟任何一張時本節結論與限制照舊適用**。
 
 ### 3.1 卡別清單（依回測結論，不得自行加碼）
 
-排序欄位一律引用 `backtest/report_sorting.md` 的結論，**不重新發明口徑**。
+排序欄位一律引用 `backtest/report_sorting.md` 的結論（2026-07-27 重跑版，任意
+`PYTHONHASHSEED` 產出 byte-identical，見 §8；報告內段落＝M1/M3/M4/S1/S2 等節名）。
 
-| # | 卡 | 篩選條件 | 排序 | 回測依據 |
+| # | 卡 | 篩選條件 | 排序 | 回測依據（報告節） |
 |---|---|------|------|------|
-| 1 | 次產業湧入 | C≥1.5 且 R≥1% | **R 值降序**（分離度 0.97%） | `report_sorting.md:153` |
-| 2 | 土洋同買 | 湧入訊號 ∩ 投信**近3日**≥2日買超 ∩ 外資**近3日**≥2日買超 | **外資當日買超金額降序**（Q1 med +1.74%） | `:270` |
-| 3 | 突破新高 | **僅** 突破20日新高（單條件） | **法人買強度降序**（分離度 0.92%） | `:223` M4 |
-| 4 | 弱勢榜 | 跌破20日新低（排除跌停鎖死） | **量能趨勢降序**（分離度 0.45%） | `:115` |
-| 5 | 退出＋法人賣 | 退出訊號 ∩ 法人賣強度<-5% | **不排序**（兩個候選欄一個無變異、一個分離度 0.01%） | `:301` ⚠ |
-| 6 | 追高警示 | 爆量大漲 S≥2 R≥2% P≥0.7（**排除漲停鎖死**） | **不排序**，S 值降序呈現 | `:329` |
+| 1 | 次產業湧入 | C≥1.5 且 R≥1% | **R 值降序**（分離度 0.97%） | M1 |
+| 2 | 土洋同買 | 湧入 ∩ 投信近3日≥2日買超 ∩ 外資近3日≥2日買超 | **外資當日買超金額降序**（Q1 med +1.74%） | M3 |
+| 3 | 突破新高 | **僅**突破20日新高（單條件） | **法人買強度降序**（分離度 0.92%） | M4 |
+| 4 | 弱勢榜 | 跌破20日新低（排除跌停鎖死） | **量能趨勢降序**（分離度 0.45%） | S1 |
+| 5 | 退出＋法人賣 | 退出 ∩ 法人賣強度<−5% | **不排序**（候選欄一個無變異、一個分離度 0.01%） | S2 ⚠ |
+| 6 | 追高警示 | 爆量大漲 S≥2 R≥2% P≥0.7（排除漲停鎖死） | **不排序**，S 值降序呈現 | 追高段 |
 
-> 回測依據行號對應 2026-07-27 重跑版 `report_sorting.md`（9 項版）。
-> 該報告已可完全重現：任意 `PYTHONHASHSEED` 產出 byte-identical（見第 8 節）。
-> 行號有 CI 守門（`.github/workflows/backtest.yml`），失效會擋下。
+**卡 3 的重大限制：母體本身無正超額**（全體 N=15107、T+3 勝大盤僅 41.7%、超額 avg −0.31%；
+Q1 也只有 −0.04%）。排序做到的是「把更差的往後排」，不是挑出會漲的——卡面文案不得暗示
+Q1 為看多標的。五分位非單調，依 §4 只能當大致分層。
 
-**卡 3 與卡 5 的偏離說明**：
-- 卡 3：M2「突破∩法人買強度>5%」交集版回測陣亡（`:177`），規格退回單條件版。
-  單條件版的排序欄原本未驗證 → **已於 2026-07-26 實跑 M4 補測**（`run_sorting.py` 的 `run_m4()`）。
-  三個候選的分離度：法人買強度 **0.92%**、量能趨勢 0.68%、乖離率 0.31%，
-  最佳者達先訂門檻 0.30% → **卡 3 排序欄採法人買強度降序**（`:223`）。
-  五分位仍**非單調**（Q1 −0.04% / Q2 +0.11% / Q3 −0.13% / Q4 −0.54% / Q5 −0.96%），
-  依第 4 節鐵律只能當大致分層呈現。
-  **⚠ 卡 3 的重大限制：母體本身無正超額。** 突破20日新高全體 N=15107、
-  T+3 勝大盤僅 41.7%、超額 avg −0.31%；即使排序後的 Q1 也只有 −0.04%、勝率 43.6%。
-  排序做到的是「把更差的往後排」，**不是挑出會漲的**。卡面文案不得暗示 Q1 為看多標的。
-- 卡 5：兩個候選排序欄都不成立，**不排序**（已於 2026-07-26 由使用者確認）。
-  - **連續退出日數：無有效變異。** 該欄 98.2% 的樣本值相同，五分位切點全落在平手值內，
-    分組由迭代順序決定。修正前實測同一份快取、同一份程式碼跑五次得到
-    0.07%／0.18%／0.35%／0.57%／1.36%，**分離度不可重現**。舊規格所寫的「0.17%」
-    只是其中一次的抽樣結果，非穩定量。現已由 `quintile()` 的平手率守門自動排除，
-    報告會直接印出「無有效變異（最大平手率 98.2%）」而非給一個假的分離度（`:299`）。
-  - **法人賣強度：分離度 0.01%**，等同無排序力（`:301`）。
-  - ⚠ **注意報告與本規格在卡 5 上仍不一致**：`run_s2()` 沒有像 `run_m4()` 那樣的採用門檻，
-    所以它對 0.01% 的候選照樣宣告「採用」。**以本規格的「不排序」為準。**
-    根治辦法是給 `run_s2()` 補上與 M4 同規格的先訂門檻，見下方第 8 節待辦。
+**卡 5 不排序的依據**：「連續退出日數」98.2% 樣本值相同、分離度不可重現（詳 §8）；
+「法人賣強度」分離度 0.01% 等同無排序力。⚠ 報告 `run_s2()` 因無採用門檻仍宣告「採用」，
+**以本規格「不排序」為準**（未結案，見 §8「仍待處理」）。
 
-### 大盤 Regime 閘門（R1）
+### 大盤 Regime 閘門（R1／R2）
 
-R1 測了 6 組訊號，其中**只有「次產業湧入」超額翻向**（`report_sorting.md:13`），
-另 5 組在多空環境下同向（`:18`、`:23`、`:28`、`:33`、`:38`）。
-
-**但這 6 組訊號 ≠ 本文件的 6 張卡**，對應關係必須看清楚：
-
-| R1 測的訊號 | 對應卡 | 超額翻向 |
-|------|------|------|
-| 次產業湧入 | 卡 1 | **是 ⚠** |
-| 突破20日新高 | 卡 3 | 否 |
-| 乖離>+10% 過熱組 | **不對應任何一張卡** | 否 |
-| 跌破20日新低 | 卡 4 | 否 |
-| 退出＋法人賣 | 卡 5 | 否 |
-| 爆量大漲 | 卡 6 | 否 |
-
-**卡 2（土洋同買）完全不在 R1 測試範圍內**——M3 段（`:240-286`）沒有做多空切分。
-
-因此：
-
-- **regime 閘門掛卡 1 與卡 2**，判定＝TAIEX 收盤 vs 自身 20MA。
-- 卡 3–6 有「不翻向」的實測依據，確定不掛閘門。
-- **⚠ 卡 1 的翻向量級是噪音級，與卡 2 的樣本問題屬同一類，不可當成已驗證。**
-  實際數字（`report_sorting.md:11-12`）：多頭 N=2172 超額 avg **+0.00%**、
-  空頭 N=349 超額 avg **−0.02%**。翻向旗標是對這兩個數字取正負號判定的，
-  但**兩者都約等於零，差距僅 0.02 個百分點**。
-  - **中位數根本沒有翻向**：多頭 med −0.24%、空頭 med −0.34%，**同為負**。
-    也就是說「翻向」完全是平均數的產物，換一個統計量就消失。
-  - 對照卡 5：那裡 0.17% 的分離度已被判定為無排序力（且後來證實不可重現）。
-    0.02% 比它還小一個數量級。
-  - **母體本身也沒有正超額**：多頭環境下 avg 僅 +0.00%、med −0.24%，
-    與卡 3 同屬「排得出順序但母體無正報酬」的情況。
-  - **仍掛閘門的理由與卡 2 相同——保守，不是有效性**：空頭時少發一張卡，
-    錯了的代價是少賺不是多賠。故依此定案，
-    但依鐵律 #4，卡面與文件**不得**將「空頭時次產業湧入會轉負」陳述為已驗證的事實。
-  - 空頭樣本 349 筆雖遠多於卡 2 的 31 筆，但**問題不在樣本量而在效果量**——
-    再多樣本也不會讓 0.02% 變成有意義的分層。重跑不會改善這點，
-    除非改用其他判準（例如改看中位數、或提高 C／R 門檻讓訊號更純）。
-- **卡 2 已於 2026-07-26 實跑 R2 補測**（`run_sorting.py` 的 `run_r2()`，母體與 M3 相同）：
-  多頭 N=378 超額 avg **+0.68%**、空頭 N=31 超額 avg **−0.76%**，**超額翻向 ⚠**（`:58`）。
-  → **卡 2 補掛 regime 閘門**，空頭環境下抑制，與卡 1 同一判定。
-  **⚠ 空頭樣本僅 31 筆**（占母體 409 筆的 7.6%；回測期 227 個有樣本交易日中 186 天為多頭＝82%），
-  單月最多 11 筆、其中兩個月各只有 1 筆；且 −0.76% 的均值由 5 筆主導
-  （2026-04 N=1 −5.99%、2026-05 N=4 −5.41%），而 2025-12 的 6 筆反而是 +1.87%。
-  翻向方向與掛閘門的動作**偏保守**
-  （空頭時少發卡，錯了的代價是少賺不是多賠），故仍依此定案；
-  但依鐵律 #4，卡面與文件不得將「空頭時土洋同買會轉負」陳述為已充分驗證的事實。
-  累積滿 3 個完整空頭月（約 100 筆）後應重跑 R2 覆核。
+- **閘門只掛卡 1 與卡 2**，判定＝TAIEX 收盤 vs 自身 20MA（`fxRegime`，源＝flows
+  `totals.json` 的 taiex 序列，容 null；未判定＝視為 bull 不抑制＋note 標註）。
+  卡 3–6 有「不翻向」實測依據，不掛。
+- **⚠ 兩張的「翻向」都不可當已驗證事實**（鐵律 #4，卡面與文件不得聲稱「空頭時會轉負」）：
+  - 卡 1：多頭 avg +0.00% vs 空頭 −0.02%，差僅 0.02pp；**中位數同為負、沒有翻向**
+    （多 −0.24%／空 −0.34%）。掛閘門的理由是**保守**（空頭少發卡，錯的代價是少賺），
+    不是有效性。
+  - 卡 2（R2 補測 2026-07-26）：多頭 N=378 avg +0.68%、空頭 N=31 avg −0.76% 翻向，
+    但**空頭樣本僅 31 筆**且均值由 5 筆主導。累積滿 3 個完整空頭月（約 100 筆）後應重跑覆核。
+- R1 測的 6 組訊號 ≠ 6 張卡（「乖離>+10% 過熱組」不對應任何卡；卡 2 不在 R1 範圍、
+  由 R2 另測）。
 
 ---
 
-## 3B. 簡報卡（34 張，2026-07-28 選定）
+## 3B. 簡報卡三類誠實標準（2026-07-28 選定 34 張；多數已裁，分類標準仍有效）
 
-來源：`docs/` 外的 145 項全站盤點（四站 30 個 tab 拆到項目層級）。使用者選定 37 項，
-其中 5 項是 2026-07-10 已搬離的死碼（`v2-us-4`、`v2-aetf-1..4`），
-3 項與其現行等價項重複（自動去重），另補選 `pm-aetf-1`、`pm-aetf-4` → **34 張**。
+34 張多數**沒有**回測依據，與 §3 的 6 張訊號卡適用不同誠實標準，依「是否隱含可操作性」分三類。
+現役卡對照：`v2-dash-1`（A 類三卡合併）、`v2-ov-6`（A 類）、`flows-foreign-1`／`flows-trust-1`／
+`pm-aetf-5`（B 類）。
 
-**這 34 張多數沒有回測依據**，與第 3 節的 6 張訊號卡適用不同的誠實標準。
-依「是否隱含可操作性」分三類：
+### 3B.1 A 類·純描述事實 — 鐵律 #8 不適用
 
-### 3B.1 A 類·純描述事實（20 張）— 鐵律 #8 不適用
+報導今天發生了什麼，不隱含該買該賣，不需回測依據。原 20 張（v2-global-1、v2-ov-1/5/6/7/8/14、
+v2-chain-1、flows-hdr-1/2、flows-etf-1、flows-ff-1、pm-block-1、pm-mktbal-1/2、
+news-morning-2/3/4、v2-ov-9/10）。貢獻點類特別乾淨：會計恆等式（權重×漲跌，加總＝指數漲跌點），
+對已發生事實的分解、零預測成分。原第二期兩張圖表卡 v2-ov-9/10 已由 3C PNG 呈現層改向取代，未實作。
 
-報導今天發生了什麼，不隱含該買該賣，因此不需回測依據。
+### 3B.2 B 類·排行榜 — 邊界地帶
 
-| 編號 | 卡 | 期別 |
-|---|---|---|
-| `v2-global-1` | 市場指數卡（加權/櫃買＋成交值＋VIX） | 一 |
-| `v2-ov-1` | 今日總結卡 | 一 |
-| `v2-ov-5` | 規則式定調句 | 一 |
-| `v2-ov-6` | 貢獻點發散·次產業 | 一 |
-| `v2-ov-7` | 貢獻點發散·產業鏈 | 一 |
-| `v2-ov-8` | 貢獻點發散·個股 | 一 |
-| `v2-ov-9` | 資金地圖 treemap | **二**（需 PNG） |
-| `v2-ov-10` | 資金象限圖 | **二**（需 PNG） |
-| `v2-ov-14` | 次產業強弱總表 | 一 |
-| `v2-chain-1` | 產業鏈排行 | 一 |
-| `flows-hdr-1` | 三大法人卡 | 一 |
-| `flows-hdr-2` | 台指期外資未平倉卡 | 一 |
-| `flows-etf-1` | ETF 概況三卡 | 一 |
-| `flows-ff-1` | 外資買賣超近期區塊 | 一 |
-| `pm-block-1` | 鉅額交易逐筆 | 一 |
-| `pm-mktbal-1` | 大盤融資餘額 | 一 |
-| `pm-mktbal-2` | 大盤借券賣出餘額 | 一 |
-| `news-morning-2` | 籌碼備忘 | 一 |
-| `news-morning-3` | 昨日資金流向 | 一 |
-| `news-morning-4` | 美股速覽 | 一 |
-
-**貢獻點三張特別乾淨**：貢獻點是會計恆等式（權重 × 漲跌，全市場加總等於指數漲跌點），
-是對已發生事實的分解，不含任何預測成分。
-
-### 3B.2 B 類·排行榜（9 張）— 邊界地帶
-
-排的是今日既成事實，但「排行榜」這個形式本身就隱含「排前面的值得看」。
-
-`v2-rank-1` 全市場佔比排行／`flows-foreign-1` 外資買賣超排行·依金額／
-`flows-trust-1` 投信買賣超排行·依金額／`pm-aetf-2` ETF 總覽／`pm-aetf-4` ETF 加減碼明細／
-`pm-aetf-5` 進出個股／`pm-lending-3` 券商借券餘額排行／`pm-lending-4` 借券賣出餘額排行／
-`pm-lending-6` 融資餘額排行
-
-**處理原則**：卡面只陳述數值，**不加強弱形容詞**、不寫「值得關注」類引導語，
-比照第 4 節的口徑註記處理。排序欄位要在卡底標明（例：`依外資買超金額降序`），
-讓讀者知道順序的依據是什麼，而不是暗示這是推薦順序。
+排的是今日既成事實，但「排行榜」形式隱含「排前面的值得看」。原 9 張（v2-rank-1、
+flows-foreign-1、flows-trust-1、pm-aetf-2/4/5、pm-lending-3/4/6）。
+**處理原則**：卡面只陳述數值、不加強弱形容詞、不寫「值得關注」類引導語；排序欄位在卡底
+標明（例：`依外資買超金額降序`），讓讀者知道順序依據，而非暗示推薦順序。
 
 ### 3B.3 C 類·明確是訊號（5 張）— 鐵律 #8 適用，**回測前不得上線**
 
@@ -231,58 +186,78 @@ R1 測了 6 組訊號，其中**只有「次產業湧入」超額翻向**（`rep
 | `pm-aetf-1` | 主動ETF 建議句 | 無回測，且**文案需重寫**（見下） |
 
 **Alpha 掃描已於 2026-07-29 實跑**（`backtest/report_alpha_sweep.md`，commit `04ba1ad`；
-K=16、A 層 3／B 層 0／C 層 11，其中 A 層的 AS-11 方向與預註冊相反不得採計，
-方向正確的存活只有 AS-01 與 AS-14）。AS-01 另經 fresh-context 單獨複驗（§4.3），
-判「**有條件解鎖**」：
+K=16、A 層 3／B 層 0／C 層 11，A 層 AS-11 方向與預註冊相反不得採計，方向正確存活只有
+AS-01 與 AS-14）。AS-01 經 fresh-context 複驗判「**有條件解鎖**」：
 
 **解鎖前置（缺一不可）**：
 1. **口徑對齊（阻斷級）**：回測外資＝僅 `Foreign_Investor`，生產＝
-   `Foreign_Investor + Foreign_Dealer_Self`——篩選正負判定與 Top30 切點都會漂移，
-   「回測支持的訊號」與「卡面實際呈現的訊號」嚴格說是兩個相近訊號。
-   二擇一：(a) 卡面資料鏈改用不含外資自營口徑對齊回測；
-   (b) `fetch.py` 補收該列重抓快取、重跑掃描確認 AS-01 仍存活（口徑覆核，非新檢定）。
-2. 卡面篩選鏡像回測母體：成交額 ≥1 億、排除 ETF/興櫃、
-   min(|外資額|,|投信額|) 排序帶次鍵 code。
+   `Foreign_Investor + Foreign_Dealer_Self`——篩選正負判定與 Top30 切點都會漂移。
+   二擇一：(a) 卡面資料鏈改用不含外資自營口徑對齊回測；(b) `fetch.py` 補收該列重抓快取、
+   重跑掃描確認 AS-01 仍存活。
+2. 卡面篩選鏡像回測母體：成交額 ≥1 億、排除 ETF/興櫃、min(|外資額|,|投信額|) 排序帶次鍵 code。
 
 **卡面必標（複驗指定）**：
-3. 「歷史統計傾向、非預測；T+3 中位數 −0.31%、勝大盤 47.5%——
-   平均超額來自少數大贏家，過半數入選股輸給大盤」。
-4. 效果量寫「弱正向傾向」，**不得寫成穩定 +0.5% 期望**（恰壓門檻＋
-   16 訊號多重比較，複驗信心：方向為正 ~70-75%、真效果 ≥0.5% 僅 ~35-45%）。
-5. 命名明寫「**當日**外資投信同買・金額強度 Top30」——與卡 2（近 3 日連買∩爆量）
-   是不同定義，不可共用「土洋同買」做標題；可註明成分股可能部分重疊。
+3. 「歷史統計傾向、非預測；T+3 中位數 −0.31%、勝大盤 47.5%——平均超額來自少數大贏家，
+   過半數入選股輸給大盤」。
+4. 效果量寫「弱正向傾向」，**不得寫成穩定 +0.5% 期望**（恰壓門檻＋16 訊號多重比較，
+   複驗信心：方向為正 ~70-75%、真效果 ≥0.5% 僅 ~35-45%）。
+5. 命名明寫「**當日**外資投信同買・金額強度 Top30」——與卡 2（近 3 日連買∩爆量）是不同定義，
+   不可共用「土洋同買」做標題。
 
-**複驗其他要點**（`run_alpha_sweep.py:537` 判準比較未捨入值，+0.50% 是真通過但貼下緣；
-逐月 11/12 為正、日層級 60.8% 正報酬日是最強穩健性證據；「後段更強」判讀為市況非趨勢）。
+AS-14（跌破布林下軌，−0.59%，方向正確存活）記為未來弱勢類卡片的現成候選。
+AS-11 的反向資訊不得改稱空方訊號。
 
-AS-14（跌破布林下軌，−0.59%，方向正確存活）不在本次 40 張內，記為未來弱勢類卡片的現成候選。
-AS-11 的反向資訊（RSI(5)<20 後續**繼續弱**，跌深買進不成立）依 §2 前言不得改稱空方訊號。
+**`pm-aetf-1` 建議句是唯一直接踩到「不寫該買該賣」的**，上線前必須改寫成描述句：
+✗「建議關注 X」→ ✓「本日主動ETF 淨加碼集中在 X」；✗「加碼訊號明確」→ ✓「N 檔 ETF 同向加碼」。
 
-**`pm-aetf-1` 建議句是這 40 張裡唯一直接踩到「不寫該買該賣」的**。
-它是規則式「建議」，與第 4 節的誠實原則正面衝突。
-**上線前必須把文案改寫成描述句**：
-- ✗「建議關注 X」→ ✓「本日主動ETF 淨加碼集中在 X」
-- ✗「加碼訊號明確」→ ✓「N 檔 ETF 同向加碼」
+---
 
-### 3B.4 分期
+## 3C. 內容裁剪沿革（歷史決策追溯）
 
-| 期別 | 內容 | 卡數 |
-|---|---|---|
-| **第一期** | 6 張訊號卡 ＋ 32 張簡報卡（扣除兩張圖表卡） | **38** |
-| **第二期** | 補 `v2-ov-9` treemap、`v2-ov-10` 象限圖 | +2 → **40** |
+### 2026-07-30 一次裁剪：39 → 11 張（使用者授權全權評選）
 
-第二期需另建 PNG 產圖管線：Flex 沒有繪圖元件，只有 `image` 元件吃 HTTPS 公開網址，
-所以要「產 PNG → commit 進 repo → 由 Pages 供公開網址 → Flex `image` 引用」。
-這是獨立的一套工程，不阻擋第一期上線。
+首晚實推後使用者判定內容不夠實用，授權以投資人角度重選。判準三條：
+**不開網站也想送到眼前／會影響明天的決定／更新頻率配得上每日推播**。
+留 `v2-ov-1`、`v2-ov-6`、`flows-hdr-1/2`、`flows-foreign-1`、`flows-trust-1`、`pm-aetf-5`、
+訊號卡 1/2/5/6。砍 22 張的理由分四類：重複（global-1/ov-5/ov-7/ov-8/ov-14/chain-1/rank-1/
+morning-3）、晚間已過時（morning-2 是 D-1 晨報、morning-4 是昨晚美股而今晚美股已開盤）、
+慢變數週看即可（mktbal-1/2、ff-1、etf-1、lending-3/4/6）、回測無正向依據或有更強子集
+（卡 3 母體超額為負、卡 4 讓位給卡 5、aetf-2/4、block-1）。
 
-### 3B.5 carousel 分組（建議，實作可調）
+**呈現層改向（同日決定）**：Pillow 產 PNG 嵌 Flex hero，取代原「第二期 treemap/象限圖」。
+Worker `/cards/data` 為卡片邏輯唯一來源、Python 只渲染；PNG 缺席退文字版。
+PNG 公開網址由 **raw.githubusercontent** 供應（`RAW_BASE_ROOT`；原文寫 Pages，誤記已更正——
+`cards.yml` commit step 明注「PNG 由 raw.githubusercontent 供 LINE hero 引用，網站不吃這批檔」）。
 
-39 個 bubble 分 4 個 carousel，**依主題分組而非依站台**——讀者不關心資料來自哪個 repo：
+### 2026-08-16 二次裁剪：11 → 5 張（使用者指示，commit `69c7824`）
 
-1. **大盤概況**：指數、總結、定調句、三大法人、台指期、美股、大盤餘額
-2. **資金流向**：貢獻點三張、次產業強弱、產業鏈、佔比排行
-3. **法人籌碼**：外資/投信排行、ETF 相關、借券融資
-4. **訊號**：6 張訊號卡 ＋ C 類四張（回測通過後）＋ **免責卡固定壓底**
+sig 四張（sub-surge／dual-buy／exit-sell／surge-warn）移出；v2-ov-1＋flows-hdr-1＋flows-hdr-2
+合併成 `v2-dash-1` 三合一看板（新增成交值列）；`v2-ov-6` 附每業前 3 檔個股；`pm-aetf-5`
+改排行 rows 形；**免責卡自 carousel 移除**（純文字退路仍帶免責句）。現值清單見 §0。
+`flows-sync-1` 解鎖路徑保留（§3B.3 口徑覆核通過後可 +1 張）。
+
+---
+
+## 3D. 盤後分析摘要長文卡（2026-08-07 新增，現役）
+
+**卡 id `pm-summary-1`（`FX_LONGFORM_CARD`），走獨立 LINE Image message，不進 Flex carousel。**
+
+- **為什麼不進 carousel**：synthesis 全文約 2000 字，Flex image 硬限 1024×1024 且高不得超過
+  寬三倍；實測縮進後有效字級 7.5px 不可讀。Image message 官方明訂像素無上限、檔案 10MB
+  （developers.line.biz/en/news/2020/05/12/messaging-api-update-may-2020/）。
+- **計費**：按收訊人數計，同一 push 附加這則圖**零計費增量**；push 上限 5 message，超過就不附
+  （Flex 優先）。
+- **資料流**：postmkt `data/summary/<YYYYMMDD>-pm.json` 的 `synthesis.text` →
+  `fxCardSummaryLongform`（摘要日必須等於資料日，否則 skip）→ `/cards/data` →
+  `render_longform` → PNG＋preview → manifest → `pushDailyCards` 附加 image message。
+- **禁用字**：`fxNeutralize` 先同義中性替換（LLM 長文踩黑名單機率高，整張丟等於常態消失），
+  換完仍過 `assertCardAllowed` 最後防線。
+- **誠實原則的例外處理（使用者 2026-08-07 定案）**：保留全文、內含方向判斷與假設性進出情境，
+  與其餘卡「僅描述歷史統計傾向」不同——標題明標「AI 生成」、專屬免責句、footer 說明差異。
+- **降級**：長文任一步失敗都只是「當晚沒有這則圖」，Flex carousel 不受影響。
+- **am 場**：晨間平行版＝`am-brief-1` 晨報長文卡（見 §0 晨間場；date 閘門用
+  `daily-brief-card.json` 的 date，不用晚間 baseline gate）。晚班 `pushDailyCards` 無 slot、
+  硬編碼不動。
 
 ---
 
@@ -290,267 +265,153 @@ AS-11 的反向資訊（RSI(5)<20 後續**繼續弱**，跌深買進不成立）
 
 回測的關鍵限制：**12 個五分位表全部非單調**。排序只能當「大致分層」，名次不具統計意義。
 
-卡面因此必須遵守：
-
 1. **不標名次序號**（不出現「第1名」「Top 1」），僅依值降序排列。
-2. **不用「最強／最弱／必漲／該買」等字眼**；狀態詞中性。
-3. **每張卡底部附口徑註記**：`排序依 <欄位>，歷史分離度 <X>%、非單調`。
-4. **carousel 末尾固定一張免責 bubble**：「技術指標為現況描述、非買賣訊號，僅供參考」
-   （與 `taiwan-stock-news` 分頁頂部免責卡同一組約定）。
+2. **不用「最強／最弱／必漲／該買」等字眼**；狀態詞中性（`FX_FORBIDDEN` 黑名單＋
+   `fxNeutralize` 中性化＋ `assertCardAllowed` 守門，Flex 與純文字同一道）。
+3. **每張卡底部附口徑註記**（例：`依外資買超金額降序`）。
+4. **免責句**：~~carousel 末尾固定一張免責 bubble~~——2026-08-16 起 carousel 不再壓底免責卡
+   （使用者指示，commit `69c7824` ⑤）；`FX_DISCLAIMER` 文字與 `disclaimerBubble` 保留，
+   **純文字降級版仍以 `※ FX_DISCLAIMER` 收尾**（與 taiwan-stock-news 分頁頂部免責卡同一組
+   約定的載體，從 carousel 移到文字退路）。
 5. 不做預測宣稱，只描述歷史統計傾向與局限（鐵律 #8）。
 
 ---
 
-## 5. 實作接點
+## 5. 實作接點（符號名，現值）
 
-現有程式（`worker/src/index.js`）：
-
-- `lineRequest(token, userId, text)` :1269-1273 — payload 硬寫 `messages:[{type:"text",text}]`
-- `sendAlert(env, text, fetchFn)` :1276-1293 — **簽章只吃 text 字串**，webhook 與 LINE 共用同一份
-- `alertJob(env, tp, tag, text)` :1302-1314 — 已有週末守門 ＋ KV 每日每 tag 去重
-- 測試慣例：`worker/test/alerts.mjs` 43 項離線斷言（其中約 9 項驗 LINE payload），純函式、免 token
-
-### 必要改動
-
-1. **`lineRequest` 擴充成可帶任意 message object**，保持既有 text 呼叫端不變（預設仍包 text）。
-   純函式性質必須保留——這是離線測試的前提。
-2. **新增 Flex 建構器**（建議 `buildCardCarousel(cards)`），純函式、無 I/O，輸出 carousel JSON。
-3. **雙通道降級**：Flex 只有 LINE 認得，Discord/Telegram 無法渲染。
-   每張卡同時產「Flex 版」與「純文字降級版」，`sendAlert` 依通道選用。
-   Flex 建構失敗時 LINE 也退純文字——不可因版型錯誤導致整則不發。
-4. **推播時段**：接在既有 `evening` 晚場協調班（台北 21:00–23:55 每 5 分）之後，
-   資料落地後推一次。沿用 KV 去重鍵型式（`alerted:<date>:<tag>`）避免一晚重複推。
+- `lineRequest(token, userId, textOrMessages)`——可帶任意 message 陣列，字串呼叫端自動包 text。
+- `sendAlert(env, text)`——webhook 與 LINE 共用的純文字通道。
+- `buildCardCarousels(cards, altText)`——卡陣列 → flex messages（每 carousel ≤12 bubble、
+  <50KB；≤5 message；bubble <30KB，皆 UTF-8 位元組）。
+- `cardsFallbackText(cards, dateStr)`——純文字降級版（Flex 建構丟例外時 LINE 也退這份），
+  同過 `assertCardAllowed`，帶免責句。
+- `buildDailyCards(src)`——純函式組卡（無 fetch／KV／Date.now），逐卡獨立失敗記 skipped。
+- `buildCardsData(env, tp, …, {slot})`——`/cards/data` 端點主體，`FX_ACTIVE_CARDS`／
+  `FX_AM_CARDS` 過濾＋`assertCardAllowed` 縱深過濾；date＝**資料日**（pm＝baseline.date、
+  缺→null→Python 拒渲染；am 見新鮮度守門註解）。
+- `pushDailyCards`（晚間，manifest date==今日才掛 hero 圖）／`pushMorningCards`（晨間）。
+- `runCardsRender`／`runCardsRenderAm`——dispatch `cards.yml`（inputs.slot）。
+- Python：`src/build_cards_png.py`（`--slot am|pm`；守門攔截＝成功＋警告 exit 0、
+  真故障非零——2026-08-16 修）。
+- 測試：`worker/test/` 全部 `.mjs` 離線免 token（cards／dailycards／cardsend／morningcards
+  等），`tests/test_cards_png.py`。
 
 ---
 
-## 6. 驗收條件
+## 6. 驗收條件（2026-08-16 盤點：已完成項打勾註日期）
 
-實作完成的定義（鐵律 #6）——逐條可驗，全部離線、免 token：
-
-- [ ] `buildCardCarousel` 為純函式，`node` 直接呼叫可產出 JSON，無網路無 token
-- [ ] **每個** carousel bubble 數 ≤ 12，且同一 carousel 內所有 bubble 的 `size` 相同
-- [ ] **一次 push 的 message object 數 ≤ 5**（39 bubble → 4 個 carousel，仍在上限內）
-- [ ] **每個** carousel JSON 序列化後 < 50 KB；單一 bubble < 30 KB（測試中斷言）
-- [ ] 整個 request < 2 MB
-- [ ] `altText` 必存在、長度 ≤ 1500
-- [ ] 所有多字 text 元件都有 `wrap:true`（測試遍歷 JSON 樹斷言）
-- [ ] 每張卡都有口徑註記行；carousel 末尾有免責 bubble
-- [ ] 卡面無名次序號、無「最強／該買」類字眼（測試以字串比對守門）
-- [ ] regime 閘門只作用於卡 1 與卡 2（測試：空頭環境下卡 1／卡 2 被抑制、**卡 3–6 不變**）
-- [x] R2 已實跑（2026-07-26），卡 2 的 regime 結論已回填本文件
-      → **翻向，補掛閘門**；空頭 N=31 的樣本限制已一併記載
-- [x] M4 已實跑（2026-07-26），卡 3 的排序欄已依 M4 結論回填本文件
-      → 法人買強度 0.92% ≥ 0.30% 門檻，**採用**；母體無正超額的限制已一併記載
-- [ ] 卡 3 卡面文案不得暗示 Q1 為看多標的（母體 T+3 勝大盤僅 41.7%）
-- [ ] 卡 1 與卡 2 的 regime 閘門，卡面與文件皆不得聲稱「空頭時會轉負」為已驗證
-      （卡 1 翻向量級 0.02pp 且中位數無翻向；卡 2 空頭僅 31 筆）
-- [ ] **C 類 5 張訊號卡在回測結論產出前不得上線**（`flows-sync-1/2`、`flows-oppose-1/2`
-      ＝ alpha 預註冊 AS-01~04；`pm-aetf-1` 無回測）——測試以卡別白名單守門
-- [ ] **`pm-aetf-1` 建議句文案已改寫為描述句**，不得出現「建議」「關注」「訊號明確」等引導語
-- [ ] B 類 9 張排行卡的卡底都標明排序欄位（例：`依外資買超金額降序`），
-      且卡面無強弱形容詞
-- [ ] 第一期 38 張全部產得出 bubble；第二期兩張圖表卡（`v2-ov-9`／`v2-ov-10`）
-      未納入第一期輸出
-- [ ] 純文字降級版在 Flex 建構丟例外時仍可產出
-- [ ] `worker/test/alerts.mjs` 既有 43 項全過（不得回歸）
-- [ ] 新增測試檔納入 `worker/test/`，離線可跑
-- [x] `GET /v2/bot/message/quota` 實測本帳號額度（2026-07-29：limited 200/月），已補回第 1 節
-- [x] **線上驗證**（2026-07-29 首晚實推）：版型／紅漲配色／口徑註記／資料日標註／
-      多 carousel 皆正確。首晚抓到兩缺陷並已修＋重新部署：①卡 2-6 缺流動性過濾、
-      榜面被冷門股佔據（卡面未鏡像回測母體 LIQ≥1e8，修於 `32280b1`）；
-      ②「強度」行內標籤導致折行（同 commit 移除）。修正版明晚生效，需複核榜面。
-- [ ] fresh-context subagent 驗收通過（改動者不得自驗，鐵律 #3）
+- [x] `buildCardCarousels` 純函式、離線可跑（2026-07-29 上線；`test/cards.mjs`）
+- [x] 每 carousel ≤12 bubble、size 全同（2026-07-29；`test/cards.mjs`／`test/dailycards.mjs`）
+- [x] 一次 push message object ≤5（2026-07-29；超過拋錯，測試涵蓋 61 卡邊界）
+- [x] carousel <50KB、bubble <30KB，UTF-8 位元組口徑（2026-07-29；2026-07-28 字元數 bug 已修）
+- [x] 整個 request <2MB（結構推得：≤5 carousel×50KB＋image URL 引用，遠低於上限；無單獨測試）
+- [x] `altText` 必存在且 ≤1500（2026-07-29；`test/cards.mjs`）
+- [x] 所有多字 text 元件 `wrap:true`（2026-07-29；測試遍歷 JSON 樹斷言）
+- [x] 每張卡口徑註記行（2026-07-29 線上驗證記錄「口徑註記正確」）；免責 bubble 條目已改制
+      （2026-08-16 起 carousel 不附，文字退路帶免責句，見 §4.4）
+- [x] 卡面無名次序號、無禁用字（2026-07-29；`FX_FORBIDDEN`＋`assertCardAllowed`，字串比對守門）
+- [x] regime 閘門只作用卡 1/卡 2、卡 3–6 不變（2026-07-29；`test/dailycards.mjs` 閘門節）
+- [x] R2 已實跑（2026-07-26），卡 2 翻向＋空頭 N=31 限制已記載
+- [x] M4 已實跑（2026-07-26），卡 3 排序欄採法人買強度、母體無正超額限制已記載
+- [ ] 卡 3 卡面文案不得暗示 Q1 為看多標的——**卡未啟用**（2026-07-30 裁剪），重啟時適用
+- [ ] 卡 1/卡 2 卡面與文件不得聲稱「空頭時會轉負」為已驗證——**卡已停用**（2026-08-16 移出
+      白名單），重啟時適用
+- [x] **C 類 5 張回測結論產出前不得上線**——守門機制已落地（`FX_BLOCKED_CARDS`＋
+      `assertCardAllowed`，2026-07-29 起生效）；**規範持續有效**：解鎖唯一路徑＝§3B.3 前置
+      條件逐項完成
+- [ ] `pm-aetf-1` 建議句文案改寫為描述句——未做（卡仍封鎖，改寫是解鎖前置）
+- [x] B 類排行卡卡底標明排序欄位、無強弱形容詞（2026-07-29 線上驗證；現役排行卡沿用）
+- [x] 第一期 38 張全部產得出 bubble（2026-07-29 上線達成；其後被 3C 裁剪取代，現役白名單
+      5 張，builder 35 張仍全數可產出——`test/dailycards.mjs` 全量組裝節）
+- [x] 純文字降級版在 Flex 建構丟例外時仍可產出（2026-07-29；`cardsFallbackText` 測試）
+- [x] 既有測試零回歸（持續性條件；最近一次全綠紀錄＝2026-08-16 commit `69c7824`，
+      worker/test 20 支）
+- [x] 新增測試檔納入 `worker/test/`（cards／dailycards／cardsend／morningcards 等，離線可跑）
+- [x] `GET /v2/bot/message/quota` 實測本帳號額度（2026-07-29：limited 200/月）
+- [x] **線上驗證**（2026-07-29 首晚實推）：版型／紅漲配色／口徑註記／資料日標註／多 carousel
+      皆正確；首晚兩缺陷（流動性過濾、行內標籤折行）已修
+- [ ] fresh-context subagent 驗收（鐵律 #3）——無完成紀錄可佐證，保留未勾
 
 ---
 
 ## 7. 未查證事項（不得寫成定論）
 
-以下沒有官方依據，實作時遇到請實測或走 validate 端點
+以下沒有官方依據，遇到請實測或走 validate 端點
 （`POST https://api.line.me/v2/bot/message/validate/push`）：
 
-1. ~~台灣免費方案每月則數~~ **已解（2026-07-29）**：本帳號實測
-   `GET /v2/bot/message/quota` → `{"type":"limited","value":200}`，每月 200 則。
-2. **carousel 超過 12 bubble 的確切行為**（400／截斷／只渲染前 12）。官方未明寫。
-3. **`altText` 超過 1500 字的確切行為**（400／自動截斷）。官方未明寫。
-4. **Flex text 元件的字數上限**——官方**確實沒有規定**（逐欄看完 spec 無 "Max character limit"）。
-   實務受 30KB/50KB 綁。可寫「無明文上限，以 KB 為準」。
-5. **Flex text 內使用 Unicode emoji 是否官方支援。** 只有 `altText` 有明文。
-6. **單一 box 子元件數 / 巢狀深度上限。** 官方未規定，同樣以 KB 為實際上限。
+1. ~~台灣免費方案每月則數~~ **已解（2026-07-29）**：實測 quota 200/月。
+2. carousel 超過 12 bubble 的確切行為（400／截斷／只渲染前 12）。
+3. `altText` 超過 1500 字的確切行為（400／自動截斷）。
+4. Flex text 元件字數上限——官方確實沒有規定，實務受 30KB/50KB 綁。
+5. Flex text 內 Unicode emoji 是否官方支援（只有 `altText` 有明文）。
+6. 單一 box 子元件數／巢狀深度上限（官方未規定，以 KB 為實際上限）。
 
-> 本節事實來源：LINE 官方將 developers.line.biz 全站內容以 Markdown 發佈於
-> GitHub `line/line-developers-docs-source`（查證時 commit `c7dfdeaf`，2026-07-23），
-> 另交叉核對官方 OpenAPI spec `line/line-openapi` 的 `messaging-api.yml`。
-> `developers.line.biz` 本身被本 session 的 egress policy 擋住，上表 URL 為來源標註，
-> 供人工複核用。
+> 事實來源：LINE 官方文件 Markdown 源 `line/line-developers-docs-source`（查證時 commit
+> `c7dfdeaf`，2026-07-23），交叉核對官方 OpenAPI `line/line-openapi` 的 `messaging-api.yml`。
 
 ---
 
 ## 8. 回測腳本的平手值問題（2026-07-26 發現，2026-07-27 已修）
 
-### 原始問題
+**現象**：同一份 `backtest/cache/`、同一份程式碼，S2「連續退出日數」分離度五次跑出
+0.07%～1.36%。**根因**：`codes` 字串 set 走訪順序依 `PYTHONHASHSEED` 隨機，穩定排序讓平手
+樣本沿用隨機順序，切點落在平手堆時分組隨機化。
 
-**現象**：同一份 `backtest/cache/`、同一份程式碼，S2 的「連續退出日數」分離度五次分別跑出
-0.07%／0.18%／0.35%／0.57%／1.36%。
+**已實施修正**（`backtest/run_sorting.py`）：
+1. 固定迭代順序 `sorted(codes)`——seed 0/7/42 報告 byte-identical，除 S2 外八項結論一字未變。
+2. 平手率守門（`quintile()`，`MAX_TIE_RATE = 0.50`）——超限欄位回 `None` 失效安全排除；
+   受影響欄位 `consec_exit`（98.2%）與 `consec`（82.0%）已自動排除。
+3. 降級路徑補失效安全分支（`run_s1`／`run_s2` 候選全空、`run_m2` 不檢查 None 三處）。
 
-**根因**（`run_sorting.py:60-62`）：`codes` 是字串 `set`，走訪順序依 `PYTHONHASHSEED`
-每個 process 隨機；該順序傳遞到 `stock_samples`，而 `quintile()` 用的 `list.sort()`
-是**穩定排序**，於是平手樣本沿用這個隨機順序，切點落在平手堆裡時分組就隨機化。
+前兩道缺一不可（已拆開實跑驗證）。離線回歸 `test_sorting_smoke.py` 六組＋突變測試確認
+每組會因對應退化變紅。
 
-R2 與 M4 在 seed 0/1/2/7 下**完全一致**（R2 +0.68%／−0.76%、M4 法人買強度 0.92%），
-因為 R2 不做分位、M4 三個候選欄都是連續值幾無平手。
-
-### 已實施的兩道修正
-
-1. **固定迭代順序**（`run_sorting.py:66`）：`codes = sorted(codes)`。
-   實測 seed 0/7/42 產出的 `report_sorting.md` **byte-identical**
-   （sha256 `6328167a0480b3c9…`），整份報告不再需要指定 seed 才能重現。
-   **除 S2 外，其餘八項結論一字未變**，覆核成本遠低於原先估計。
-2. **平手率守門**（`quintile()`，常數 `MAX_TIE_RATE = 0.50`）：
-   最大重複值占比超過上限的欄位直接不列入候選，回 `None`（失效安全方向——
-   萬一有呼叫點漏改，行為是排除該欄而非誤採）。`fmt_quintile()` 對「樣本不足」與
-   「無有效變異」印兩條不同文案，並附上實際平手率。
-
-3. **降級路徑補失效安全分支**：平手率守門讓「候選全被擋」這條路徑首次變得可達。
-   `run_s1()`／`run_s2()` 原本沒有 else，候選全空時整段不印結論行，會同時打破
-   離線測試與 CI 行號守門；`run_m2()` 則相反——不看 `quintile()` 是否回 None
-   就無條件宣告「排序依法人買強度」，是七個呼叫點中唯一不失效安全的一處。三處均已補。
-
-**前兩道缺一不可**（已用拆開實跑驗證）：只有守門而無 `sorted(codes)` 時，
-seed 1/2/3/42/123 仍產出四個不同的報告 sha，S1 的 Q3 在 −0.34%／−0.35% 之間跳動；
-只有 `sorted(codes)` 而無守門時，S2 會穩定地輸出「採用連續退出日數（分離度 1.44%）」
-——穩定但仍是平手堆切出來的假象。守門擋掉的是平手率 >50% 的極端欄位；
-平手率中等（例如 20%）的欄位仍然只能靠固定迭代順序來保證可重現。
-
-**受影響欄位**：`consec_exit`（S2，平手率 98.2%）與 `consec`（M1，82.0%）現已自動排除。
-M1 原本就採 R 值，結論不變；S2 見第 3 節卡 5。其餘排序欄平手率均 <5%，不受影響。
-
-**報告內文的連帶變動**（結論不受影響，但重跑比對時會看到）：
-- M1 段的「連續湧入日數」分位表被守門換成一行「無有效變異（82.0%）」。M1 原採 R 值，結論不變。
-- S1 段 Q3 超額 avg 由 −0.34% 變 −0.35%：`break_depth` 有 0.15% 的平手率，
-  切點上剛好有平手樣本，固定迭代順序後落點改變。這是修正(1) 生效的指紋。
-
-**離線回歸測試**：`test_sorting_smoke.py` 新增六組——代號走訪順序為字典序、平手率計算、
-守門生效、無平手時分位結果與輸入順序無關、兩條文案不可混用、已 commit 的報告九段齊全
-且各有結論行。免 token、免快取，CI 可跑。突變測試確認每組都會因對應的程式碼退化而變紅
-（把 `sorted(codes)` 改回 `list(codes)`，順序測試在 seed 0/7/42/123 下全部 FAIL）。
-
-### 仍待處理
+### 仍待處理（兩條未結案，原樣保留）
 
 - **`run_s2()` 沒有採用門檻。** `run_m4()` 有先訂的 `M4_MIN_SPREAD`，`run_s2()` 沒有，
   所以它對分離度 0.01% 的候選照樣宣告「採用」。規格已以「不排序」覆蓋，但報告文案
   仍會誤導讀者。建議補上與 M4 同規格的先訂門檻。**修改前必須先訂門檻值並記錄於 commit，
   不得看著 0.01% 這個已知數字回頭訂**（否則就成了事後挑選，違反鐵律 #8 的精神）。
 - **完整重生比對無法進 CI**：`backtest/cache/` 不進 git，CI 無法重跑 `run_sorting.py`
-  比對報告是否與腳本同步。目前靠上述離線結構檢查涵蓋「結論行消失」這類回歸
-  （即 commit f46aaf8 手改報告造成的那類）。若要完整涵蓋，需在 Actions 排一支
-  帶 `FINMIND_TOKEN` 的週期性 job（抓快取約 50 分鐘），尚未建置。
+  比對報告是否與腳本同步。目前靠離線結構檢查涵蓋「結論行消失」這類回歸。若要完整涵蓋，
+  需在 Actions 排一支帶 `FINMIND_TOKEN` 的週期性 job（抓快取約 50 分鐘），**尚未建置**。
 
 ---
 
-## 9. 資料組裝層（2026-07-28 調查定案）
-
-第一期實際組裝 **33 張**（38 − C 類 5 張，後者由 `FX_BLOCKED_CARDS` 建構時擋）。
-完整逐卡對應表（來源 URL／JSON path／更新時點／複雜度）見調查紀錄，此處只記決策與缺口。
+## 9. 資料組裝層（2026-07-28 定案；來源數依現值更正）
 
 ### 9.1 架構決策
 
-1. **推播時點：台北 22:30–23:00 窗**，接在既有 evening 協調班之後。理由：資料最晚
-   就緒鏈是 postmkt daytrade 二段（~21:30 後觸發）與 aetf2（≥21:45）；baseline
-   （6 張訊號卡全依賴）20:05–20:55 就緒、flows 系 21:19–21:4x 常態就緒。
-2. **一次推播 fetch 13 支 JSON ≈ 3.1MB**，其中 postmkt.json 2.43MB 佔大宗——
-   `runEvening` 既有 `getP` 快取（`worker/src/index.js:1063-1064`）同一次喚醒可共用。
-3. **v2-ov-7／v2-ov-14／v2-chain-1 走 build_daysummary 補欄**，不走推播時呼叫
-   buildLive：後者依賴「收盤後 /live 仍回當日定格」在 21:30+ 是否成立未驗證，
-   且每次推播多 580KB classify ＋ FinMind snapshot。收盤資料落地成 JSON 才可驗。
-4. **v2-global-1 的 VIX**：推播時打一次 `finFuturesVix`（`index.js:50-75` 既有函式），
-   失敗則該欄顯示「—」，不擋整張卡。
-5. **pm-mktbal-1/2 的時效**：mktbal 在鏈尾（GH 備援 22:55，實測拖到過隔日 04:49）。
-   組裝層**帶資料日標註**（誠實原則的來源徽章慣例），落後就標「資料日 MM-DD」，
-   不跳卡、不裝新。
-6. **Regime 閘門的 TAIEX 20 日序列**：取 flows `totals.json → rows[date].taiex`
-   （91 交易日、偶有 null——實查 2026-06-30 為 null，20MA 計算需容 null 跳過）。
+1. **推播時點：台北 22:30–23:00 窗**，接在既有 evening 協調班之後（資料最晚就緒鏈＝
+   postmkt daytrade 二段與 aetf2；2026-08-07 起另依賴 pm 摘要 summaryPm）。
+2. **來源清單以 `cardSourceUrls` 現值為準**：pm slot 回 **15 個 key＝14 支資料 JSON
+   （daysummary／baseline／morning／us／lastweek／aetfLatest／aetfDiff／flowsLatest／totals／
+   foreignHistory／flowsDaily／postmkt／mktbal／summaryPm）＋ manifest（渲染產物回讀）**；
+   am slot 4 支（daysummary／morning／us／dailyBrief）。原文寫 13 支已過時。
+   postmkt.json（>2MB）佔大宗，`runEvening` 的 `getP` 快取同一次喚醒共用。
+3. v2-ov-7／v2-ov-14／v2-chain-1 走 `build_daysummary` 補欄，不走推播時呼叫 buildLive
+   （該三卡現已裁，欄位管線保留）。
+4. VIX（原 v2-global-1 用）：`/cards/data` 走 noVix——活躍卡皆不用 vix，公開端點不打 FinMind。
+5. 落後來源**帶資料日標註**（誠實原則的來源徽章慣例），不跳卡、不裝新。
+6. Regime 閘門 TAIEX 20 日序列取 flows `totals.json → rows[date].taiex`（偶有 null，
+   20MA 計算容 null 跳過）。
 
-### 9.2 上游資料缺口（Phase A，先於組裝層）
+### 9.2 上游資料缺口（Phase A）
 
-| # | 缺口 | 修改點 | 性質 |
-|---|---|---|---|
-| 1 | 卡 3 排序母體 `nh`（突破20日新高旗標） | `src/build_baseline.py:217-223`＋schema 註解 `:4/:12`，加在 stocks 陣列 index 8 | additive，消費端 `index.js:142-148` 只讀到 b[6] 不受影響 |
-| 2 | 卡 1 排序 R 值（＋C 值） | `build_baseline.py:68-100` sub_signal 回傳值＋`:225-229` subs_y 擴充為 `[y1,y2,C,R]` | additive；Worker 透傳點 `index.js:453,464`；v2 前端讀 subs_y 處需驗不破 |
-| 3 | 卡 4 排序「量能趨勢」需 a20 | build_baseline 主迴圈已握 21 日資料（NDAYS=21 `:31`），加 20 日均額欄 | additive |
-| 4 | ov-7/ov-14/chain-1 收盤全表 | `src/build_daysummary.py` 補 chain 聚合與全 subs 表 | 檔案變大需評估（daysummary 現僅 2KB） |
+卡 1/3/4 排序欄的 baseline 補欄（`nh` 旗標、subs_y 的 C/R、a20）與 daysummary chain 聚合，
+均為 additive schema 擴充（詳 `src/build_baseline.py`／`src/build_daysummary.py` schema 註解）。
+注意：subs_y 的 C/R 是**日線口徑**（`backtest/run_sorting.py` 同款）；KV `flow:last` 的
+`c1/c2/ret` 是盤中 10/30 分窗口徑，**不可混用**。
 
-注意：subs_y 的 C/R 是**日線口徑**（`backtest/run_sorting.py` 同款）；KV `flow:last`
-的 `c1/c2/ret` 是盤中 10/30 分窗口徑，**不可混用**（調查已確認兩者不同源）。
+### 9.3 組裝層驗收條件（Phase B，2026-08-16 盤點）
 
-### 9.3 組裝層驗收條件（Phase B）
-
-- [ ] `buildDailyCards(data)` 純函式：輸入 13 支 JSON 的物件包，輸出卡片資料物件陣列；
-      無 fetch、無 KV、無 Date.now（日期由參數傳入）
-- [ ] 每張卡可獨立失敗：來源缺欄／JSON 空 → 該卡剔除並記入 skipped 清單，不擋其他卡
-- [ ] 發送層：判空（0 卡不推）、逐卡過 `assertCardAllowed` 預過濾、Flex 失敗退純文字
-- [ ] regime 閘門只作用卡 1/卡 2；TAIEX 20MA 容 null
-- [ ] 每張卡帶資料日標註；落後的來源標日期不裝新
-- [ ] KV 去重 `alerted:<date>:cards` 同款鍵型，一晚只推一次
-- [ ] 離線測試：13 支 JSON 的 fixture（從真實 data/ 抄縮減版）→ 33 張全產出斷言；
-      單一來源缺失 → 對應卡 skipped 其他不受影響
-- [ ] `worker/test/` 既有測試零回歸
-- [ ] fresh-context subagent 驗收（鐵律 #3）
-
----
-
-## 3C. 內容裁剪（2026-07-30，使用者授權全權評選）
-
-首晚實推後使用者判定內容不夠實用，授權以投資人角度重選。判準三條：
-**不開網站也想送到眼前／會影響明天的決定／更新頻率配得上每日推播**。
-
-**39 → 11 張**（`FX_ACTIVE_CARDS` 白名單，builder 全保留、加回清單即復活）：
-留 `v2-ov-1`、`v2-ov-6`、`flows-hdr-1/2`、`flows-foreign-1`、`flows-trust-1`、
-`pm-aetf-5`、訊號卡 1/2/5/6。11＋免責＝12 bubble＝單一 carousel。
-
-砍 22 張的理由分四類：重複（global-1/ov-5/ov-7/ov-8/ov-14/chain-1/rank-1/morning-3）、
-晚間已過時（morning-2 是 D-1 晨報、morning-4 是昨晚美股而今晚美股已開盤）、
-慢變數週看即可（mktbal-1/2、ff-1、etf-1、lending-3/4/6）、
-回測無正向依據或有更強子集（卡 3 母體超額為負、卡 4 讓位給卡 5、aetf-2/4、block-1）。
-
-**呈現層改向（同日決定）**：使用者提供參考風格（深藍底＋金色漸層條＋獎牌排行圖卡），
-呈現改為 **Pillow 產 PNG 嵌 Flex hero**。原「第二期 treemap/象限圖」取消，
-由本方向取代。架構：Worker `/cards/data` 端點輸出 buildDailyCards 結果
-（卡片邏輯唯一來源，Python 只渲染不算數）→ Actions 晚班 Pillow 渲染 →
-commit → Pages 供 HTTPS URL → Flex bubble hero 引用；PNG 缺席退文字版。
-理由：一次 push 上限 5 message，11 張獨立圖片訊息塞不下，PNG-in-Flex
-維持單 carousel。`flows-sync-1` 解鎖路徑保留（口徑覆核通過後 +1 張）。
-
----
-
-## 3D 盤後分析摘要長文卡（2026-08-07 新增）
-
-**卡 id `pm-summary-1`，走獨立 LINE Image message，不進 Flex carousel。**
-
-- **為什麼不進 carousel**：synthesis 全文約 2000 字，Flex image 硬限 1024×1024
-  且 aspectRatio 的 height 不得超過 width 三倍。實測 34px 內文渲染成 1040×4812，
-  縮進 1024 後有效字級 7.5px、比例 4.6:1 —— 兩條都過不了。
-  Image message 自 2020-05 起官方明訂**像素無上限**、檔案 10MB
-  （developers.line.biz/en/news/2020/05/12/messaging-api-update-may-2020/）。
-- **計費**：官方按收訊人數計，非 request 內 message 物件數
-  （messaging-api/pricing #how-to-count），故附加這則圖**零計費增量**。
-  push 上限 5 則 message，超過就不附（Flex 優先）。
-- **資料流**：postmkt `data/summary/<YYYYMMDD>-pm.json` 的 `synthesis.text`
-  → Worker `fxCardSummaryLongform`（**卡片邏輯唯一來源仍在 Worker**，Python 只渲染）
-  → `/cards/data` → `render_longform` → `pm-summary-1.png` ＋ `pm-summary-1-preview.png`
-  → manifest `images`／`previews` → `pushDailyCards` 附加 image message。
-- **禁用字**：`fxNeutralize` 先把命中詞換成中性詞（LLM 生成的 2000 字踩中黑名單機率遠高於
-  人工短文案，沿用「整張丟」等於該卡常態消失），換完仍過 `assertCardAllowed` 當最後防線。
-- **誠實原則的例外處理（使用者 2026-08-07 定案）**：本卡保留全文，內含方向判斷與假設性
-  進出情境，**與其餘卡片「僅描述歷史統計傾向」不同**。因此：標題右上明標「AI 生成」、
-  改用專屬免責句取代通用那句、footer 另加一行說明本卡與其他卡的差異。
-  另兩個被否決的方案：改 `build_summary.py` prompt（會連帶改掉網頁版內容）、
-  只取「盤勢綜合研判」一節（約 287 字，不是全文）。
-- **降級**：長文任一步失敗（摘要未就緒／日期不符／渲染超標／manifest 無圖）都只是
-  「當晚沒有這則圖」，Flex carousel 完全不受影響。
-- **am 場（2026-08-10 已實作，見 CLAUDE.md「晨間 LINE 圖卡」節）**：獨立於晚班——
-  `build_cards_png.py --slot am` 輸出 `data/cards/am/`、Worker 端 `buildCardsData(slot)`
-  ＋ `runMorning`／`pushMorningCards`（時窗 08:20–08:50、dedup `cards-am`）；晨報長圖
-  `am-brief-1` 資料源為 taiwan-stock-news 的 `daily-brief-card.json`（date 閘門用該檔
-  date，不用晚間 baseline），昨日市場三卡重啟 fxCardMorning2/3/4（morning.json
-  generated_at 台北日閘門）。晚班 `pushDailyCards` 維持無 slot、硬編碼不動。
-
+- [x] `buildDailyCards(data)` 純函式：無 fetch、無 KV、無 Date.now（2026-07-29；
+      `test/dailycards.mjs` 離線 fixture 全程驗）
+- [x] 每張卡可獨立失敗：來源缺→該卡入 skipped 不擋其他卡（2026-07-29；單源缺失測試節）
+- [x] 發送層：判空不推、逐卡 `assertCardAllowed` 預過濾、Flex 失敗退純文字（2026-07-29）
+- [x] regime 閘門只作用卡 1/卡 2；TAIEX 20MA 容 null（2026-07-29；閘門測試節含 totals 壞檔）
+- [x] 每張卡帶資料日標註；落後來源標日期不裝新（2026-07-29 線上驗證）
+- [x] KV 去重 `alerted:<date>:cards`（pm）／`alerted:<date>:cards-am`（am），一場只推一次
+- [x] 離線 fixture 測試：全卡產出斷言＋單源缺失降級（2026-07-29 起，隨白名單改版更新）
+- [x] `worker/test/` 既有測試零回歸（持續性條件；最近全綠＝2026-08-16）
+- [ ] fresh-context subagent 驗收（鐵律 #3）——無完成紀錄可佐證，保留未勾
