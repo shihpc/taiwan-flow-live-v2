@@ -785,10 +785,20 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
     `&dry=0` 才真的補發）。測試 `worker/test/backup.mjs`（49 通過）。
   - **天花板誠實**：只解「GH 排程延遲/漏發」；FinMind 上游資料公布時點（法人 20:00…）與異常仍是天花板，
     備援不讓資料比來源更早，只保證「來源一有就最多晚幾分鐘被抓」。
-  - **未解/續作可選**：低頻班（lastweek 週一、meta 月）與已有機制者（intraday 前端不讀、summary 內部閘門、
-    morning/news/flows/postmkt 已有 Worker dispatch）本期未納入；如需再照同模式加 cron＋設定即可。
-    另 postmkt 的 mktbal/diag 上游是 build.yml（21:53），若 build.yml 本身漏跑，補跑 mktbal/diag 可能拿到舊資料
-    （本備援只保 mktbal/diag 自身排程，不含上游）。
+  - **低頻班（2026-08-30 C5，已結案）**：`lastweek`（台北週一 09:00）與 `meta`（每月第一個週六 08:00）
+    **已納入日終健檢告警**（`healthTargets().eve` 兩筆 `mode:"lowfreq"`），
+    **自動補發按使用者裁定不做**——理由：補發需在 `productFresh` 新增週頻／月頻判準模式、加 2~4 條
+    CF cron，外加交易日守門例外（lastweek 排台北週一 09:00，但 frame `series:<date>` 最早 09:05
+    才有第一格，`tw:true` 會誤判成非交易日）；低頻班漏一次不急迫，人工 `workflow_dispatch` 即可，
+    不值得為它動全系統排程中樞。判準走新純函式 `lowFreqDue`（**刻意不動 `productFresh`**，
+    不把沒人用的週頻/月頻分支帶進補發路徑）：只在台北**週一的 eve 班（23:50）**檢查——
+    lastweek 掛 morn（09:30）必然誤報（GH cron 常態延遲 1~2 小時，2026-08-24 實測 10:19 才落地）；
+    meta 另要求「已過本月第一個週六＋2 天」，新鮮度＝`generated_at` 台北日 ≥ 該週六。
+    非檢查日整項濾掉、連抓都不抓，健康時零告警。測試 `worker/test/health.mjs`（76 通過）。
+    （原「未解/續作可選」清單中的 intraday 已於 2026-07-22 納入 `backupPipelines`；
+    summary 有內部閘門、morning/news/flows/postmkt 已有 Worker dispatch，皆維持不納入。）
+  - **仍未解**：postmkt 的 mktbal/diag 上游是 build.yml（21:53），若 build.yml 本身漏跑，補跑 mktbal/diag
+    可能拿到舊資料（本備援只保 mktbal/diag 自身排程，不含上游）。
 - **Worker dispatch 失敗重試（2026-07-20，deploy version `750a81c9`）**：`dispatchNews`/
   `dispatchMorning` 原本 `ghDispatch` 非 204 就丟錯，呼叫端只 `.catch(log)` 不重試——曾有一班
   （07-20 08:07）無聲消失過一次。新增共用 `ghDispatchWithRetry()`：第一次失敗 log 後等 3 秒

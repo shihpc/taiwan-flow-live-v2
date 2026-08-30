@@ -88,7 +88,10 @@
 - `news`：每日（含週末）06:07–22:07 每小時 :07 → `taiwan-stock-news/build-news.yml`
 - `morning`：平日 06:47 → 本 repo `morning.yml`
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
-- `health` 健檢班：台北 23:50、09:30，只盤點產物落地與否、不 dispatch
+- `health` 健檢班：台北 23:50（`eve`）、09:30（`morn`），只盤點產物落地與否、不 dispatch。
+  低頻班 `lastweek`／`meta` 於 2026-08-30 納入 `eve`（`mode:"lowfreq"`，判準 `export function lowFreqDue`）：
+  **只在台北週一檢查**（meta 另要求已過本月第一個週六＋2 天），非檢查日整項濾掉不抓也不告警；
+  **刻意不納 `backupPipelines`、不新增 CF cron**（使用者裁定，理由見 `PROJECT_SUMMARY.md` 同段）
 - `summary-am` 窗（06:50–08:50）另掛晨場協調班 `export async function runMorning`（見下節）
   ＋us 晨間補跑 `export async function runUsCatchup`（2026-08-13：台北 07:00–08:05 檢查
   us.json 資料日是否達最近預期美股交易日（`export function lastExpectedUsTradingDate`，

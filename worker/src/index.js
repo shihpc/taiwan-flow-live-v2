@@ -1456,7 +1456,43 @@ export async function recordJob(env, tp, name, result, extra) {
 // 涵蓋 recheck 管不到的範圍——① 達 BK_MAX_ATTEMPTS 上限後仍沒落地；② 哨兵事件驅動的
 // flows/postmkt、定點班 news、事件驅動 summary（這些班沒有 bkGate recheck）。
 // mode：date=日期欄前 10 碼為今日；genToday=generated_at 台北日為今日；exists=當日檔存在即可；
-//       usDate=us.json 資料日 ≥ 最近預期美股交易日（見 lastExpectedUsTradingDate）。
+//       usDate=us.json 資料日 ≥ 最近預期美股交易日（見 lastExpectedUsTradingDate）；
+//       lowfreq=低頻班（週頻／月頻），只在該檢查的日子檢查、判準見 lowFreqDue。
+
+// ---- 低頻班健檢（2026-08-30 C5）----
+// 使用者裁定的範圍：lastweek（週一）與 meta（每月第一個週六）**只納健檢告警**，
+// 不納 backupPipelines、不新增任何 CF cron。理由：自動補發要在 productFresh 新增週頻／月頻
+// 判準模式、2~4 條 CF cron，外加交易日守門例外（lastweek 排台北週一 09:00，但 frame
+// series:<date> 最早 09:05 才有第一格，tw:true 會誤判成非交易日）。低頻班漏一次不急迫，
+// 人工 workflow_dispatch 即可，不值得為它動全系統排程中樞。
+// 判準**刻意不進 productFresh**：那支是備援補發路徑（runBackup）共用的，加進沒人用的
+// 週頻／月頻分支只是把風險帶進補發路徑；改在健檢端（healthVerdict + runHealthCheck 過濾）特例處理，
+// 成本只有一支純函式，且完全不碰既有補發語意。
+
+// 某月第一個週六（純函式，回 YYYY-MM-DD）：meta.yml 用「每週六觸發＋UTC 日 ≤7 守門」表達
+// 「每月第一個週六」，其 UTC 00:00＝台北 08:00 同日，故台北日與 UTC 日一致。
+export function firstSaturdayISO(dateISO) {
+  const ym = dateISO.slice(0, 8);                                   // "YYYY-MM-"
+  const dow1 = new Date(`${ym}01T00:00:00Z`).getUTCDay();           // 該月 1 號星期幾（0=日）
+  return `${ym}${String(1 + ((6 - dow1 + 7) % 7)).padStart(2, "0")}`;
+}
+// 低頻班的「今天該不該檢查」＋新鮮度基準日（純函式）：
+//   回 null＝今天不檢查這項（runHealthCheck 直接濾掉，連抓都不抓）；
+//   回 YYYY-MM-DD＝今天要檢查，且產物 generated_at 的台北日 ≥ 該日才算落地。
+// 只掛台北週一的 **eve 班（23:50）**，不掛 morn（09:30）：lastweek.yml 排台北週一 09:00，
+// 但 GitHub cron 常態延遲 1~2 小時（2026-08-24 實測 10:19:32 才落地），09:30 檢查必然每週誤報。
+// 週一以外一律不檢查——低頻班天天檢查就是天天告警，會磨掉告警可信度。
+export function lowFreqDue(name, dateISO) {
+  if (new Date(`${dateISO}T00:00:00Z`).getUTCDay() !== 1) return null;   // 只在（台北）週一檢查
+  if (name === "lastweek") return dateISO;                               // 當日 09:00 產出、23:50 檢查
+  if (name === "meta") {
+    // 每月第一個週六產出 → 該週六起算兩天後（＝週一）的每個週一都檢查一次：
+    // 健康時零告警，真的沒跑時一個月最多叫 4 次（每週一一次），不是天天叫。
+    const first = firstSaturdayISO(dateISO);
+    return dateISO >= addDaysISO(first, 2) ? first : null;               // 本月還沒輪到 → 不檢查
+  }
+  return null;
+}
 export function healthTargets(env) {
   const V2 = env.DATA_BASE;
   const FLOWS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/latest.json";
@@ -1473,6 +1509,9 @@ export function healthTargets(env) {
       { name: "mktbal",     url: `${POSTMKT_BASE}/data/market_balance_history.json`,     field: "latest_date",  mode: "date" },
       { name: "news",       url: NEWS,                           field: "generated_at", mode: "genToday" },
       { name: "summary-pm", url: `${POSTMKT_BASE}/data/summary/{ymd}-pm.json`,           field: null,           mode: "exists" },
+      // 低頻班（見上方 lowFreqDue）：非該檢查的日子由 runHealthCheck 濾掉，不抓也不計入 checked
+      { name: "lastweek",   url: `${V2}/lastweek.json`,          field: "generated_at", mode: "lowfreq" },
+      { name: "meta",       url: `${V2}/classify.json`,          field: "generated_at", mode: "lowfreq" },
     ],
     morn: [
       { name: "morning",    url: `${V2}/morning.json`,           field: "generated_at", mode: "genToday" },
@@ -1486,6 +1525,14 @@ export function healthTargets(env) {
 // 單項判定（純函式）：ok=已落地；at=產物上的時間（給告警文字用，抓不到檔回 null）
 export function healthVerdict(t, obj, today) {
   if (t.mode === "exists") return { ok: !!obj, at: obj ? "有檔" : null };
+  if (t.mode === "lowfreq") {
+    const due = lowFreqDue(t.name, today);
+    if (!due) return { ok: true, at: null, skipped: "not-due" };   // 今天不是該檢查的日子
+    const g = obj ? obj[t.field] : null;
+    const at = g ? new Date(g) : null;
+    const genDay = at && !isNaN(at.getTime()) ? taipeiParts(at).date : null;
+    return { ok: !!genDay && genDay >= due, at: String(g || "").slice(0, 19) || null, due };
+  }
   if (!obj) return { ok: false, at: null };
   return { ok: productFresh(obj, t, today), at: String(obj[t.field] || "").slice(0, 19) || null };
 }
@@ -1506,7 +1553,9 @@ export async function runHealthCheck(env, tp, slot, fetchFn = fetch, opts = {}) 
     const series = await env.FLOW_KV.get(`series:${today}`, "json");
     noSeries = !series || !series.length;
   }
-  const targets = healthTargets(env)[slot] || [];
+  // 低頻班：今天不到期就整項濾掉（不抓、不計入 checked、不可能誤報）
+  const targets = (healthTargets(env)[slot] || [])
+    .filter((t) => t.mode !== "lowfreq" || lowFreqDue(t.name, today));
   const rows = await Promise.all(targets.map(async (t) => {
     const obj = await fetchProduct(healthUrl(t, today), fetchFn).catch(() => null);
     return { name: t.name, ...healthVerdict(t, obj, today) };
