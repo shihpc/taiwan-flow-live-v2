@@ -1,7 +1,10 @@
 # backtest/fetch.py — 抓回測用歷史資料（日線 + 法人買賣超），逐日快取、可中斷續傳
 #
 # 範圍：START ~ END 每個工作日
-#   price_YYYY-MM-DD.json.gz : {code:[amt,open,high,low,close]}（僅 classify 內上市/上櫃，另存 TAIEX）
+#   price_YYYY-MM-DD.json.gz : {code:[amt,open,high,low,close,vol]}（僅 classify 內上市/上櫃，另存 TAIEX）
+#     vol＝FinMind Trading_Volume，單位「股」（÷1000＝張，taiwan-flows CLAUDE.md 口徑段）。
+#     2026-08-30 追加於**陣列末端**，既有讀取端全部走索引 0~4，舊快取仍可讀；
+#     但舊快取沒有這一欄，量能訊號（AS-15/16）會整批跳過，需重抓才解鎖。
 #   inst_YYYY-MM-DD.json.gz  : {code:[投信淨買股數, 外資淨買股數]}
 #
 # 用法：python backtest/fetch.py   （token 取 FINMIND_TOKEN 環境變數，沒有才讀 repo 根 .env）
@@ -91,9 +94,11 @@ def main():
         for r in rows:
             c = str(r.get("stock_id") or "")
             if c == "TAIEX":
-                taiex = [r.get("Trading_money"), r.get("open"), r.get("max"), r.get("min"), r.get("close")]
+                taiex = [r.get("Trading_money"), r.get("open"), r.get("max"),
+                         r.get("min"), r.get("close"), r.get("Trading_Volume")]
             if c in keep:
-                price[c] = [r.get("Trading_money"), r.get("open"), r.get("max"), r.get("min"), r.get("close")]
+                price[c] = [r.get("Trading_money"), r.get("open"), r.get("max"),
+                            r.get("min"), r.get("close"), r.get("Trading_Volume")]
         if taiex:
             price["_TAIEX"] = taiex
         wgz(pf, price)

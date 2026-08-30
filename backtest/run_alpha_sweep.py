@@ -81,6 +81,37 @@ SIGNALS = [
 # K＝檢定次數：雙邊檢定各計 2（預註冊書 §2 前言 + §2.1 註）。由清單自動帶入，不手填。
 K_TESTS = sum(s["weight"] for s in SIGNALS)
 
+# ── 第二階段候選（預註冊書 §2.3「需改一行 fetch.py，本次不跑」）─────────
+# 2026-08-30 解鎖：fetch.py 的 price 陣列已補 Trading_Volume（索引 5）。
+#
+# **與第一階段嚴格分離**：§2.5 明文「以上 14 列（K=16）即為第一階段全部候選。掃描程式
+# 寫完後不得增刪」——所以這兩列不進 SIGNALS、不進 K_TESTS、不進第一階段的三層總表，
+# 走自己的清單與自己的 K，報告另闢一節。混進去等於事後加碼、汙染多重比較揭露。
+#
+# 訊號定義逐字取自原始出處，不是本檔自訂：
+#   AS-15 爆量長黑 ← postmkt `src/build_diag.py` 的 vs／vb 兩行：
+#       vs＝當日量 > 2 × 前 20 個交易日（**不含當日**、容缺 min 15）均量；
+#       vb＝vs 且 當日漲跌% ≤ −3（漲跌% 先經 r2 再比較，與來源同語意）。
+#       方向＝做空：postmkt `index.html` 的 DIAG_RULES 把 P2 標 col:"red"（風險側）。
+#   AS-16 量能爆量 ← `worker/src/index.js` 的 volumeRatio：
+#       SMA(V,5)/SMA(V,20) ≥ 2（兩窗**皆含當日**）且 收盤 > 前一日收盤。
+#       方向＝**雙邊**：兩處來源都只把「爆量」寫成中性量能描述、未宣稱多空
+#       （前端文案「為量能數學描述」、worker 狀態詞不含方向），預註冊書 §2.3 也沒訂方向。
+#       方向不明者依 §2 前言明列為雙邊並計 2 次，沿用 AS-03/04 的既有處理——
+#       **不由本檔臆測方向**。
+SIGNALS_P2 = [
+    dict(id="AS-15", src="postmkt diag P2", weight=1, dir="short",
+         desc="爆量長黑（量 > 前20日均量×2 且 當日跌幅 ≥ 3%）"),
+    dict(id="AS-16", src="news 個股追蹤", weight=2, dir="both",
+         desc="量能爆量（SMA(V,5)/SMA(V,20) ≥ 2 且 價漲）"),
+]
+# 第二階段自己的 K，**不與 K_TESTS 相加**（兩階段的多重比較分開折算）。
+K_TESTS_P2 = sum(s["weight"] for s in SIGNALS_P2)
+
+# price 陣列的成交量索引（fetch.py schema：[amt,open,high,low,close,vol]，vol 單位「股」）。
+# 舊快取只有 5 欄，讀到 None → 量能訊號整批跳過。
+VOL_IDX = 5
+
 DIR_LABEL = {"long": "做多", "short": "做空", "both": "雙邊（計 2）"}
 
 # 前 4 項＝預註冊書 §2.2 原文摘要；第 5 項＝實作層偏離揭露（fresh-context 驗收
@@ -91,8 +122,10 @@ KNOWN_BIASES = [
     "第一版報告（commit 04ba1ad）的快取只含 `Foreign_Investor`，本版為口徑覆核重跑"
     "（預註冊 §5）；若本快取為舊版抓取，AS-01~04 結論僅適用不含外資自營口徑。",
     "**快取無自營**：所以完全沒有涉及自營的候選。",
-    "**`Trading_Volume` 未存**：快取只有 `Trading_money`（`fetch.py:88`）。"
-    "用金額當成交量的代理會失真（金額＝量×均價），所以量能類指標全部不列入第一階段。",
+    "**`Trading_Volume`（原「未存」，2026-08-30 起 fetch.py 已補存）**："
+    "舊快取只有 `Trading_money`；用金額當成交量的代理會失真（金額＝量×均價），"
+    "所以量能類指標**不列入第一階段**——此點不變，§2.5 已凍結第一階段清單。"
+    "補欄後的量能訊號另列**第二階段**（AS-15/16，見報告末節），獨立計 K。",
     "**52 週高低暖身不足**：需 ~250 交易日暖身，快取全長僅 255 日，扣掉後只剩約 1 個月可算。排除。",
     "**AS-05/06 的「上週」基準與生產不同**：生產的佔週變＝當日佔比 − 上一**自然週**"
     "（週一~五聚合）佔比（`index.html` 佔週變欄，資料鏈 `src/build_lastweek.py`），"
@@ -483,6 +516,80 @@ def attach_technical_signals(samples, days, price, diag):
         diag[s] = dict(cand=n, tie=None)
 
 
+def vol_of(row):
+    """從 price 列取成交量（股）。舊快取只有 5 欄 → 回 None。"""
+    if not row or len(row) <= VOL_IDX:
+        return None
+    return rs.fv(row[VOL_IDX])
+
+
+def cache_has_volume(days, price):
+    """快取是否帶 Trading_Volume。任一列有值即算有——重抓是整批的，不會半有半無。"""
+    for d in days:
+        for row in price[d].values():
+            if vol_of(row) is not None:
+                return True
+    return False
+
+
+def attach_volume_signals(samples, days, price, diag):
+    """AS-15/16：第二階段量能訊號。快取無 Trading_Volume 時整批不掛並回 False。
+
+    序列口徑與 attach_technical_signals 一致：每檔只取「該檔實際有價格列的交易日」，
+    與生產的 buildSeries（過濾 close==null 後升冪）同語意。
+    """
+    if not cache_has_volume(days, price):
+        for sig in SIGNALS_P2:
+            diag[sig["id"]] = dict(cand=0, tie=None)
+        return False
+
+    by_cd = {(r["c"], r["d"]): r for r in samples}
+    codes = sorted({r["c"] for r in samples})
+    cnt = {sig["id"]: 0 for sig in SIGNALS_P2}
+    for c in codes:
+        sd, V, C = [], [], []
+        for d in days:
+            row = price[d].get(c)
+            if not row:
+                continue
+            cl = rs.fv(row[4])
+            if cl is None:
+                continue
+            sd.append(d)
+            V.append(vol_of(row))
+            C.append(cl)
+        for i, d in enumerate(sd):
+            r = by_cd.get((c, d))
+            if r is None or i == 0:
+                continue
+            v, pc = V[i], C[i - 1]
+            if v is None or not pc:
+                continue
+            # 漲跌%：先 r2 再比較，與 postmkt build_diag 的 o["d1"] 同語意
+            d1 = r2((C[i] / pc - 1) * 100)
+
+            # AS-15：前 20 個交易日（不含當日）均量，容缺 min 15（postmkt _win_loose 同參數）
+            w = [x for x in V[max(0, i - 20):i] if x is not None]
+            if len(w) >= 15:
+                avg_v = sum(w) / len(w)
+                if avg_v and v > 2 * avg_v and d1 <= -3:
+                    r["sig"].add("AS-15")
+                    cnt["AS-15"] += 1
+
+            # AS-16：SMA(V,5)/SMA(V,20)，兩窗皆含當日；窗內有缺就不算（不補值）
+            if i >= 19:
+                w20 = V[i - 19:i + 1]
+                if all(x is not None for x in w20):
+                    a5, a20 = sma(w20[-5:], 5), sma(w20, 20)
+                    if a5 is not None and a20 and a5 / a20 >= 2 and C[i] > pc:
+                        r["sig"].add("AS-16")
+                        cnt["AS-16"] += 1
+
+    for sid, n in cnt.items():
+        diag[sid] = dict(cand=n, tie=None)
+    return True
+
+
 def attach_all(samples, days, price):
     """把 14 個訊號旗標掛上樣本，回排序欄診斷 dict。"""
     for r in samples:
@@ -636,7 +743,8 @@ def render_signal(sig, res, diag, lines):
     lines.append("")
 
 
-def build_report(days, samples, results, diag, doc_info, dirty):
+def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None):
+    """results_p2=None 代表第二階段沒跑（快取無 Trading_Volume），報告改印未跑說明。"""
     cut = split_index(days)
     ctrl = [r for r in samples if r["surge"] < 1.2 or abs(r["ret"]) < 0.01]
     lines = [
@@ -716,6 +824,48 @@ def build_report(days, samples, results, diag, doc_info, dirty):
                 f"| {sig['id']} | {desc} | {DIR_LABEL[sig['dir']]} | {r['n']} |"
                 f" {_p(r['e3_avg'])} | {_p(r['day_avg'])} | {pos} | {h1} | {h2} |")
 
+    # ── 第二階段（量能）：與第一階段分開列、分開計 K（§2.5 凍結第一階段清單）──
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    if results_p2 is None:
+        lines.extend([
+            "# 第二階段：量能訊號（**本次未跑**）",
+            "",
+            "快取沒有 `Trading_Volume` 欄（舊格式，price 陣列只有 5 欄），AS-15/16 整批跳過。",
+            "解鎖方式：刪掉 `backtest/cache/price_*.json.gz` 後重跑 `backtest/fetch.py`"
+            "（fetch.py 2026-08-30 起已把該欄存在陣列索引 5）。",
+        ])
+    else:
+        lines.extend([
+            "# 第二階段：量能訊號（預註冊書 §2.3）",
+            "",
+            f"> 本節另外檢定 {K_TESTS_P2} 個訊號。K 與第一階段的 {K_TESTS} **不合併**"
+            "（§2.5 已凍結第一階段清單，事後併算等於加碼），多重比較請分兩段各自折算："
+            f"本節若全為無效訊號，名目 5% 水準下預期約 {0.05 * K_TESTS_P2:.2f} 個會偶然看起來有效。",
+            "",
+            "解鎖條件＝快取帶 `Trading_Volume`（fetch.py 的 price 陣列索引 5）。",
+            "訊號定義取自原始出處，非本報告自訂：AS-15＝postmkt `src/build_diag.py` 的 "
+            "`vs`／`vb`；AS-16＝`worker/src/index.js` 的 `volumeRatio`。",
+            "**AS-16 列為雙邊**：兩處來源都只把「爆量」寫成中性的量能描述、未宣稱多空，"
+            "預註冊書 §2.3 也沒訂方向——依 §2 前言，方向不明者明列雙邊並計 2 次。",
+        ])
+        for sig in SIGNALS_P2:
+            render_signal(sig, results_p2[sig["id"]], diag, lines)
+        lines.append("")
+        lines.append("## 第二階段三層總表")
+        lines.append(head)
+        for sig in SIGNALS_P2:
+            r = results_p2[sig["id"]]
+            desc = sig["desc"].replace("|", "\\|")
+            pos = "N/A" if r["day_pos"] is None else f"{r['day_pos']:.1f}%"
+            h1 = _p(r["h1"]["e3_avg"]) if r["h1"] else "N/A"
+            h2 = _p(r["h2"]["e3_avg"]) if r["h2"] else "N/A"
+            lines.append(
+                f"| {sig['id']} | {desc} | {DIR_LABEL[sig['dir']]} | {r['n']} |"
+                f" {_p(r['e3_avg'])} | {_p(r['day_avg'])} | {pos} | {h1} | {h2} |"
+                f" ← 分層 {classify_tier(r)}")
+
     opposite = [s["id"] for s in SIGNALS
                 if classify_tier(results[s["id"]]) == "A" and dir_match(s, results[s["id"]]) is False]
     lines.extend([
@@ -766,8 +916,23 @@ def main():
         print(f"  {sig['id']} N={res['n']:6d} e3={_p(res['e3_avg'])} "
               f"→ {classify_tier(res)}", flush=True)
 
+    print("掛第二階段量能旗標（AS-15/16）...", flush=True)
+    results_p2 = None
+    if attach_volume_signals(samples, days, price, diag):
+        results_p2 = {}
+        for sig in SIGNALS_P2:
+            rows = [r for r in samples if sig["id"] in r["sig"]]
+            res = evaluate_signal(rows, days)
+            res["_rows"] = rows
+            results_p2[sig["id"]] = res
+            print(f"  {sig['id']} N={res['n']:6d} e3={_p(res['e3_avg'])} "
+                  f"→ {classify_tier(res)}", flush=True)
+    else:
+        print("  快取無 Trading_Volume 欄 → AS-15/16 跳過"
+              "（刪 price_*.json.gz 重跑 fetch.py 即解鎖）", flush=True)
+
     doc_info, dirty = doc_commit()
-    lines = build_report(days, samples, results, diag, doc_info, dirty)
+    lines = build_report(days, samples, results, diag, doc_info, dirty, results_p2)
     OUT.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n已寫 {OUT}")
     return 0

@@ -90,6 +90,114 @@ def mk(n, days, *, e3, e1=0.0, first_ratio=0.5, seed=3):
     return rows
 
 
+def volume_market(ndays=60, code="2330", base_v=1_000_000):
+    """量能訊號用的**受控**市場：事件日寫死，不靠隨機碰運氣。
+
+    day 40：量 5×base 且收盤 −5%  → 應觸發 AS-15（爆量長黑），不觸發 AS-16（價跌）
+    day 46~50：量 5×base 且收盤走高 → day 50 的 SMA(V,5)/SMA(V,20)≈2.27 → 應觸發 AS-16
+    其餘日：量固定 base，收盤微幅走高 → 兩者皆不觸發
+    """
+    days = _days(ndays)
+    price, inst = {}, {}
+    cl = 100.0
+    for t, d in enumerate(days):
+        if t == 40:
+            cl = round(cl * 0.95, 2)          # −5% → d1 = −5.0 ≤ −3
+            v = base_v * 5
+        elif 46 <= t <= 50:
+            cl = round(cl * 1.01, 2)
+            v = base_v * 5
+        else:
+            cl = round(cl * 1.001, 2)
+            v = base_v
+        tx = 20000.0 + t
+        price[d] = {
+            "_TAIEX": [9e12, tx, tx * 1.01, tx * 0.99, round(tx, 2), 0],
+            code: [3e8, cl, round(cl * 1.02, 2), round(cl * 0.98, 2), cl, v],
+        }
+        inst[d] = {}
+    return days, price, inst
+
+
+def strip_volume(price):
+    """把受控市場降級成舊格式快取（每列砍成 5 欄）。"""
+    return {d: {c: row[:5] for c, row in rows.items()} for d, rows in price.items()}
+
+
+# ── 0. 第二階段（量能）候選 ─────────────────────────────────────
+def test_phase2_list_separate_from_phase1():
+    ids1 = {s["id"] for s in a.SIGNALS}
+    ids2 = {s["id"] for s in a.SIGNALS_P2}
+    check("第二階段 2 列", len(a.SIGNALS_P2) == 2)
+    check("第二階段編號 AS-15/16", ids2 == {"AS-15", "AS-16"})
+    check("兩階段清單不重疊", not (ids1 & ids2))
+    check("第一階段仍是 14 列 K=16（§2.5 凍結）", len(a.SIGNALS) == 14 and a.K_TESTS == 16)
+    check("第二階段自己的 K=3（AS-16 雙邊計 2）", a.K_TESTS_P2 == 3)
+    check("AS-15 方向＝做空（postmkt DIAG_RULES P2 col:red）",
+          next(s for s in a.SIGNALS_P2 if s["id"] == "AS-15")["dir"] == "short")
+    check("AS-16 方向＝雙邊（來源未宣稱方向，不臆測）",
+          next(s for s in a.SIGNALS_P2 if s["id"] == "AS-16")["dir"] == "both")
+
+
+def test_volume_gate_blocks_old_cache():
+    days, price, inst = volume_market()
+    old = strip_volume(price)
+    check("舊格式快取判為無 volume", a.cache_has_volume(days, old) is False)
+    check("新格式快取判為有 volume", a.cache_has_volume(days, price) is True)
+    samples, _, _ = rs.build_stock_samples(days, old, inst)
+    a.attach_all(samples, days, old)
+    diag = {}
+    fired = a.attach_volume_signals(samples, days, old, diag)
+    check("舊快取時 attach_volume_signals 回 False", fired is False)
+    check("舊快取時完全不掛量能旗標",
+          not any(("AS-15" in r["sig"]) or ("AS-16" in r["sig"]) for r in samples))
+    check("舊快取時診斷仍列出兩個訊號（候選 0）",
+          diag.get("AS-15", {}).get("cand") == 0 and diag.get("AS-16", {}).get("cand") == 0)
+
+
+def test_volume_signals_fire_on_planted_events():
+    days, price, inst = volume_market()
+    samples, _, _ = rs.build_stock_samples(days, price, inst)
+    a.attach_all(samples, days, price)
+    diag = {}
+    check("新快取時 attach_volume_signals 回 True",
+          a.attach_volume_signals(samples, days, price, diag) is True)
+    by_d = {r["d"]: r for r in samples}
+    d40, d50 = days[40], days[50]
+    check("day40 觸發 AS-15（爆量長黑）", d40 in by_d and "AS-15" in by_d[d40]["sig"])
+    check("day40 不觸發 AS-16（價跌）", d40 in by_d and "AS-16" not in by_d[d40]["sig"])
+    check("day50 觸發 AS-16（量能爆量）", d50 in by_d and "AS-16" in by_d[d50]["sig"])
+    check("day50 不觸發 AS-15（價漲）", d50 in by_d and "AS-15" not in by_d[d50]["sig"])
+    quiet = [r for d, r in by_d.items() if d not in (d40, d50) and days.index(d) not in range(46, 51)]
+    check("平靜日不觸發任何量能訊號",
+          all("AS-15" not in r["sig"] and "AS-16" not in r["sig"] for r in quiet))
+    check("診斷回報候選數 > 0", diag["AS-15"]["cand"] >= 1 and diag["AS-16"]["cand"] >= 1)
+
+
+def test_phase2_report_section():
+    days = _days(120)
+    _, price, inst = synthetic_market(ncodes=12, ndays=120, seed=9)
+    samples, _, _ = rs.build_stock_samples(days[:120], price, inst)
+    results = _fake_results(days)
+
+    skipped = "\n".join(a.build_report(days, samples, results, {}, "deadbeef", False))
+    check("未跑時報告明說第二階段沒跑", "第二階段：量能訊號（**本次未跑**）" in skipped)
+    check("未跑時報告給解鎖方式", "重跑 `backtest/fetch.py`" in skipped)
+    check("未跑時第一階段分層數不受影響", skipped.count("**分層**") == 14)
+
+    rp2 = {s["id"]: a.evaluate_signal(mk(600, days, e3=0.02), days) for s in a.SIGNALS_P2}
+    ran = "\n".join(a.build_report(days, samples, results, {}, "deadbeef", False, rp2))
+    for sig in a.SIGNALS_P2:
+        check(f"報告含 {sig['id']} 段", f"## {sig['id']}" in ran)
+        check(f"報告含 {sig['id']} 定義原文", sig["desc"] in ran)
+        check(f"{sig['id']} 出現在第二階段總表", f"| {sig['id']} |" in ran)
+    check("第二階段 K 分開揭露且不與第一階段合併",
+          "另外檢定 3 個訊號" in ran and "不合併" in ran)
+    check("第一階段 K 仍是 16", "共檢定 16 個訊號" in ran)
+    check("AS-16 雙邊理由寫進報告", "方向不明者明列雙邊並計 2 次" in ran)
+    check("兩階段分層合計 16 段", ran.count("**分層**") == 16)
+
+
 # ── 1. 候選清單與 K ─────────────────────────────────────────────
 def test_candidate_list_frozen():
     ids = [s["id"] for s in a.SIGNALS]
@@ -403,7 +511,10 @@ def main():
                test_all_14_signals_fire, test_technical_signals_use_worker_semantics,
                test_split_half, test_daily_series, test_tier_classification,
                test_no_crash_on_thin_data, test_jround_is_js_semantics,
-               test_report_structure]:
+               test_report_structure,
+               # 第二階段（量能）：解鎖 AS-15/16 的守門
+               test_phase2_list_separate_from_phase1, test_volume_gate_blocks_old_cache,
+               test_volume_signals_fire_on_planted_events, test_phase2_report_section]:
         print(f"\n--- {fn.__name__} ---")
         fn()
     print(f"\n{'=' * 50}")
