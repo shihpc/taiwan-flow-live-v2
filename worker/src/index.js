@@ -3013,6 +3013,33 @@ export function buildDividend(rows) {
     payDate: last.CashDividendPaymentDate || null,
   };
 }
+// 殖利率：TaiwanStockPER（欄 date/stock_id/dividend_yield/PER/PBR）。取 ≤ 指定日的最新一列。
+// **口徑（2026-08-30 實查，非推測）**：FinMind 這支是證交所「個股日本益比、殖利率及股價淨值比」
+// （BWIBBU_d）的轉發——2026-08-28 台積電 FinMind dividend_yield 0.91／PER 28.05／PBR 9.76，
+// 與 BWIBBU_d 同日同檔逐欄同值；BWIBBU_d 該列另有「股利年度＝114」欄，且 0.91% × 收盤 2,420
+// ≒ 22.0 元＝民國 114 年四季現金股利合計（5+5+6+6）。
+// 故口徑＝**最近一個股利年度全年配發現金（含盈餘分配＋公積配發）÷ 當日收盤價**，
+// **不是**「最新公告一筆現金股利 ÷ 股價」（那會是 6 元／2,420＝0.25%），
+// 也**不是**「以除息日計的近四季」（2026-06-11 除息 6 元前後隱含股利恆為 22.0、未跳動，已實測）。
+// 上櫃同口徑（6488 環球晶 2026-08-28：0.79% × 收盤 972 ≒ 7.7＝114 年 CashStatutorySurplus 2.0
+// ＋CashEarningsDistribution 5.7；此例也證明分子含公積配發的現金）。
+// 因此本欄與同回傳的 dividend（TaiwanStockDividend 最新一筆、且只取盈餘分配欄）基準不同，
+// 前端須標明口徑、不可直接相除比對。
+// dividend_yield=0 是有效事實（該股利年度未配現金股利，證交所同樣輸出 0.00），照回不濾。
+export function buildYield(rows, date) {
+  let best = null;
+  for (const r of rows || []) {
+    if (!r) continue;
+    const d = String(r.date || "").slice(0, 10);
+    if (!d || (date && d > date)) continue;                       // 只採 ≤ 指定日的列
+    const raw = r.dividend_yield;
+    if (raw === null || raw === undefined || raw === "") continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v < 0) continue;
+    if (!best || d > best.date) best = { dy: v, date: d };         // 同窗取最新一日
+  }
+  return best;
+}
 // 股票名稱：TaiwanStockInfo（同股多列不同產業別，取首筆 stock_name）。取不到回 null。
 export function buildName(rows, id) {
   for (const r of rows || []) {
@@ -3066,10 +3093,10 @@ export function assembleNews(mediaRows, revenue, financials, dividend, min = 3, 
   all.sort((a, b) => String(b.date).localeCompare(String(a.date)));
   return all;
 }
-// 單股基本面：先查 KV 每日快取（命中不重抓）；miss 才打 FinMind（月營收＋季財報＋新聞＋股利＋名稱並行；
-// 新聞/股利/名稱為 additive 且非致命，個別 .catch 降級不阻斷既有月營收/季財報回傳）。
+// 單股基本面：先查 KV 每日快取（命中不重抓）；miss 才打 FinMind（月營收＋季財報＋新聞＋股利＋名稱
+// ＋殖利率並行；新聞/股利/名稱/殖利率為 additive 且非致命，個別 .catch 降級不阻斷既有月營收/季財報回傳）。
 export async function fundamentalsFor(env, id, date, fetchFn = fetch) {
-  const cacheKey = `fund:4:${id}:${date}`;   // v3 schema（加 news/dividend/name＋近 5 日新聞窗＋業績事件保留名額）；版本前綴讓舊快取自然失效
+  const cacheKey = `fund:5:${id}:${date}`;   // v5 schema（再加 dy 殖利率）；版本前綴讓舊快取自然失效
   if (env.FLOW_KV) {
     const hit = await env.FLOW_KV.get(cacheKey, "json");
     if (hit) return hit;
@@ -3079,16 +3106,19 @@ export async function fundamentalsFor(env, id, date, fetchFn = fetch) {
   const newsStart = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)) - 5))
     .toISOString().slice(0, 10);   // 新聞近 ~5 天：FinMind TaiwanStockNews 由 start_date 升冪、≤500 列截斷，
                                    // 熱門股用短窗避免最新新聞被截掉（買賣力 buildNews 內再降冪取最新 12 條）
-  const [revRows, finRows, newsRows, divRows, infoRows] = await Promise.all([
+  const perStart = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)) - 10))
+    .toISOString().slice(0, 10);   // 殖利率近 ~10 天：只要「≤ 今日的最新一筆」，長假／停牌也搆得到上一個交易日
+  const [revRows, finRows, newsRows, divRows, infoRows, perRows] = await Promise.all([
     finData(token, "TaiwanStockMonthRevenue", id, start, fetchFn),
     finData(token, "TaiwanStockFinancialStatements", id, start, fetchFn),
     finData(token, "TaiwanStockNews", id, newsStart, fetchFn).catch(() => []),
     finData(token, "TaiwanStockDividend", id, start, fetchFn).catch(() => []),
     finData(token, "TaiwanStockInfo", id, start, fetchFn).catch(() => []),
+    finData(token, "TaiwanStockPER", id, perStart, fetchFn).catch(() => []),   // additive、非致命
   ]);
   const revenue = buildRevenue(revRows), financials = buildFinancials(finRows), dividend = buildDividend(divRows);
   const out = {
-    id, name: buildName(infoRows, id), revenue, financials, dividend,
+    id, name: buildName(infoRows, id), revenue, financials, dividend, dy: buildYield(perRows, date),
     news: assembleNews(newsRows, revenue, financials, dividend), updated: new Date().toISOString(),
   };
   if (env.FLOW_KV && (out.revenue.length || out.financials.length)) {

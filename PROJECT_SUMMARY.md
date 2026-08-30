@@ -842,13 +842,27 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
   ＋除息日 exDate＋公告 announce＋年度季別 year，cash 回 FinMind 原值）、`news`（媒體新聞
   TaiwanStockNews 去重 by link＋業績事件墊底，保證 ≥3、消除「不在新聞池」死路）。純函式
   `buildNews/buildDividend/buildName/buildEvents/assembleNews` 全 export（`worker/test/fundamentals.mjs`
-  67 通過）。**新聞窗只取近 5 日**（FinMind TaiwanStockNews 由 start_date 升冪、≤500 列截斷，長窗會
+  67 通過；2026-08-30 加 `buildYield` 後 78 通過）。**新聞窗只取近 5 日**（FinMind TaiwanStockNews 由 start_date 升冪、≤500 列截斷，長窗會
   把最新新聞截掉）；assembleNews 為業績事件**保留名額**（cap-events），故熱門股仍同時含媒體＋事件。
-  **cache key 升版 `fund:4:<id>:<date>`**（schema 變動使舊快取自然失效）。`/live`、`/chips` 舊回傳
-  零改動、無新 cron（維持 3 條）、三站同步函式零改動。前端配合：news 站每日新聞改讀此 news、月營收
-  柱標金額、季財報加股利列、自選股顯示代號＋名稱。**未解/續作**：新聞窗 5 日為避 500 列截斷的權衡，
-  極端爆量日（單股 >100 則/日 × 5 日 >500）仍可能截到，屬 FinMind Free 限制；殖利率欄（現金股利÷股價）
-  暫未做（需股價來源）。
+  **cache key 升版 `fund:4:<id>:<date>`**（schema 變動使舊快取自然失效；2026-08-30 加殖利率再升
+  `fund:5:`）。`/live`、`/chips` 舊回傳零改動、無新 cron（維持 3 條）、三站同步函式零改動。前端配合：
+  news 站每日新聞改讀此 news、月營收柱標金額、季財報加股利列、自選股顯示代號＋名稱。
+  - **殖利率欄（2026-08-30 C7，已結案；原記「暫未做（需股價來源）」）**：不自算「現金股利÷股價」，
+    改在 `fundamentalsFor` 既有並行 fetch 群加一支 `TaiwanStockPER`（近 10 日窗、`.catch(()=>[])`
+    additive 非致命），純函式 `buildYield` 取 ≤ 當日的最新一列，回傳新欄 `dy:{dy,date}`。
+    選這個欄位是為了**跨站同源**：postmkt `src/build_diag.py:fetch_per_daily` 早已用同一欄。
+    **口徑（實查，非推測）**：該 dataset 是證交所 BWIBBU_d 的轉發——2026-08-28 台積電 FinMind
+    `dividend_yield` 0.91／`PER` 28.05／`PBR` 9.76 與證交所同日同檔逐欄同值；證交所該列另有
+    「股利年度＝114」欄，且 0.91%×收盤 2,420 ≒ 22.0 元＝民國 114 年四季現金股利合計。
+    故分子＝**最近一個股利年度全年配發現金**，非「最新公告一筆」（那是 6 元→0.25%），
+    也非「以除息日計的近四季」（2026-06-11 除息 6 元前後隱含股利恆為 22.0、未跳動）。
+    上櫃同口徑（6488 2026-08-28：0.79%×972 ≒ 7.7＝114 年公積 2.0＋盈餘 5.7，
+    此例另證分子含公積配發的現金）。
+    與同回傳的 `dividend`（TaiwanStockDividend 最新一筆）基準不同，前端已標口徑。
+    成本：每股每日多 1 次 FinMind（5→6），KV `fund:5:` 每股每日只抓一次；news 站個股追蹤
+    一次最多 30 檔（`loadTrack` 的 `.slice(0,30)`）→ 每日至多 +30 次。
+  **未解/續作**：新聞窗 5 日為避 500 列截斷的權衡，極端爆量日（單股 >100 則/日 × 5 日 >500）
+  仍可能截到，屬 FinMind Free 限制。
 - **個股追蹤籌碼面端點 `/chips`**（2026-07-20 完工部署；供「新聞晨報」站個股追蹤第二批）：
   - **Worker**（`worker/src/index.js`，`fundamentalsBatch` 後、`FUND_RE` 後）：additive 新端點
     `/chips?id=2330`（單股回物件）或 `?ids=a,b,c`（批次回 `{stocks,date}`，上限 30 檔）。回傳每股

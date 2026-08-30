@@ -1,6 +1,6 @@
 // 個股追蹤基本面：純函式離線單元測試（無需 token，mock FinMind／mock KV）
 // 執行：cd worker && node test/fundamentals.mjs
-import { pctChange, ppChange, buildRevenue, buildFinancials, buildNews, buildDividend, buildName, buildEvents, assembleNews, fundamentalsFor, fundamentalsBatch } from "../src/index.js";
+import { pctChange, ppChange, buildRevenue, buildFinancials, buildNews, buildDividend, buildYield, buildName, buildEvents, assembleNews, fundamentalsFor, fundamentalsBatch } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -121,6 +121,38 @@ function mockKV() {
   chk("buildDividend 無配息資料 → null", buildDividend([{ CashEarningsDistribution: 0, StockEarningsDistribution: 0 }]) === null);
 }
 
+// ---- buildYield：TaiwanStockPER 的 dividend_yield（口徑見 src 註解：股利年度全年現金股利÷收盤價）----
+// 抽核值取自 2026-08-30 實查：2330 在 08-28 的 dividend_yield=0.91，與證交所 BWIBBU_d 同值。
+{
+  const rows = [
+    { date: "2026-08-26", stock_id: "2330", dividend_yield: 0.91, PER: 27.99, PBR: 9.74 },
+    { date: "2026-08-27", stock_id: "2330", dividend_yield: 0.91, PER: 27.94, PBR: 9.72 },
+    { date: "2026-08-28", stock_id: "2330", dividend_yield: 0.91, PER: 28.05, PBR: 9.76 },
+  ];
+  const y = buildYield(rows, "2026-08-28");
+  chk("buildYield 取 ≤ 指定日的最新一列", y && y.dy === 0.91 && y.date === "2026-08-28", JSON.stringify(y));
+  chk("buildYield 不採指定日之後的列", buildYield(rows, "2026-08-27").date === "2026-08-27",
+    JSON.stringify(buildYield(rows, "2026-08-27")));
+  chk("buildYield 亂序輸入仍取最新", buildYield([rows[2], rows[0], rows[1]], "2026-08-28").date === "2026-08-28");
+  chk("buildYield 空/無資料 → null", buildYield([], "2026-08-28") === null && buildYield(null, "2026-08-28") === null);
+  chk("buildYield 全部晚於指定日 → null", buildYield(rows, "2026-08-20") === null);
+  chk("buildYield 0 是有效事實（該股利年度未配現金）→ 回 0 不濾掉", (() => {
+    const y0 = buildYield([{ date: "2026-08-28", dividend_yield: 0 }], "2026-08-28");
+    return y0 && y0.dy === 0;
+  })());
+  chk("buildYield 欄位缺值/非數 → 跳過該列", (() => {
+    const yy = buildYield([
+      { date: "2026-08-28", dividend_yield: null },
+      { date: "2026-08-27", dividend_yield: "" },
+      { date: "2026-08-26", dividend_yield: "n/a" },
+      { date: "2026-08-25", dividend_yield: 4.2 },
+    ], "2026-08-28");
+    return yy && yy.dy === 4.2 && yy.date === "2026-08-25";
+  })());
+  chk("buildYield 字串數字可解析", buildYield([{ date: "2026-08-28", dividend_yield: "3.14" }], "2026-08-28").dy === 3.14);
+  chk("buildYield 無 date 的列跳過", buildYield([{ dividend_yield: 5 }], "2026-08-28") === null);
+}
+
 // ---- buildName：TaiwanStockInfo 取 stock_name（多產業別列）----
 {
   const rows = [
@@ -190,17 +222,26 @@ function mockKV() {
   const newsData = [{ date: "2026-07-13 10:00:00", link: "http://x", source: "媒體", title: "營收創高" }];
   const divData = [{ year: "114年第4季", CashEarningsDistribution: 6.0, StockEarningsDistribution: 0, CashExDividendTradingDate: "2026-06-11", AnnouncementDate: "2026-05-27", date: "2026-06-17" }];
   const infoData = [{ stock_id: "2330", stock_name: "台積電", industry_category: "半導體業" }];
+  const perData = [
+    { date: "2026-07-17", stock_id: "2330", dividend_yield: 0.99, PER: 26.1, PBR: 9.1 },
+    { date: "2026-07-18", stock_id: "2330", dividend_yield: 0.98, PER: 26.4, PBR: 9.2 },
+  ];
+  const perUrls = [];
   const mockFetch = async (u) => {
+    if (u.includes("StockPER")) perUrls.push(u);
     let data = [];
     if (u.includes("MonthRevenue")) data = revData;
     else if (u.includes("FinancialStatements")) data = finData2;
     else if (u.includes("StockNews")) data = newsData;
     else if (u.includes("Dividend")) data = divData;
     else if (u.includes("StockInfo")) data = infoData;
+    else if (u.includes("StockPER")) data = perData;
     return { ok: true, json: async () => ({ status: 200, data }) };
   };
   const out = await fundamentalsFor(env, "2330", "2026-07-19", mockFetch);
   chk("fundamentalsFor name 非空", out.name === "台積電", out.name);
+  chk("fundamentalsFor dy 有值（0.98／資料日 07-18）", out.dy && out.dy.dy === 0.98 && out.dy.date === "2026-07-18", JSON.stringify(out.dy));
+  chk("fundamentalsFor PER 窗起點為指定日前 10 天", perUrls.some((u) => u.includes("start_date=2026-07-09")), JSON.stringify(perUrls));
   chk("fundamentalsFor dividend 有值（cash=6）", out.dividend && out.dividend.cash === 6.0, JSON.stringify(out.dividend));
   chk("fundamentalsFor news ≥3（媒體＋業績事件）", out.news.length >= 3, String(out.news.length));
   chk("fundamentalsFor news 含媒體與業績事件", out.news.some(n => n.event === false) && out.news.some(n => n.event === true));
@@ -213,19 +254,19 @@ function mockKV() {
   const revData = [{ revenue_year: 2026, revenue_month: 6, revenue: 250e8, create_time: "2026-07-13" }];
   const finData2 = [{ date: "2026-03-31", type: "Revenue", value: 2000 }, { date: "2026-03-31", type: "EPS", value: 7 }];
   const mockFetch = async (u) => {
-    if (u.includes("StockNews") || u.includes("Dividend") || u.includes("StockInfo")) throw new Error("該表失敗");
+    if (u.includes("StockNews") || u.includes("Dividend") || u.includes("StockInfo") || u.includes("StockPER")) throw new Error("該表失敗");
     return { ok: true, json: async () => ({ status: 200, data: u.includes("MonthRevenue") ? revData : finData2 }) };
   };
   const out = await fundamentalsFor(env, "2330", "2026-07-19", mockFetch);
   chk("附屬表失敗仍回月營收/季財報", out.revenue.length === 1 && out.financials.length === 1);
-  chk("附屬表失敗 name=null、dividend=null", out.name === null && out.dividend === null);
+  chk("附屬表失敗 name=null、dividend=null、dy=null", out.name === null && out.dividend === null && out.dy === null);
   chk("附屬表失敗 news 仍以業績事件墊底（≥1）", out.news.length >= 1 && out.news.every(n => n.event === true));
 }
 
 // ---- fundamentalsFor：KV 快取命中不重抓（mock KV + 會拋錯的 fetch）----
 {
   const env = { FLOW_KV: mockKV(), FINMIND_TOKEN: "x" };
-  await env.FLOW_KV.put("fund:4:2330:2026-07-19", JSON.stringify({ id: "2330", cached: true }));
+  await env.FLOW_KV.put("fund:5:2330:2026-07-19", JSON.stringify({ id: "2330", cached: true }));
   const throwFetch = async () => { throw new Error("不應被呼叫"); };
   const out = await fundamentalsFor(env, "2330", "2026-07-19", throwFetch);
   chk("KV 命中直接回快取、不打 FinMind", out.cached === true);
@@ -239,7 +280,7 @@ function mockKV() {
   const mockFetch = async (u) => ({ ok: true, json: async () => ({ status: 200, data: u.includes("MonthRevenue") ? revData : finData2 }) });
   const out = await fundamentalsFor(env, "2330", "2026-07-19", mockFetch);
   chk("miss 後回真實結構", out.revenue.length === 1 && out.financials.length === 1);
-  chk("miss 後寫入 KV 快取", env.FLOW_KV.store.has("fund:4:2330:2026-07-19"));
+  chk("miss 後寫入 KV 快取", env.FLOW_KV.store.has("fund:5:2330:2026-07-19"));
 }
 
 // ---- fundamentalsBatch：某股 FinMind 失敗回 {error} 不整批倒（重試後仍失敗）----
