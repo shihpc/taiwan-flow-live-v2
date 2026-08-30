@@ -4,11 +4,12 @@
 #   price_YYYY-MM-DD.json.gz : {code:[amt,open,high,low,close]}（僅 classify 內上市/上櫃，另存 TAIEX）
 #   inst_YYYY-MM-DD.json.gz  : {code:[投信淨買股數, 外資淨買股數]}
 #
-# 用法：python backtest/fetch.py   （token 讀 repo 根 .env）
+# 用法：python backtest/fetch.py   （token 取 FINMIND_TOKEN 環境變數，沒有才讀 repo 根 .env）
 
 from __future__ import annotations
 import gzip
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -22,10 +23,17 @@ START, END = date(2025, 6, 15), date(2026, 7, 1)  # 含訊號期前 5 日基準�
 
 
 def token() -> str:
-    for line in (ROOT / ".env").read_text(encoding="utf-8-sig").splitlines():
-        if line.strip().startswith("FINMIND_TOKEN="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise RuntimeError("找不到 FINMIND_TOKEN")
+    # 先環境變數再 .env：CI（.github/workflows/backtest-regen.yml）用 Actions secret
+    # 注入環境變數即可，不必把金鑰落成檔案；本機沿用既有的 repo 根 .env，行為不變。
+    env = os.environ.get("FINMIND_TOKEN", "").strip()
+    if env:
+        return env
+    dotenv = ROOT / ".env"
+    if dotenv.exists():
+        for line in dotenv.read_text(encoding="utf-8-sig").splitlines():
+            if line.strip().startswith("FINMIND_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise RuntimeError("找不到 FINMIND_TOKEN（環境變數與 repo 根 .env 都沒有）")
 
 
 TOK = token()

@@ -1,0 +1,100 @@
+name: backtest-regen
+# 週期性「完整重生比對」班（docs/line-cards-spec.md §8「仍待處理」第二條）。
+#
+# spec 原文（未結案項，逐字）：
+#   「**完整重生比對無法進 CI**：`backtest/cache/` 不進 git，CI 無法重跑 `run_sorting.py`
+#     比對報告是否與腳本同步。目前靠離線結構檢查涵蓋「結論行消失」這類回歸。若要完整涵蓋，
+#     需在 Actions 排一支帶 `FINMIND_TOKEN` 的週期性 job（抓快取約 50 分鐘），**尚未建置**。」
+#
+# 本班要守的東西，和 backtest.yml 不同：
+#   backtest.yml  = 離線、不吃 secret，只驗「報告的節還在、結論行還在」的結構。
+#   backtest-regen = 帶 token 抓真快取、真的重跑 run_sorting.py，把重生出來的
+#                    report_sorting.md 和 repo 裡已 commit 的那份逐字比對。
+#   → 抓得到的是「腳本改了但報告沒重跑」「報告被手改過」這類 backtest.yml 驗不出的漂移。
+#
+# 不一致時的處置：**只報不改**。本班故意不 commit 重生結果——report_sorting.md 是圖卡規格
+# 的唯一回測依據，讓排程自動覆蓋等於讓機器人偷改已定案的結論。差異印在 log，job 轉紅，
+# 由 notify-failure 開 issue，人看過 diff 再決定是「重跑補 commit」還是「腳本改錯要回退」。
+#
+# 週期的選定理由（spec 未訂週期，此處自訂並記錄）：
+#   fetch.py 的 START/END 是寫死的固定窗（2025-06-15 ~ 2026-07-01），資料不隨時間長大，
+#   所以漂移只可能由「改腳本／改報告」造成，不是每天都會發生 → 不需要日班。
+#   取每月一次（每月 1 日）＋ workflow_dispatch 手動補跑，成本（~50 分 job、約 550 次
+#   FinMind 請求）與偵測延遲（最壞一個月）在這個用途上是划算的。改腳本後想立刻確認的人
+#   走手動 dispatch，不必等排程。
+#
+# 時段選定理由：UTC 18:00 ＝ 台北 02:00。
+#   避開台北 09:00–14:00 盤中（Worker frame 班每分鐘打 FinMind，本班 ~550 次請求會互相排擠）
+#   與台北 17:00–23:55 晚場（哨兵＋evening 協調班）；也避開 22:00/22:10 UTC 的 morning/us 班。
+#   ~50 分鐘的 job 在 02:50 台北前結束，離最早的晨班（05:05 Worker）還有兩小時餘裕。
+#
+# 注意（已知、非本班可解）：重抓是「用今天的 FinMind 回答同一段歷史」，FinMind 事後修訂
+# 歷史資料時，重生報告會因**資料**而非**程式**而不同。判讀 diff 要先排除這一種。
+
+on:
+  schedule:
+    - cron: '0 18 1 * *'   # 每月 1 日 18:00 UTC = 台北 02:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  # 專屬 group，不與任何既有班（aetf/baseline/cards/daysummary/intraday/lastweek/
+  # meta/morning/us/pages/worker-deploy）同名；cancel-in-progress: false 沿用全 repo 慣例
+  group: backtest-regen
+  cancel-in-progress: false
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    # 抓快取 ~50 分（fetch.py 每日 2 次請求＋0.8 秒禮貌間隔，撞限速時另等 65 秒）
+    # ＋ run_sorting.py 重算；120 分留給「首次全新抓取又撞到限速」的最壞情況。
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # fetch.py 與 run_sorting.py 都只用標準庫（gzip/json/urllib），不需 pip install。
+
+      # 快取鍵綁 fetch.py 的內容雜湊：抓取邏輯或 START/END 窗一改，鍵就變、強制重抓，
+      # 不會拿舊格式的 price_*.json.gz 餵新程式。fetch.py 本身可中斷續傳（既有檔會跳過），
+      # 所以 restore 命中時這一步幾乎是零成本，只補缺漏日。
+      - name: 還原回測快取
+        uses: actions/cache@v4
+        with:
+          path: backtest/cache
+          key: backtest-cache-${{ hashFiles('backtest/fetch.py') }}
+
+      - name: 抓快取（FinMind）
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python backtest/fetch.py
+
+      - name: 重跑 run_sorting.py
+        run: python backtest/run_sorting.py
+
+      - name: 比對重生報告與已 commit 版本
+        run: |
+          if git diff --quiet -- backtest/report_sorting.md; then
+            echo "OK: 重生的 report_sorting.md 與 repo 內容逐字相同"
+            exit 0
+          fi
+          echo "::error::report_sorting.md 重生後與已 commit 版本不一致（腳本與報告不同步，或報告被手改）"
+          echo "----- diff（已 commit ← 重生）-----"
+          git --no-pager diff -- backtest/report_sorting.md
+          echo "-----------------------------------"
+          echo "判讀順序：①先確認不是 FinMind 事後修訂歷史造成的資料差異；"
+          echo "②若是腳本變更造成 → 本機重跑 run_sorting.py 後 commit 新報告；"
+          echo "③若是報告被手改 → 以腳本產出為準還原。本班不自動 commit。"
+          exit 1
+
+      - name: Notify failure
+        # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
+        # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-backtest-regen
