@@ -1487,7 +1487,8 @@ export function lowFreqDue(name, dateISO) {
   if (name === "lastweek") return dateISO;                               // 當日 09:00 產出、23:50 檢查
   if (name === "meta") {
     // 每月第一個週六產出 → 該週六起算兩天後（＝週一）的每個週一都檢查一次：
-    // 健康時零告警，真的沒跑時一個月最多叫 4 次（每週一一次），不是天天叫。
+    // 健康時零告警，真的沒跑時一個月最多叫 5 次（每週一一次），不是天天叫。
+    // （5 次＝該月第一個週六落在 1 日、且該月有 5 個週一時；例 2026-08 檢查日 03/10/17/24/31。）
     const first = firstSaturdayISO(dateISO);
     return dateISO >= addDaysISO(first, 2) ? first : null;               // 本月還沒輪到 → 不檢查
   }
