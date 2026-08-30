@@ -801,7 +801,7 @@ async function runInsight(){
   state.insightLoading = false; render();
 }
 function insightHtml(){
-  let h = `<div class="crumb"><b>摘要分析</b>${state.live&&state.live.ts?` <span class="mut">資料時間 ${escI(state.live.ts)}</span>`:""}</div>`;
+  let h = `<div class="crumb"><b>摘要分析</b>${state.live&&state.live.ts?` <span class="mut">最後成交 ${escI(state.live.ts)}</span>`:""}</div>`;
   // token 輸入區（postmkt 的 mcard/qrow/qbtn → v2 等價 card/flex/btn）
   const inStyle="background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 8px;font-size:13px;flex:1;min-width:0";
   if (!anthKey()){
@@ -1623,6 +1623,9 @@ function ovRrgHtml(){
       `${r.odd?"｜位移異常":(r.oddRaw?"｜收盤量能集中時段，不判定位移異常":"")}</title></circle>`;
   };
   const bubs=rows.filter(r=>!r.show).map(bubble).join("")+rows.filter(r=>r.show).map(bubble).join("");
+  // 姊妹實作：postmkt/index.html 的 rrgdSvg 標籤段（盤後日頻 RRG）移植本段的 8 候選位／外三圈／
+  // 加權重疊 fallback，但頭點是固定 r=5、佔位權重用成交額、強制族群＝加選鏈＋錨點——語意不同，
+  // 兩邊刻意不列為跨站同步函式（不存在「改一邊必須同步另一邊」的義務），只互相引用備查。
   // 標籤：只給顯示族群。**強制標示族群＝錨點（Top10）＋改善象限＋位移異常**——
   // 規格 §2「顯示規則」把「Top15／改善象限／位移異常」三者並列為保留族群，頁尾文案也照抄，
   // 但位移異常原本不在強制名單裡，8 個候選位一撞光就靜默退成「只有尾巴沒有標籤」，
@@ -2054,7 +2057,7 @@ function renderOverview(force){
   const act=document.activeElement;
   if(!force&&act&&/^ovReplay/.test(act.id||""))return;
   OV_SUB_CACHE=ovComputeSubAgg();
-  renderMarket();   // mkcard 雖隱藏，仍需更新 #tsline 資料時間列
+  renderMarket();   // mkcard 雖隱藏，仍需更新 #tsline 最後成交列
   let html=ovSummaryCard();   // 第五期：收盤後（13:35+）全日總結卡；盤中/回放中為空字串
   html+=ovDashboard();
   html+=ovReplayBar();        // 第五期：時間滑桿（儀表列正下方）
