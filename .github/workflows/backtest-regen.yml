@@ -23,17 +23,26 @@ name: backtest-regen
 #   FinMind 請求）與偵測延遲（最壞一個月）在這個用途上是划算的。改腳本後想立刻確認的人
 #   走手動 dispatch，不必等排程。
 #
-# 時段選定理由：UTC 18:00 ＝ 台北 02:00。
+# 時段選定理由：UTC 16:00 ＝ 台北（隔日）00:00。
 #   避開台北 09:00–14:00 盤中（Worker frame 班每分鐘打 FinMind，本班 ~550 次請求會互相排擠）
-#   與台北 17:00–23:55 晚場（哨兵＋evening 協調班）；也避開 22:00/22:10 UTC 的 morning/us 班。
-#   ~50 分鐘的 job 在 02:50 台北前結束，離最早的晨班（05:05 Worker）還有兩小時餘裕。
+#   與台北 17:00–23:55 晚場（哨兵＋evening 協調班）。要避開的下一組是晨班：
+#   Worker us 主觸發 UTC 21:05（`worker/wrangler.toml` 第 9 條，台北 05:05）、
+#   GH morning UTC 22:00、GH us 備援 UTC 22:10。
+#
+#   餘裕要用「延遲後」算，不能用準點算（2026-08-30 覆驗修正，原註解漏了這個前提）：
+#   **GH cron 常態延遲是本家族有紀錄的事實**——本 repo `morning.yml` 檔頭自寫「cron 常延遲
+#   ~70 分鐘」，`taiwan-stock-news/CLAUDE.md` 寫「常態延遲 1~2 小時」。原排的 UTC 18:00
+#   若延遲 2 小時＋50 分執行，收在 UTC 21:40–22:00，**正好壓在 us 主觸發與 morning/us 之上**，
+#   等於撞進本班本來想避開的 FinMind 爭用窗。
+#   改 UTC 16:00 後：起跑點距最早晨班（UTC 21:05）有 5 小時；即使延遲 2 小時起跑，
+#   ~50 分的 job 也在 UTC 18:50 結束，仍留 2 小時以上淨空。
 #
 # 注意（已知、非本班可解）：重抓是「用今天的 FinMind 回答同一段歷史」，FinMind 事後修訂
 # 歷史資料時，重生報告會因**資料**而非**程式**而不同。判讀 diff 要先排除這一種。
 
 on:
   schedule:
-    - cron: '0 18 1 * *'   # 每月 1 日 18:00 UTC = 台北 02:00
+    - cron: '0 16 1 * *'   # 每月 1 日 16:00 UTC = 台北 2 日 00:00（餘裕理由見檔頭「時段選定理由」）
   workflow_dispatch:
 
 permissions:
@@ -61,12 +70,33 @@ jobs:
 
       # 快取鍵綁 fetch.py 的內容雜湊：抓取邏輯或 START/END 窗一改，鍵就變、強制重抓，
       # 不會拿舊格式的 price_*.json.gz 餵新程式。fetch.py 本身可中斷續傳（既有檔會跳過），
-      # 所以 restore 命中時這一步幾乎是零成本，只補缺漏日。
+      # 所以 restore 命中時抓取步驟幾乎是零成本，只補缺漏日。
+      #
+      # 為什麼拆成 restore ＋ save，而不是用 actions/cache@v4（2026-08-30 覆驗必修）：
+      #   actions/cache 的 `action.yml` 是 `post-if: "success()"`——**job 失敗就不存快取**。
+      #   本班在偵測到報告漂移時故意 `exit 1`，於是「偵測到漂移」這個最需要重跑確認的情境，
+      #   反而是唯一存不下快取的情境：漂移沒被修掉之前，每個月都要重花 ~50 分鐘重抓。
+      #   改成 restore/save 後，save 掛 `if: always()`，抓到的快取無論比對結果都會落地。
+      #   （官方也是這樣建議：同一份 action.yml 把 `save-always` 標為 deprecated，訊息逐字寫
+      #     「A separate `actions/cache/restore` step should be used instead」。）
+      #   （另一種寫法是「把比對結果暫存、最後一步才 fail」——不採用：那只救得了比對這一步，
+      #     fetch/run_sorting 自己爆掉時照樣整包丟掉，而且會把失敗點推離真正出錯的步驟，
+      #     log 判讀變難。restore/save 是對所有結束路徑都成立的解。）
+      #
+      # 鍵的語意（別讓快取永遠 miss）：
+      #   primary key 帶 `github.run_id` → **每次都是新鍵、必定 miss**，這是刻意的：
+      #   命中要靠下面的 restore-keys 前綴。這樣 save 那步永遠不會撞到「鍵已存在」而變成
+      #   空操作，補抓到的缺漏日才寫得回去（否則第一次存進去的若是半殘快取，之後每一班
+      #   都會 restore 到同一份半殘、補完、然後存不進去，永遠修不好）。
+      #   restore-keys 只給到 `...-<fetch.py 雜湊>-` 為止，命中同雜湊中最新的一份；
+      #   hashFiles 回定長 hex，前綴不可能跨雜湊誤命中，fetch.py 一改仍是強制重抓。
       - name: 還原回測快取
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: backtest/cache
-          key: backtest-cache-${{ hashFiles('backtest/fetch.py') }}
+          key: backtest-cache-${{ hashFiles('backtest/fetch.py') }}-${{ github.run_id }}
+          restore-keys: |
+            backtest-cache-${{ hashFiles('backtest/fetch.py') }}-
 
       - name: 抓快取（FinMind）
         env:
@@ -90,6 +120,16 @@ jobs:
           echo "②若是腳本變更造成 → 本機重跑 run_sorting.py 後 commit 新報告；"
           echo "③若是報告被手改 → 以腳本產出為準還原。本班不自動 commit。"
           exit 1
+
+      # 存快取：`if: always()` ＝ 比對失敗（exit 1）、腳本爆掉、job 被取消時都照存。
+      # 這一步本身不該把 job 弄紅（快取存不進去不影響本班結論），故 continue-on-error。
+      - name: 保存回測快取
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: backtest/cache
+          key: backtest-cache-${{ hashFiles('backtest/fetch.py') }}-${{ github.run_id }}
 
       - name: Notify failure
         # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
