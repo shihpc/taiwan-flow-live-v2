@@ -254,11 +254,20 @@ function renderMarket(){
     `<div class="mkrow">${idxLine("櫃買",ix.otc,m.otc,"otc")}</div>`+
     futuresVixLine();
   const src=CFG.worker?" · 即時(Worker)":isLocal?"":" · 靜態快照";
-  // 產生時間距今 >3 分鐘 → 標示資料偏舊（Worker/上游卡住時可察覺）
+  // 產生時間距今 >3 分鐘 → 標示快照偏舊（Worker/上游卡住時可察覺）
   let stale="";
   try{const age=(Date.now()-Date.parse(state.live.generated_at))/1000;
-    if(age>180)stale=" · ⚠資料"+Math.round(age/60)+"分前";}catch(e){}
-  document.getElementById("tsline").textContent="資料時間 "+(state.live.ts||"—")+src+(autoTimer?" · ⏱自動":"")+stale;
+    if(age>180)stale=" · ⚠快照"+Math.round(age/60)+"分前";}catch(e){}
+  // 這行並列兩個語意不同的時間，用詞務必分得開：
+  //   「最後成交」＝ ts ＝上游 FinMind 全體有分類個股中最後一筆成交的時戳（非收盤時刻、非產出時刻；
+  //                  原字串無時區標記；收盤後會被盤後定盤/零股推進到 14:30–15:00；
+  //                  非交易日可能是當日盤前殘留值，日期部分不可當資料日）
+  //   「⚠快照 N 分前」＝依 generated_at（我方 Worker 產出牆鐘，UTC Z）算的年齡
+  // 完整欄位語意見 postmkt/docs/date-semantics.md 的「Worker `/live`」段。
+  const tsEl=document.getElementById("tsline");
+  tsEl.textContent="最後成交 "+(state.live.ts||"—")+src+(autoTimer?" · ⏱自動":"")+stale;
+  tsEl.title="最後成交＝上游最後一筆成交的時戳（非收盤時刻、無時區標記，收盤後會被盤後定盤/零股推進）；"
+            +"⚠快照 N 分前＝本快照產出至今經過的時間（依 generated_at）";
 }
 function idxSeg(){return `<div style="display:flex;gap:6px;margin:2px 0 8px;align-items:center"><span class="mut" style="font-size:11px">市場</span>`+
   `<button class="seg2 ${state.idx==='tse'?'on':''}" data-idx="tse">加權(TSE)</button>`+
