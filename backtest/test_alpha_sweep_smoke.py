@@ -326,6 +326,9 @@ def test_phase2_report_section():
           "另外檢定 3 個訊號" in ran and "不合併" in ran)
     check("第一階段 K 仍是 16", "共檢定 16 個訊號" in ran)
     check("AS-16 雙邊理由寫進報告", "方向不明者明列雙邊並計 2 次" in ran)
+    # 預註冊書 §6.2 的誠實標註要同步出現在報告裡，否則讀者會以為 short 是原訂方向
+    check("AS-15 方向來源誠實標註寫進報告",
+          "非預註冊書原訂" in ran and "DIAG_RULES" in ran)
     check("兩階段分層合計 16 段", ran.count("**分層**") == 16)
 
 

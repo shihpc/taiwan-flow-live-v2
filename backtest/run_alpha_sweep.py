@@ -81,8 +81,10 @@ SIGNALS = [
 # K＝檢定次數：雙邊檢定各計 2（預註冊書 §2 前言 + §2.1 註）。由清單自動帶入，不手填。
 K_TESTS = sum(s["weight"] for s in SIGNALS)
 
-# ── 第二階段候選（預註冊書 §2.3「需改一行 fetch.py，本次不跑」）─────────
+# ── 第二階段候選（預註冊書 §6，於第二階段執行前寫定）─────────────────
 # 2026-08-30 解鎖：fetch.py 的 price 陣列已補 Trading_Volume（索引 5）。
+# 定義／方向／權重／K 的正本在 `docs/alpha-sweep-preregistration.md` §6
+# （原 §2.3 只寫了訊號名稱與解鎖條件、沒有方向欄，已在該節加註指向 §6）。
 #
 # **與第一階段嚴格分離**：§2.5 明文「以上 14 列（K=16）即為第一階段全部候選。掃描程式
 # 寫完後不得增刪」——所以這兩列不進 SIGNALS、不進 K_TESTS、不進第一階段的三層總表，
@@ -92,7 +94,10 @@ K_TESTS = sum(s["weight"] for s in SIGNALS)
 #   AS-15 爆量長黑 ← postmkt `src/build_diag.py` 的 vs／vb 兩行：
 #       vs＝當日量 > 2 × 前 20 個交易日（**不含當日**、容缺 min 15）均量；
 #       vb＝vs 且 當日漲跌% ≤ −3（漲跌% 先經 r2 再比較，與來源同語意）。
-#       方向＝做空：postmkt `index.html` 的 DIAG_RULES 把 P2 標 col:"red"（風險側）。
+#       方向＝做空，但**這不是預註冊書原訂的**：§2.3 沒有方向欄，`short` 是從 postmkt
+#       `index.html` 的 DIAG_RULES 推出來的（grep `id:"P2"`，該條目帶 col:"red"＝風險側，
+#       且自標 ver:false）。§6.2 已如實記載此來源；是否改雙邊／weight 2（K_TESTS_P2
+#       會變 4）待使用者裁決，在此之前維持 short/weight 1。
 #   AS-16 量能爆量 ← `worker/src/index.js` 的 volumeRatio：
 #       SMA(V,5)/SMA(V,20) ≥ 2（兩窗**皆含當日**）且 收盤 > 前一日收盤。
 #       方向＝**雙邊**：兩處來源都只把「爆量」寫成中性量能描述、未宣稱多空
@@ -898,6 +903,11 @@ def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None,
             "`vs`／`vb`；AS-16＝`worker/src/index.js` 的 `volumeRatio`。",
             "**AS-16 列為雙邊**：兩處來源都只把「爆量」寫成中性的量能描述、未宣稱多空，"
             "預註冊書 §2.3 也沒訂方向——依 §2 前言，方向不明者明列雙邊並計 2 次。",
+            "**AS-15 的方向來源**：`short` **非預註冊書原訂**——§2.3 只寫了訊號名稱與解鎖"
+            "條件、沒有方向欄。方向依據＝postmkt `DIAG_RULES` 把該規則（`id:\"P2\"`）歸為"
+            "`col:\"red\"` 的**風險側**，屬卡面風險提示的分類，強度不等於「已聲明為做空訊號」"
+            "（同一條還自標 `ver:false`＝來源自承未驗證）。§6.2 已如實記載；是否改列雙邊"
+            "（K 會由 3 變 4）待裁決，本次維持現狀。",
         ])
         cov = _vol_cov_line(vol_cov)
         if cov:
