@@ -523,13 +523,35 @@ def vol_of(row):
     return rs.fv(row[VOL_IDX])
 
 
-def cache_has_volume(days, price):
-    """快取是否帶 Trading_Volume。任一列有值即算有——重抓是整批的，不會半有半無。"""
+def volume_days(days, price):
+    """回 (帶 volume 的交易日, 非空交易日)。判定單位是「日」不是「列」：
+    fetch.py 整日寫一個 price_<d>.json.gz，schema 缺欄必然整日缺；
+    單列的 volume 為 None 是資料問題（FinMind 回 null），由各訊號自己跳過。
+    """
+    have, nonempty = [], []
     for d in days:
-        for row in price[d].values():
-            if vol_of(row) is not None:
-                return True
-    return False
+        rows = price.get(d) or {}
+        if not rows:
+            continue
+        nonempty.append(d)
+        if any(vol_of(r) is not None for r in rows.values()):
+            have.append(d)
+    return have, nonempty
+
+
+def cache_has_volume(days, price):
+    """快取是否**完整**帶 Trading_Volume：所有非空交易日都要有，缺一天就回 False。
+
+    2026-08-30 改嚴（原判準是「任一列有值即 True」）。原判準的破口：
+    fetch.py 的續傳是逐檔跳過（`if pf.exists() and inf.exists(): continue`），
+    所以**只刪掉部分 price_*.json.gz 重跑就會產生混合快取**——一部分日有 volume、
+    一部分沒有。舊判準放行後 attach_volume_signals 回 True、報告照印 N 與分層，
+    但缺欄那幾天的量能訊號整批靜默漏掉，讀者無從察覺報告是半盲的
+    （實測：混合快取下植入的 AS-15/16 事件全部沒觸發，報告零提示）。
+    改嚴後這種快取一律整批不跑，並在報告印出實際涵蓋日數（見 build_report）。
+    """
+    have, nonempty = volume_days(days, price)
+    return bool(nonempty) and len(have) == len(nonempty)
 
 
 def attach_volume_signals(samples, days, price, diag):
@@ -743,8 +765,29 @@ def render_signal(sig, res, diag, lines):
     lines.append("")
 
 
-def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None):
-    """results_p2=None 代表第二階段沒跑（快取無 Trading_Volume），報告改印未跑說明。"""
+def _vol_cov_line(vol_cov):
+    """第二階段的快取涵蓋揭露行。vol_cov=(帶 volume 的日, 非空日)，None 代表沒帶進來。
+
+    為什麼要印：閘門改嚴後「跑或不跑」是二元的，但讀者看不到快取到底涵蓋哪一段。
+    比照 KNOWN_BIASES 的揭露文化，把實際範圍寫進報告，混合快取一眼看得出來。
+    """
+    if not vol_cov:
+        return None
+    have, nonempty = vol_cov
+    if not nonempty:
+        return "快取 volume 涵蓋：無非空交易日。"
+    span = f"（{have[0]} ~ {have[-1]}）" if have else ""
+    return (f"快取 volume 涵蓋：{len(have)}/{len(nonempty)} 個非空交易日{span}。"
+            "閘門要求**全部非空日皆帶 volume**——只重抓部分日造成的混合快取會被擋下、"
+            "本節整批不跑，而不是靜默漏算那幾天。")
+
+
+def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None,
+                 vol_cov=None):
+    """results_p2=None 代表第二階段沒跑（快取 volume 不完整），報告改印未跑說明。
+
+    vol_cov＝volume_days() 的回傳，只用來在第二階段那節揭露快取實際涵蓋範圍。
+    """
     cut = split_index(days)
     ctrl = [r for r in samples if r["surge"] < 1.2 or abs(r["ret"]) < 0.01]
     lines = [
@@ -832,10 +875,15 @@ def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None)
         lines.extend([
             "# 第二階段：量能訊號（**本次未跑**）",
             "",
-            "快取沒有 `Trading_Volume` 欄（舊格式，price 陣列只有 5 欄），AS-15/16 整批跳過。",
-            "解鎖方式：刪掉 `backtest/cache/price_*.json.gz` 後重跑 `backtest/fetch.py`"
-            "（fetch.py 2026-08-30 起已把該欄存在陣列索引 5）。",
+            "快取的 `Trading_Volume` 欄不完整（舊格式的 price 陣列只有 5 欄），AS-15/16 整批跳過。",
+            "解鎖方式：刪掉**全部** `backtest/cache/price_*.json.gz` 後重跑 `backtest/fetch.py`"
+            "（fetch.py 2026-08-30 起已把該欄存在陣列索引 5）。"
+            "**只刪一部分沒有用**：fetch.py 的續傳是逐檔跳過，會留下一半有一半沒有的混合快取，"
+            "閘門一樣不放行。",
         ])
+        cov = _vol_cov_line(vol_cov)
+        if cov:
+            lines.append(cov)
     else:
         lines.extend([
             "# 第二階段：量能訊號（預註冊書 §2.3）",
@@ -844,12 +892,16 @@ def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None)
             "（§2.5 已凍結第一階段清單，事後併算等於加碼），多重比較請分兩段各自折算："
             f"本節若全為無效訊號，名目 5% 水準下預期約 {0.05 * K_TESTS_P2:.2f} 個會偶然看起來有效。",
             "",
-            "解鎖條件＝快取帶 `Trading_Volume`（fetch.py 的 price 陣列索引 5）。",
+            "解鎖條件＝快取的**每一個**非空交易日都帶 `Trading_Volume`"
+            "（fetch.py 的 price 陣列索引 5）。",
             "訊號定義取自原始出處，非本報告自訂：AS-15＝postmkt `src/build_diag.py` 的 "
             "`vs`／`vb`；AS-16＝`worker/src/index.js` 的 `volumeRatio`。",
             "**AS-16 列為雙邊**：兩處來源都只把「爆量」寫成中性的量能描述、未宣稱多空，"
             "預註冊書 §2.3 也沒訂方向——依 §2 前言，方向不明者明列雙邊並計 2 次。",
         ])
+        cov = _vol_cov_line(vol_cov)
+        if cov:
+            lines.append(cov)
         for sig in SIGNALS_P2:
             render_signal(sig, results_p2[sig["id"]], diag, lines)
         lines.append("")
@@ -917,6 +969,8 @@ def main():
               f"→ {classify_tier(res)}", flush=True)
 
     print("掛第二階段量能旗標（AS-15/16）...", flush=True)
+    vol_cov = volume_days(days, price)
+    print(f"  快取 volume 涵蓋 {len(vol_cov[0])}/{len(vol_cov[1])} 個非空交易日", flush=True)
     results_p2 = None
     if attach_volume_signals(samples, days, price, diag):
         results_p2 = {}
@@ -928,11 +982,12 @@ def main():
             print(f"  {sig['id']} N={res['n']:6d} e3={_p(res['e3_avg'])} "
                   f"→ {classify_tier(res)}", flush=True)
     else:
-        print("  快取無 Trading_Volume 欄 → AS-15/16 跳過"
-              "（刪 price_*.json.gz 重跑 fetch.py 即解鎖）", flush=True)
+        print("  快取 volume 不完整 → AS-15/16 整批跳過"
+              "（刪**全部** price_*.json.gz 重跑 fetch.py 才解鎖；"
+              "只刪一部分會留下混合快取，閘門一樣不放行）", flush=True)
 
     doc_info, dirty = doc_commit()
-    lines = build_report(days, samples, results, diag, doc_info, dirty, results_p2)
+    lines = build_report(days, samples, results, diag, doc_info, dirty, results_p2, vol_cov)
     OUT.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n已寫 {OUT}")
     return 0

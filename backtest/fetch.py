@@ -5,6 +5,9 @@
 #     vol＝FinMind Trading_Volume，單位「股」（÷1000＝張，taiwan-flows CLAUDE.md 口徑段）。
 #     2026-08-30 追加於**陣列末端**，既有讀取端全部走索引 0~4，舊快取仍可讀；
 #     但舊快取沒有這一欄，量能訊號（AS-15/16）會整批跳過，需重抓才解鎖。
+#     **要重抓就整批刪**：下面的續傳是逐檔跳過（`if pf.exists() and inf.exists()`），
+#     只刪一部分 price_*.json.gz 會留下「一半有欄一半沒有」的混合快取；
+#     run_alpha_sweep 的 cache_has_volume 對此一律不放行（整批不跑，不半盲印報告）。
 #   inst_YYYY-MM-DD.json.gz  : {code:[投信淨買股數, 外資淨買股數]}
 #
 # 用法：python backtest/fetch.py   （token 取 FINMIND_TOKEN 環境變數，沒有才讀 repo 根 .env）

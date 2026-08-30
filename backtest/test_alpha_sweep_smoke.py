@@ -90,23 +90,54 @@ def mk(n, days, *, e3, e1=0.0, first_ratio=0.5, seed=3):
     return rows
 
 
-def volume_market(ndays=60, code="2330", base_v=1_000_000):
+# 量能事件日一覽（`volume_market` 的植入點；彼此間隔 ≥21 個交易日，
+# 讓每一天的 20 日窗只看得到平靜日，互不污染）。
+VOL_D40, VOL_D50 = 40, 50          # 既有兩個事件
+VOL_D_RATIO_DN = 72                # 量比過門檻但價跌
+VOL_D_RATIO_UP = 94                # 量比過門檻且價漲（72 的正對照）
+VOL_D_WINDOW = 116                 # AS-15「含不含當日」會翻轉的臨界量
+VOL_EVENT_DAYS = (VOL_D40, *range(46, 51), VOL_D_RATIO_DN, VOL_D_RATIO_UP, VOL_D_WINDOW)
+
+
+def volume_market(ndays=125, code="2330", base_v=1_000_000):
     """量能訊號用的**受控**市場：事件日寫死，不靠隨機碰運氣。
 
-    day 40：量 5×base 且收盤 −5%  → 應觸發 AS-15（爆量長黑），不觸發 AS-16（價跌）
-    day 46~50：量 5×base 且收盤走高 → day 50 的 SMA(V,5)/SMA(V,20)≈2.27 → 應觸發 AS-16
-    其餘日：量固定 base，收盤微幅走高 → 兩者皆不觸發
+    day 40      量 5×base、收盤 −5%   → AS-15 觸發；AS-16 量比僅 1.5，量能門檻就擋掉
+    day 46~50   量 5×base、收盤走高    → day50 量比 ≈2.27 → AS-16 觸發
+    day 72      量 12×base、收盤 −1%  → 量比 ≈2.07（**過**量能門檻）但價跌
+                                         → AS-16 只能靠價格條件擋住（**判別日**）
+                                         → AS-15 量也過門檻，只能靠 −3% 跌幅條件擋住
+    day 94      量 12×base、收盤 +1%  → 量比同 day72 但價漲 → AS-16 觸發（day72 的正對照，
+                                         證明 day72 不觸發是價格條件擋的、不是量不夠）
+    day 116     量 2.05×base、收盤 −5% → AS-15 窗定義**判別日**：
+                                         不含當日均量＝base，門檻 2×base → 2.05 過 → 觸發；
+                                         若改成含當日，均量＝(19+2.05)/20＝1.0525×base，
+                                         門檻 2.105×base → 2.05 不過 → 不觸發
+    其餘日      量 base、收盤微幅走高   → 兩者皆不觸發
+
+    ⚠ 為什麼需要 day72／94／116（2026-08-30 覆驗必修）：突變測試證明只有 day40/50 時，
+    「拿掉 AS-16 的價漲條件」與「把 AS-15 的 20 日窗改成含當日」兩種突變都**測不到**——
+    day40 的量比只有 1.5，量能門檻就先擋掉，那條負向斷言是因為錯的理由而通過。
     """
     days = _days(ndays)
     price, inst = {}, {}
     cl = 100.0
     for t, d in enumerate(days):
-        if t == 40:
+        if t == VOL_D40:
             cl = round(cl * 0.95, 2)          # −5% → d1 = −5.0 ≤ −3
             v = base_v * 5
-        elif 46 <= t <= 50:
+        elif 46 <= t <= VOL_D50:
             cl = round(cl * 1.01, 2)
             v = base_v * 5
+        elif t == VOL_D_RATIO_DN:
+            cl = round(cl * 0.99, 2)          # −1% → 過不了 AS-15 的 −3%
+            v = base_v * 12                   # 單日 12× → SMA5/SMA20 ≈ 2.07 ≥ 2
+        elif t == VOL_D_RATIO_UP:
+            cl = round(cl * 1.01, 2)
+            v = base_v * 12
+        elif t == VOL_D_WINDOW:
+            cl = round(cl * 0.95, 2)          # −5% ≤ −3，AS-15 的價格條件過
+            v = int(base_v * 2.05)            # 落在「不含當日過、含當日不過」的窄帶
         else:
             cl = round(cl * 1.001, 2)
             v = base_v
@@ -122,6 +153,22 @@ def volume_market(ndays=60, code="2330", base_v=1_000_000):
 def strip_volume(price):
     """把受控市場降級成舊格式快取（每列砍成 5 欄）。"""
     return {d: {c: row[:5] for c, row in rows.items()} for d, rows in price.items()}
+
+
+def mix_volume(price, keep_first=30):
+    """混合快取：前 keep_first 天保留 volume，其餘退回舊格式 5 欄。
+
+    重現「只刪掉部分 price_*.json.gz 重跑 fetch.py」——fetch.py 的續傳是逐檔跳過
+    （`if pf.exists() and inf.exists(): continue`），所以這種半有半無的快取真的做得出來。
+    """
+    return {d: (rows if i < keep_first else {c: r[:5] for c, r in rows.items()})
+            for i, (d, rows) in enumerate(price.items())}
+
+
+def _vol_series(days, price):
+    """取受控市場那一檔的成交量序列（跳過 _TAIEX）。"""
+    code = next(c for c in price[days[0]] if c != "_TAIEX")
+    return [price[d][code][a.VOL_IDX] for d in days]
 
 
 # ── 0. 第二階段（量能）候選 ─────────────────────────────────────
@@ -155,6 +202,41 @@ def test_volume_gate_blocks_old_cache():
           diag.get("AS-15", {}).get("cand") == 0 and diag.get("AS-16", {}).get("cand") == 0)
 
 
+def test_volume_gate_blocks_mixed_cache():
+    """混合快取必須被擋下（2026-08-30 覆驗必修）。
+
+    舊判準是「任一列有 volume 即 True」，混合快取下閘門放行、attach 回 True、
+    報告照印 N 與分層，但缺欄那幾天的事件整批靜默漏掉——實測植入的 AS-15/16
+    全部沒觸發而報告零提示。改嚴為「所有非空日皆帶 volume」。
+    """
+    days, price, inst = volume_market()
+    mixed = mix_volume(price, keep_first=30)
+    have, nonempty = a.volume_days(days, mixed)
+    check(f"混合快取確實是半有半無（{len(have)}/{len(nonempty)} 日帶 volume）",
+          0 < len(have) < len(nonempty))
+    check("混合快取判為不完整（舊判準會回 True）",
+          a.cache_has_volume(days, mixed) is False)
+
+    samples, _, _ = rs.build_stock_samples(days, mixed, inst)
+    a.attach_all(samples, days, mixed)
+    diag = {}
+    check("混合快取時 attach_volume_signals 回 False（整批不跑，不半盲）",
+          a.attach_volume_signals(samples, days, mixed, diag) is False)
+    check("混合快取時完全不掛量能旗標",
+          not any(("AS-15" in r["sig"]) or ("AS-16" in r["sig"]) for r in samples))
+
+    # 完整／全空兩端仍要判對，否則「改嚴」可能是把閘門寫死成 False
+    check("完整快取仍判為完整", a.cache_has_volume(days, price) is True)
+    full_have, full_nonempty = a.volume_days(days, price)
+    check("完整快取涵蓋 = 全部非空日", len(full_have) == len(full_nonempty) > 0)
+    check("全舊格式快取涵蓋 0 日", a.volume_days(days, strip_volume(price))[0] == [])
+
+    # 揭露行：報告要看得出實際涵蓋範圍（比照 KNOWN_BIASES 的揭露文化）
+    cov = a._vol_cov_line((have, nonempty))
+    check("揭露行印出涵蓋日數", f"{len(have)}/{len(nonempty)}" in cov)
+    check("揭露行印出涵蓋起訖日", have[0] in cov and have[-1] in cov)
+
+
 def test_volume_signals_fire_on_planted_events():
     days, price, inst = volume_market()
     samples, _, _ = rs.build_stock_samples(days, price, inst)
@@ -163,13 +245,62 @@ def test_volume_signals_fire_on_planted_events():
     check("新快取時 attach_volume_signals 回 True",
           a.attach_volume_signals(samples, days, price, diag) is True)
     by_d = {r["d"]: r for r in samples}
+    idx = {d: i for i, d in enumerate(days)}
+    for i in VOL_EVENT_DAYS:
+        if days[i] not in by_d:
+            check(f"day{i} 有樣本（否則其斷言全部落空）", False)
     d40, d50 = days[40], days[50]
     check("day40 觸發 AS-15（爆量長黑）", d40 in by_d and "AS-15" in by_d[d40]["sig"])
-    check("day40 不觸發 AS-16（價跌）", d40 in by_d and "AS-16" not in by_d[d40]["sig"])
+    check("day40 不觸發 AS-16（量比僅 1.5，量能門檻就擋掉）",
+          d40 in by_d and "AS-16" not in by_d[d40]["sig"])
     check("day50 觸發 AS-16（量能爆量）", d50 in by_d and "AS-16" in by_d[d50]["sig"])
     check("day50 不觸發 AS-15（價漲）", d50 in by_d and "AS-15" not in by_d[d50]["sig"])
-    quiet = [r for d, r in by_d.items() if d not in (d40, d50) and days.index(d) not in range(46, 51)]
-    check("平靜日不觸發任何量能訊號",
+
+    # ── AS-16 的價格條件（判別日 day72 / 正對照 day94）────────────────
+    # 突變測試：拿掉 attach_volume_signals 裡 AS-16 的 `and C[i] > pc`，
+    # 只有 day40/50 時全部測試照樣通過（day40 量比 1.5，是量能門檻擋掉的，
+    # 那條負向斷言因為錯的理由而通過）。day72 的量比 ≥2，價格條件是唯一能擋的。
+    V = _vol_series(days, price)
+
+    def vratio(i):
+        w20 = V[i - 19:i + 1]
+        return (sum(w20[-5:]) / 5) / (sum(w20) / 20)
+
+    r_dn, r_up = vratio(VOL_D_RATIO_DN), vratio(VOL_D_RATIO_UP)
+    check(f"day{VOL_D_RATIO_DN} 的量比確實 ≥2（{r_dn:.3f}）"
+          "——否則下面的『不觸發』又是量能門檻擋的，測不到價格條件", r_dn >= 2)
+    check(f"day{VOL_D_RATIO_UP} 的量比確實 ≥2（{r_up:.3f}）", r_up >= 2)
+    dn, up = by_d[days[VOL_D_RATIO_DN]], by_d[days[VOL_D_RATIO_UP]]
+    check(f"day{VOL_D_RATIO_DN}（量比 ≥2 但價跌）不觸發 AS-16"
+          "——AS-16 的價漲條件唯一擋得住的日子", "AS-16" not in dn["sig"])
+    check(f"day{VOL_D_RATIO_UP}（量比 ≥2 且價漲）觸發 AS-16"
+          "——正對照，證明上一條不是量不夠", "AS-16" in up["sig"])
+    # 同兩天也把 AS-15 的價格條件夾住：量都遠過門檻，只剩 −3% 跌幅條件能擋
+    check(f"day{VOL_D_RATIO_DN}（量過門檻但只跌 1%）不觸發 AS-15", "AS-15" not in dn["sig"])
+    check(f"day{VOL_D_RATIO_UP}（量過門檻但價漲）不觸發 AS-15", "AS-15" not in up["sig"])
+
+    # ── AS-15 的窗定義：前 20 日**不含當日**（判別日 day116）──────────
+    # 突變測試：把 `V[max(0, i - 20):i]` 改成含當日的 `V[max(0, i - 19):i + 1]`，
+    # 只有 day40 時測不到（5× 量在兩種窗下都過門檻）。day116 的量刻意落在
+    # 「不含當日過、含當日不過」的窄帶（2m < v ≤ 2.111m）。
+    w_ex = V[VOL_D_WINDOW - 20:VOL_D_WINDOW]
+    w_in = V[VOL_D_WINDOW - 19:VOL_D_WINDOW + 1]
+    ex_ok = V[VOL_D_WINDOW] > 2 * (sum(w_ex) / len(w_ex))
+    in_ok = V[VOL_D_WINDOW] > 2 * (sum(w_in) / len(w_in))
+    check(f"day{VOL_D_WINDOW} 落在窄帶：不含當日過門檻({ex_ok})、含當日不過({in_ok})"
+          "——這是本條能區分窗定義的前提", ex_ok and not in_ok)
+    win = by_d[days[VOL_D_WINDOW]]
+    check(f"day{VOL_D_WINDOW} 觸發 AS-15（窗＝前 20 日不含當日）", "AS-15" in win["sig"])
+    check(f"day{VOL_D_WINDOW} 不觸發 AS-16（量比 {vratio(VOL_D_WINDOW):.3f} < 2）",
+          "AS-16" not in win["sig"])
+
+    # 平靜日＝20 日窗（含當日）內完全沒有事件日：兩個訊號的窗都只看得到 base 量，
+    # 定義上不可能觸發。**不能只排除事件日本身**——尖峰後 4 天 SMA5 仍含該尖峰，
+    # AS-16 會延續觸發，那是定義內行為不是誤觸。
+    quiet = [r for r in samples
+             if not any(e in range(idx[r["d"]] - 19, idx[r["d"]] + 1) for e in VOL_EVENT_DAYS)]
+    check(f"平靜日樣本數 > 0（實際 {len(quiet)}）", len(quiet) > 0)
+    check("平靜日不觸發任何量能訊號（20 日窗內無事件）",
           all("AS-15" not in r["sig"] and "AS-16" not in r["sig"] for r in quiet))
     check("診斷回報候選數 > 0", diag["AS-15"]["cand"] >= 1 and diag["AS-16"]["cand"] >= 1)
 
@@ -514,6 +645,7 @@ def main():
                test_report_structure,
                # 第二階段（量能）：解鎖 AS-15/16 的守門
                test_phase2_list_separate_from_phase1, test_volume_gate_blocks_old_cache,
+               test_volume_gate_blocks_mixed_cache,
                test_volume_signals_fire_on_planted_events, test_phase2_report_section]:
         print(f"\n--- {fn.__name__} ---")
         fn()
