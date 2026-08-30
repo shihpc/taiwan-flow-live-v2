@@ -4,6 +4,7 @@
 # 規格：docs/alpha-sweep-preregistration.md（已 commit、已凍結）。
 #   §1 方法（主要結果變數 e3、不報 p 值、切半驗證、採用門檻、三層報告、多重比較揭露）
 #   §2.1 候選清單 14 列（AS-03/AS-04 為雙邊檢定各計 2 → K=16）
+#   §6   第二階段 3 列（AS-15/16/17，走 SIGNALS_P2／K_TESTS_P2=5，與第一階段分開計 K）
 #   §2.2 已知偏差 4 項＋第 5 項實作揭露（AS-05/06 滾動基準，2026-07-28 驗收要求）
 # **本檔不得自行增刪候選、不得改判準門檻**——那會讓「先註冊後測」失去意義。
 #
@@ -96,26 +97,57 @@ K_TESTS = sum(s["weight"] for s in SIGNALS)
 #       vb＝vs 且 當日漲跌% ≤ −3（漲跌% 先經 r2 再比較，與來源同語意）。
 #       方向＝做空，但**這不是預註冊書原訂的**：§2.3 沒有方向欄，`short` 是從 postmkt
 #       `index.html` 的 DIAG_RULES 推出來的（grep `id:"P2"`，該條目帶 col:"red"＝風險側，
-#       且自標 ver:false）。§6.2 已如實記載此來源；是否改雙邊／weight 2（K_TESTS_P2
-#       會變 4）待使用者裁決，在此之前維持 short/weight 1。
+#       且自標 ver:false）。§6.2 已如實記載此來源。2026-08-30 使用者裁定**維持
+#       short／weight 1**——方向依據仍是那份風險側歸類（**這點不變**），使用者裁定的是
+#       「就採用這個方向」，兩者證據等級不同，不可把裁定講成實證。
 #   AS-16 量能爆量 ← `worker/src/index.js` 的 volumeRatio：
 #       SMA(V,5)/SMA(V,20) ≥ 2（兩窗**皆含當日**）且 收盤 > 前一日收盤。
 #       方向＝**雙邊**：兩處來源都只把「爆量」寫成中性量能描述、未宣稱多空
 #       （前端文案「為量能數學描述」、worker 狀態詞不含方向），預註冊書 §2.3 也沒訂方向。
 #       方向不明者依 §2 前言明列為雙邊並計 2 次，沿用 AS-03/04 的既有處理——
 #       **不由本檔臆測方向**。
+#   AS-17 當沖比率 ← 三個生產消費端同一個算式（分子分母都不是本檔自訂）：
+#       postmkt `build_postmkt.py build_daytrading` 的 `vol / total * 100`、
+#       本 repo `worker/src/index.js` 的 `buildDayTrade`（`num(last.Volume) / tv`）、
+#       postmkt `src/build_diag.py` 的 `o["dt"]`。三處一致：
+#         分子＝`TaiwanStockDayTrading.Volume`（TWSE「當日沖銷交易成交股數」，單位**股**、
+#               **單邊**——實測 BuyAmount/Volume≈當日均價可證，見下方查證）
+#         分母＝同日 `TaiwanStockPrice.Trading_Volume`（單位**股**）
+#       兩者同單位相除 → 無因次比率，與 TWSE 官方定義字面相同（TWTB4U 表尾註記：
+#       「當日沖銷交易總成交股數占市場比重% ＝ 當日沖銷交易總成交股數／整體市場成交股數×100」，
+#       **不乘 2**）。門檻 0.60＝使用者 2026-08-30 裁定。
+#       方向＝**雙邊**：使用者只裁定門檻與資料源、未指定方向，依 §2 前言「方向不明者
+#       明列雙邊並計 2 次」的既有預設規則處理（同 AS-03/04/16）——**非使用者指定方向**。
 SIGNALS_P2 = [
     dict(id="AS-15", src="postmkt diag P2", weight=1, dir="short",
          desc="爆量長黑（量 > 前20日均量×2 且 當日跌幅 ≥ 3%）"),
     dict(id="AS-16", src="news 個股追蹤", weight=2, dir="both",
          desc="量能爆量（SMA(V,5)/SMA(V,20) ≥ 2 且 價漲）"),
+    dict(id="AS-17", src="postmkt 當沖", weight=2, dir="both",
+         desc="當沖比率（當沖成交股數 ÷ 當日成交股數 > 60%）"),
 ]
 # 第二階段自己的 K，**不與 K_TESTS 相加**（兩階段的多重比較分開折算）。
+# 2026-08-30：AS-17 加入後由 3 → 5（AS-15 計 1 ＋ AS-16 計 2 ＋ AS-17 計 2）。
 K_TESTS_P2 = sum(s["weight"] for s in SIGNALS_P2)
+
+# 某訊號沒跑時報告要寫的原因（兩組解鎖條件不同：量能只要 volume 欄，當沖另要 dt 快取，
+# 所以「AS-15/16 跑了但 AS-17 沒跑」是真實會發生的組合，報告必須說得出是哪一種）。
+P2_SKIP_REASON = {
+    "AS-15": "price 快取的 `Trading_Volume` 欄不完整（見涵蓋揭露行）。",
+    "AS-16": "price 快取的 `Trading_Volume` 欄不完整（見涵蓋揭露行）。",
+    "AS-17": "當沖快取（`backtest/cache/dt_*.json.gz`）不完整——並非每個非空交易日都有；"
+             "或 price 快取的 `Trading_Volume` 欄（分母）不完整。解鎖方式：整批刪快取後"
+             "重跑 `backtest/fetch.py`（該檔 2026-08-30 起會一併抓 `TaiwanStockDayTrading`）。",
+}
 
 # price 陣列的成交量索引（fetch.py schema：[amt,open,high,low,close,vol]，vol 單位「股」）。
 # 舊快取只有 5 欄，讀到 None → 量能訊號整批跳過。
 VOL_IDX = 5
+
+# AS-17 當沖比率門檻（使用者 2026-08-30 裁定「當沖比率 > 60%」，**嚴格大於**）。
+# 寫成小數是因為分子分母同為「股」、相除後無因次；生產端習慣乘 100 印成 %，
+# 這裡不乘，避免多一次浮點運算改變邊界比較的語意。
+DT_RATIO_MIN = 0.60
 
 DIR_LABEL = {"long": "做多", "short": "做空", "both": "雙邊（計 2）"}
 
@@ -617,6 +649,76 @@ def attach_volume_signals(samples, days, price, diag):
     return True
 
 
+def load_daytrade(days):
+    """讀 dt_*.json.gz（fetch.py 產出，{code: 當沖成交股數}）→ {date: {code: vol}}。
+
+    **不改 run_sorting.load() 的回傳簽章**：那支被 run_sorting/run_down 等多支腳本共用，
+    加欄等於改公用介面。當沖只有本檔（AS-17）要用，讀檔就留在本檔。
+    缺檔＝該日沒有當沖快取（假日以外就是還沒抓／整日空殼未寫檔），一律回不存在，
+    由 cache_has_daytrade 判是否放行。
+    """
+    out = {}
+    for d in days:
+        f = rs.CACHE / f"dt_{d}.json.gz"
+        if f.exists():
+            out[d] = rs.rgz(f) or {}
+    return out
+
+
+def daytrade_days(days, price, daytrade):
+    """回 (帶當沖快取的交易日, 非空交易日)。判定單位同 volume_days：以「日」為準。
+
+    非空日的定義沿用 price 快取（有價格列＝有開市）；當沖快取為空 dict 的日子
+    **不算帶**——那正是 fetch.py 遇到整日空殼時不寫檔、或假日寫空檔的情形。
+    """
+    have, nonempty = [], []
+    for d in days:
+        rows = price.get(d) or {}
+        if not rows:
+            continue
+        nonempty.append(d)
+        if daytrade.get(d):
+            have.append(d)
+    return have, nonempty
+
+
+def cache_has_daytrade(days, price, daytrade):
+    """當沖快取是否**完整**：所有非空交易日都要有非空的 dt 快取，缺一天就回 False。
+
+    判準逐字比照 cache_has_volume（2026-08-30 改嚴的那條）：fetch.py 的續傳是逐檔
+    跳過，只補一部分日就會做出「一半有當沖一半沒有」的混合快取。放行混合快取的話，
+    缺檔那幾天的當沖訊號會整批靜默漏掉，報告照印 N 與分層而讀者無從察覺。
+    """
+    have, nonempty = daytrade_days(days, price, daytrade)
+    return bool(nonempty) and len(have) == len(nonempty)
+
+
+def attach_daytrade_signals(samples, days, price, daytrade, diag):
+    """AS-17：當沖比率 > DT_RATIO_MIN。快取不完整時整批不掛並回 False。
+
+    分子＝當沖快取的當沖成交股數；分母＝同日同檔 price 陣列的 Trading_Volume（索引 5）。
+    **兩者都是「股」**（見檔頭 SIGNALS_P2 的查證段），所以直接相除、不做任何單位換算；
+    分母若缺（舊快取無 volume 欄）或 ≤0 則該筆跳過——用金額當分母會算出無意義的數。
+    """
+    if not cache_has_volume(days, price) or not cache_has_daytrade(days, price, daytrade):
+        diag["AS-17"] = dict(cand=0, tie=None)
+        return False
+
+    cnt = 0
+    for r in samples:
+        dt_vol = (daytrade.get(r["d"]) or {}).get(r["c"])
+        if not dt_vol:
+            continue
+        total = vol_of((price.get(r["d"]) or {}).get(r["c"]))
+        if not total or total <= 0:
+            continue
+        if dt_vol / total > DT_RATIO_MIN:
+            r["sig"].add("AS-17")
+            cnt += 1
+    diag["AS-17"] = dict(cand=cnt, tie=None)
+    return True
+
+
 def attach_all(samples, days, price):
     """把 14 個訊號旗標掛上樣本，回排序欄診斷 dict。"""
     for r in samples:
@@ -787,11 +889,38 @@ def _vol_cov_line(vol_cov):
             "本節整批不跑，而不是靜默漏算那幾天。")
 
 
-def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None,
-                 vol_cov=None):
-    """results_p2=None 代表第二階段沒跑（快取 volume 不完整），報告改印未跑說明。
+def _dt_cov_line(dt_cov):
+    """AS-17 的當沖快取涵蓋揭露行（比照 _vol_cov_line，同一套揭露文化）。"""
+    if not dt_cov:
+        return None
+    have, nonempty = dt_cov
+    if not nonempty:
+        return "快取當沖涵蓋：無非空交易日。"
+    span = f"（{have[0]} ~ {have[-1]}）" if have else ""
+    return (f"快取當沖涵蓋：{len(have)}/{len(nonempty)} 個非空交易日{span}。"
+            "閘門要求**全部非空日皆有當沖快取**——缺幾天就整批不跑 AS-17，"
+            "不靜默漏算那幾天。")
 
-    vol_cov＝volume_days() 的回傳，只用來在第二階段那節揭露快取實際涵蓋範圍。
+
+def render_signal_skipped(sig, lines, reason):
+    """某個第二階段訊號沒跑時的段落：明說沒跑與原因，**不印分層**（沒跑就沒有結果）。"""
+    lines.append(f"\n## {sig['id']}　{sig['desc']}")
+    lines.append(f"來源：{sig['src']}　預期方向：{DIR_LABEL[sig['dir']]}"
+                 f"　檢定次數：{sig['weight']}")
+    lines.append(f"**本次未跑**：{reason}")
+    lines.append("")
+
+
+def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None,
+                 vol_cov=None, dt_cov=None):
+    """results_p2 空（None 或 {}）代表第二階段一個都沒跑，報告改印未跑說明。
+
+    results_p2 也可能**只含部分訊號**（例：price 快取有 volume 但當沖快取不完整 →
+    AS-15/16 跑、AS-17 不跑）。缺的那些走 render_signal_skipped，明說沒跑，
+    不會混進總表假裝有結果。
+
+    vol_cov／dt_cov＝volume_days()／daytrade_days() 的回傳，
+    只用來在第二階段那節揭露兩種快取的實際涵蓋範圍。
     """
     cut = split_index(days)
     ctrl = [r for r in samples if r["surge"] < 1.2 or abs(r["ret"]) < 0.01]
@@ -876,11 +1005,12 @@ def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None,
     lines.append("")
     lines.append("---")
     lines.append("")
-    if results_p2 is None:
+    if not results_p2:
         lines.extend([
-            "# 第二階段：量能訊號（**本次未跑**）",
+            "# 第二階段：量能與當沖訊號（**本次未跑**）",
             "",
-            "快取的 `Trading_Volume` 欄不完整（舊格式的 price 陣列只有 5 欄），AS-15/16 整批跳過。",
+            "快取的 `Trading_Volume` 欄不完整（舊格式的 price 陣列只有 5 欄），"
+            "AS-15/16/17 整批跳過（AS-17 的分母也是這一欄）。",
             "解鎖方式：刪掉**全部** `backtest/cache/price_*.json.gz` 後重跑 `backtest/fetch.py`"
             "（fetch.py 2026-08-30 起已把該欄存在陣列索引 5）。"
             "**只刪一部分沒有用**：fetch.py 的續傳是逐檔跳過，會留下一半有一半沒有的混合快取，"
@@ -889,37 +1019,65 @@ def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None,
         cov = _vol_cov_line(vol_cov)
         if cov:
             lines.append(cov)
+        dcov = _dt_cov_line(dt_cov)
+        if dcov:
+            lines.append(dcov)
     else:
+        ran = [s2["id"] for s2 in SIGNALS_P2 if s2["id"] in results_p2]
+        missing = [s2["id"] for s2 in SIGNALS_P2 if s2["id"] not in results_p2]
         lines.extend([
-            "# 第二階段：量能訊號（預註冊書 §2.3）",
+            "# 第二階段：量能與當沖訊號（預註冊書 §6）",
             "",
             f"> 本節另外檢定 {K_TESTS_P2} 個訊號。K 與第一階段的 {K_TESTS} **不合併**"
             "（§2.5 已凍結第一階段清單，事後併算等於加碼），多重比較請分兩段各自折算："
             f"本節若全為無效訊號，名目 5% 水準下預期約 {0.05 * K_TESTS_P2:.2f} 個會偶然看起來有效。",
             "",
-            "解鎖條件＝快取的**每一個**非空交易日都帶 `Trading_Volume`"
-            "（fetch.py 的 price 陣列索引 5）。",
+            f"（K_TESTS_P2＝{K_TESTS_P2} 由 §6.1 的清單自動帶入：{len(SIGNALS_P2)} 列，其中 "
+            f"{sum(1 for s2 in SIGNALS_P2 if s2['dir'] == 'both')} 列為雙邊檢定各計 2。"
+            "**K 是預註冊的檢定次數，不因某個訊號本次沒跑而下修**——下修等於事後挑數字。）",
+            "",
+            "解鎖條件：AS-15/16＝快取的**每一個**非空交易日都帶 `Trading_Volume`"
+            "（fetch.py 的 price 陣列索引 5）；AS-17 另需**每一個**非空交易日都有當沖快取"
+            "（fetch.py 的 `dt_*.json.gz`，FinMind `TaiwanStockDayTrading`）。",
             "訊號定義取自原始出處，非本報告自訂：AS-15＝postmkt `src/build_diag.py` 的 "
-            "`vs`／`vb`；AS-16＝`worker/src/index.js` 的 `volumeRatio`。",
+            "`vs`／`vb`；AS-16＝`worker/src/index.js` 的 `volumeRatio`；"
+            "AS-17＝postmkt `build_postmkt.py build_daytrading`／`src/build_diag.py` 的 `dt`"
+            "／本 repo `worker/src/index.js` 的 `buildDayTrade` 三處同一個算式"
+            "（當沖成交股數 ÷ 同日 `Trading_Volume`，兩者皆為「股」）。",
             "**AS-16 列為雙邊**：兩處來源都只把「爆量」寫成中性的量能描述、未宣稱多空，"
             "預註冊書 §2.3 也沒訂方向——依 §2 前言，方向不明者明列雙邊並計 2 次。",
+            "**AS-17 的門檻與方向**：門檻「當沖比率 > 60%」與資料源為使用者 2026-08-30 裁定；"
+            "**方向不是使用者指定的**——使用者未指定方向，`both` 是套用 §2 前言"
+            "「方向不明者明列雙邊並計 2 次」的既有預設規則（同 AS-03/04/16）。",
             "**AS-15 的方向來源**：`short` **非預註冊書原訂**——§2.3 只寫了訊號名稱與解鎖"
             "條件、沒有方向欄。方向依據＝postmkt `DIAG_RULES` 把該規則（`id:\"P2\"`）歸為"
             "`col:\"red\"` 的**風險側**，屬卡面風險提示的分類，強度不等於「已聲明為做空訊號」"
-            "（同一條還自標 `ver:false`＝來源自承未驗證）。§6.2 已如實記載；是否改列雙邊"
-            "（K 會由 3 變 4）待裁決，本次維持現狀。",
+            "（同一條還自標 `ver:false`＝來源自承未驗證）；此方向已於 2026-08-30 經使用者"
+            "裁定確認採用（維持 short／weight 1）。**兩者證據等級不同**：來源仍是風險側歸類，"
+            "使用者裁定的是「就採用這個方向」，不是替它補上實證。詳見 §6.2。",
         ])
-        cov = _vol_cov_line(vol_cov)
-        if cov:
-            lines.append(cov)
+        if missing:
+            lines.append(f"**本次實跑 {len(ran)} 個訊號**（{'、'.join(ran)}）；"
+                         f"{'、'.join(missing)} 未跑，原因見各自段落與下方涵蓋揭露。")
+        for line in (_vol_cov_line(vol_cov), _dt_cov_line(dt_cov)):
+            if line:
+                lines.append(line)
         for sig in SIGNALS_P2:
-            render_signal(sig, results_p2[sig["id"]], diag, lines)
+            if sig["id"] in results_p2:
+                render_signal(sig, results_p2[sig["id"]], diag, lines)
+            else:
+                render_signal_skipped(sig, lines, P2_SKIP_REASON[sig["id"]])
         lines.append("")
         lines.append("## 第二階段三層總表")
         lines.append(head)
         for sig in SIGNALS_P2:
-            r = results_p2[sig["id"]]
             desc = sig["desc"].replace("|", "\\|")
+            if sig["id"] not in results_p2:
+                lines.append(
+                    f"| {sig['id']} | {desc} | {DIR_LABEL[sig['dir']]} | — | — | — | — | — | — |"
+                    " ← **本次未跑**（不分層）")
+                continue
+            r = results_p2[sig["id"]]
             pos = "N/A" if r["day_pos"] is None else f"{r['day_pos']:.1f}%"
             h1 = _p(r["h1"]["e3_avg"]) if r["h1"] else "N/A"
             h2 = _p(r["h2"]["e3_avg"]) if r["h2"] else "N/A"
@@ -978,26 +1136,41 @@ def main():
         print(f"  {sig['id']} N={res['n']:6d} e3={_p(res['e3_avg'])} "
               f"→ {classify_tier(res)}", flush=True)
 
-    print("掛第二階段量能旗標（AS-15/16）...", flush=True)
+    print("掛第二階段旗標（AS-15/16 量能、AS-17 當沖）...", flush=True)
     vol_cov = volume_days(days, price)
     print(f"  快取 volume 涵蓋 {len(vol_cov[0])}/{len(vol_cov[1])} 個非空交易日", flush=True)
-    results_p2 = None
+    daytrade = load_daytrade(days)
+    dt_cov = daytrade_days(days, price, daytrade)
+    print(f"  快取當沖涵蓋 {len(dt_cov[0])}/{len(dt_cov[1])} 個非空交易日", flush=True)
+
+    # 兩組解鎖條件不同（量能只要 volume 欄、當沖另要 dt 快取），所以分開掛、分開回報。
+    ran_ids = []
     if attach_volume_signals(samples, days, price, diag):
-        results_p2 = {}
-        for sig in SIGNALS_P2:
-            rows = [r for r in samples if sig["id"] in r["sig"]]
-            res = evaluate_signal(rows, days)
-            res["_rows"] = rows
-            results_p2[sig["id"]] = res
-            print(f"  {sig['id']} N={res['n']:6d} e3={_p(res['e3_avg'])} "
-                  f"→ {classify_tier(res)}", flush=True)
+        ran_ids += ["AS-15", "AS-16"]
     else:
         print("  快取 volume 不完整 → AS-15/16 整批跳過"
               "（刪**全部** price_*.json.gz 重跑 fetch.py 才解鎖；"
               "只刪一部分會留下混合快取，閘門一樣不放行）", flush=True)
+    if attach_daytrade_signals(samples, days, price, daytrade, diag):
+        ran_ids.append("AS-17")
+    else:
+        print("  快取當沖（dt_*.json.gz）不完整或分母缺 volume → AS-17 跳過"
+              "（整批刪快取重跑 fetch.py 才解鎖）", flush=True)
+
+    results_p2 = {}
+    for sig in SIGNALS_P2:
+        if sig["id"] not in ran_ids:
+            continue
+        rows = [r for r in samples if sig["id"] in r["sig"]]
+        res = evaluate_signal(rows, days)
+        res["_rows"] = rows
+        results_p2[sig["id"]] = res
+        print(f"  {sig['id']} N={res['n']:6d} e3={_p(res['e3_avg'])} "
+              f"→ {classify_tier(res)}", flush=True)
 
     doc_info, dirty = doc_commit()
-    lines = build_report(days, samples, results, diag, doc_info, dirty, results_p2, vol_cov)
+    lines = build_report(days, samples, results, diag, doc_info, dirty, results_p2,
+                         vol_cov, dt_cov)
     OUT.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n已寫 {OUT}")
     return 0

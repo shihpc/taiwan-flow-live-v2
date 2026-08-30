@@ -5,10 +5,21 @@
 #     vol＝FinMind Trading_Volume，單位「股」（÷1000＝張，taiwan-flows CLAUDE.md 口徑段）。
 #     2026-08-30 追加於**陣列末端**，既有讀取端全部走索引 0~4，舊快取仍可讀；
 #     但舊快取沒有這一欄，量能訊號（AS-15/16）會整批跳過，需重抓才解鎖。
-#     **要重抓就整批刪**：下面的續傳是逐檔跳過（`if pf.exists() and inf.exists()`），
-#     只刪一部分 price_*.json.gz 會留下「一半有欄一半沒有」的混合快取；
-#     run_alpha_sweep 的 cache_has_volume 對此一律不放行（整批不跑，不半盲印報告）。
+#     **要重抓就整批刪**：下面的續傳是逐檔跳過（`if pf.exists() and inf.exists() and dtf.exists()`），
+#     只刪一部分 price_*.json.gz／dt_*.json.gz 會留下「一半有欄一半沒有」的混合快取；
+#     run_alpha_sweep 的 cache_has_volume／cache_has_daytrade 對此一律不放行
+#     （整批不跑，不半盲印報告）。**price 與 dt 兩種快取都適用這條**。
 #   inst_YYYY-MM-DD.json.gz  : {code:[投信淨買股數, 外資淨買股數]}
+#   dt_YYYY-MM-DD.json.gz    : {code: 當沖成交股數}（FinMind TaiwanStockDayTrading 的 Volume）
+#     2026-08-30 新增，解鎖第二階段第三候選 AS-17 當沖比率（預註冊書 §6）。
+#     單位「股」，與 price 的 Trading_Volume 同單位 → 相除即當沖比率（無因次）。
+#     語意＝TWSE「當日沖銷交易成交股數」**單邊**（買進股數＝賣出股數＝Volume；
+#     實測 BuyAmount/Volume≈當日均價可證），FinMind 為 TWSE TWTB4U 的原樣轉載。
+#     **空殼列**：TWSE 盤前就公布當沖標的清單、Volume 要當晚（約 21:30）才填，且 T~T+2
+#     可修正、以 T+2 為準（TWSE TWTB4U 表尾說明）。所以只收 Volume>0 的列；整日都是
+#     空殼（沒有任何 Volume>0）就**不寫檔**，留待下次重跑，不把「當天沒當沖」這種
+#     假事實寫死進快取（同 postmkt `build_postmkt.py fetch_daytrading` 的判準）。
+#     **要重抓就整批刪**（承上兩段）：續傳條件是三個檔都在，只補一部分同樣會做出混合快取。
 #
 # 用法：python backtest/fetch.py   （token 取 FINMIND_TOKEN 環境變數，沒有才讀 repo 根 .env）
 
@@ -86,11 +97,13 @@ def main():
 
     for i, ds in enumerate(days):
         pf, inf = CACHE / f"price_{ds}.json.gz", CACHE / f"inst_{ds}.json.gz"
-        if pf.exists() and inf.exists():
+        dtf = CACHE / f"dt_{ds}.json.gz"
+        if pf.exists() and inf.exists() and dtf.exists():
             continue
         rows = api("TaiwanStockPrice", ds)
         if not rows:  # 假日/颱風停市
-            wgz(pf, {}); wgz(inf, {})
+            for f in (pf, inf, dtf):
+                wgz(f, {})
             print(f"[{i+1}/{len(days)}] {ds} 無交易", flush=True)
             continue
         price, taiex = {}, None
@@ -121,7 +134,28 @@ def main():
             net = (r.get("buy") or 0) - (r.get("sell") or 0)
             o[0 if n == "Investment_Trust" else 1] += net
         wgz(inf, inst)
-        print(f"[{i+1}/{len(days)}] {ds} price={len(price)} inst={len(inst)}", flush=True)
+
+        # 當沖（AS-17 的分子）：只收 Volume>0 的列，空殼列不進快取。
+        # 整日皆空殼＝該日 TWSE 尚未結算完（或 FinMind 尚未同步）→ 不寫檔，
+        # 下次重跑會再抓一次；寫成空 dict 會被續傳當作「已抓且當天沒當沖」永久沿用。
+        dt, shell = {}, 0
+        for r in api("TaiwanStockDayTrading", ds):
+            c = str(r.get("stock_id") or "")
+            if c not in keep:
+                continue
+            v = r.get("Volume") or 0
+            if v <= 0:
+                shell += 1
+                continue
+            dt[c] = v
+        if dt:
+            wgz(dtf, dt)
+        else:
+            print(f"[{i+1}/{len(days)}] {ds} ⚠ 當沖整日皆空殼（{shell} 列 Volume 為空）"
+                  "→ 不寫 dt 快取，下次重跑再抓", flush=True)
+
+        print(f"[{i+1}/{len(days)}] {ds} price={len(price)} inst={len(inst)} dt={len(dt)}",
+              flush=True)
         time.sleep(0.8)  # 客氣一點，避免限速
     print("完成", flush=True)
 

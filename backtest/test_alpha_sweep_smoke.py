@@ -2,7 +2,8 @@
 #
 # 為什麼需要這支：run_alpha_sweep.py 要有 backtest/cache/ 的真實快取才跑得動，
 # 但快取不進 git，改壞了不會有任何東西擋。這支用合成市場＋合成樣本直接呼叫各函式，
-# 驗「14 個訊號都產得出結果、切半/分層/K/日層級算對、樣本不足不崩、報告三層全列」
+# 驗「14 個訊號都產得出結果、切半/分層/K/日層級算對、樣本不足不崩、報告三層全列」，
+# 以及第二階段 AS-15/16/17 的閘門與判別日（判別日一律先斷言前提成立，見各測試的突變說明）
 # ——**不驗數字的財務意義**（那要真實快取）。
 #
 # 指標數值本身的正確性不在這裡驗，由 backtest/test_alpha_parity.mjs（JS↔Python 零差異）守。
@@ -165,6 +166,41 @@ def mix_volume(price, keep_first=30):
             for i, (d, rows) in enumerate(price.items())}
 
 
+# 當沖（AS-17）判別日：比率刻意落在門檻 0.60 兩側的窄帶，讓「改門檻」與
+# 「分子分母對調」兩種突變都測得出來（見 test_daytrade_signal_fires 的突變說明）。
+DT_D_HI, DT_D_HI_RATIO = 60, 0.62   # 略高於門檻 → 觸發
+DT_D_LO, DT_D_LO_RATIO = 80, 0.58   # 略低於門檻 → 不觸發（門檻是唯一擋得住的）
+DT_D_EQ = 108                       # 比率**恰等於**門檻 → 不觸發（使用者裁定是「> 60%」）
+DT_BASE_RATIO = 0.05                # 其餘日的常態當沖比（遠低於門檻）
+DT_MISSING_DAY = 100                # 該日該檔沒有當沖列（缺值，不是 0）
+
+
+def daytrade_cache(days, price, code="2330"):
+    """依 volume_market 的成交量造當沖快取 {date: {code: 當沖股數}}。
+
+    比率寫死在判別日，其餘日給 DT_BASE_RATIO。**每個非空日都有非空 dict**，
+    才過得了 cache_has_daytrade 的「所有非空交易日皆帶」閘門。
+    DT_MISSING_DAY 例外：整日仍有 dict（別的代號），只是該檔缺列——用來驗
+    「缺值不算 0、也不會炸」。
+    """
+    out = {}
+    for i, d in enumerate(days):
+        total = price[d][code][a.VOL_IDX]
+        if i == DT_D_HI:
+            ratio = DT_D_HI_RATIO
+        elif i == DT_D_LO:
+            ratio = DT_D_LO_RATIO
+        elif i == DT_D_EQ:
+            # 平靜日的量＝base_v（1,000,000 股），×0.60 恰為 600,000 → 相除得浮點數精確的 0.6，
+            # 邊界比較才驗得準（`>` 不觸發、`>=` 會觸發）。
+            ratio = a.DT_RATIO_MIN
+        else:
+            ratio = DT_BASE_RATIO
+        # DT_MISSING_DAY：當日有當沖列（過得了閘門的「非空」）但不含這一檔 → 該檔缺值
+        out[d] = {"9999": 1234} if i == DT_MISSING_DAY else {code: int(round(total * ratio))}
+    return out
+
+
 def _vol_series(days, price):
     """取受控市場那一檔的成交量序列（跳過 _TAIEX）。"""
     code = next(c for c in price[days[0]] if c != "_TAIEX")
@@ -175,15 +211,20 @@ def _vol_series(days, price):
 def test_phase2_list_separate_from_phase1():
     ids1 = {s["id"] for s in a.SIGNALS}
     ids2 = {s["id"] for s in a.SIGNALS_P2}
-    check("第二階段 2 列", len(a.SIGNALS_P2) == 2)
-    check("第二階段編號 AS-15/16", ids2 == {"AS-15", "AS-16"})
+    check("第二階段 3 列", len(a.SIGNALS_P2) == 3)
+    check("第二階段編號 AS-15/16/17", ids2 == {"AS-15", "AS-16", "AS-17"})
     check("兩階段清單不重疊", not (ids1 & ids2))
     check("第一階段仍是 14 列 K=16（§2.5 凍結）", len(a.SIGNALS) == 14 and a.K_TESTS == 16)
-    check("第二階段自己的 K=3（AS-16 雙邊計 2）", a.K_TESTS_P2 == 3)
-    check("AS-15 方向＝做空（postmkt DIAG_RULES P2 col:red）",
+    check("第二階段自己的 K=5（AS-16／AS-17 各雙邊計 2）", a.K_TESTS_P2 == 5)
+    check("K_TESTS_P2 由清單自動帶入（非硬編）",
+          a.K_TESTS_P2 == sum(s["weight"] for s in a.SIGNALS_P2))
+    check("AS-15 方向＝做空（postmkt DIAG_RULES P2 col:red，已經使用者裁定確認）",
           next(s for s in a.SIGNALS_P2 if s["id"] == "AS-15")["dir"] == "short")
     check("AS-16 方向＝雙邊（來源未宣稱方向，不臆測）",
           next(s for s in a.SIGNALS_P2 if s["id"] == "AS-16")["dir"] == "both")
+    check("AS-17 方向＝雙邊（使用者未指定方向 → 套 §2 前言預設規則）",
+          next(s for s in a.SIGNALS_P2 if s["id"] == "AS-17")["dir"] == "both")
+    check("AS-17 門檻 0.60（使用者 2026-08-30 裁定）", a.DT_RATIO_MIN == 0.60)
 
 
 def test_volume_gate_blocks_old_cache():
@@ -305,6 +346,122 @@ def test_volume_signals_fire_on_planted_events():
     check("診斷回報候選數 > 0", diag["AS-15"]["cand"] >= 1 and diag["AS-16"]["cand"] >= 1)
 
 
+def test_daytrade_gate_blocks_incomplete_cache():
+    """當沖快取不完整 → AS-17 整批不跑，但 AS-15/16 不受影響（兩組解鎖條件是分開的）。"""
+    days, price, inst = volume_market()
+    full = daytrade_cache(days, price)
+    check("完整當沖快取判為完整", a.cache_has_daytrade(days, price, full) is True)
+
+    # 只留前 30 天 → 混合快取（重現「只補一部分 dt_*.json.gz」）
+    partial = {d: v for i, (d, v) in enumerate(full.items()) if i < 30}
+    have, nonempty = a.daytrade_days(days, price, partial)
+    check(f"混合當沖快取確實半有半無（{len(have)}/{len(nonempty)} 日）",
+          0 < len(have) < len(nonempty))
+    check("混合當沖快取判為不完整", a.cache_has_daytrade(days, price, partial) is False)
+    check("完全沒有當沖快取判為不完整", a.cache_has_daytrade(days, price, {}) is False)
+
+    samples, _, _ = rs.build_stock_samples(days, price, inst)
+    a.attach_all(samples, days, price)
+    diag = {}
+    check("當沖快取不完整時 attach_daytrade_signals 回 False",
+          a.attach_daytrade_signals(samples, days, price, partial, diag) is False)
+    check("當沖快取不完整時完全不掛 AS-17",
+          not any("AS-17" in r["sig"] for r in samples))
+    check("當沖快取不完整時診斷仍列出 AS-17（候選 0）",
+          diag.get("AS-17", {}).get("cand") == 0)
+
+    # 分母也是閘門的一部分：price 沒有 volume 欄時 AS-17 一樣不跑
+    old_px = strip_volume(price)
+    samples2, _, _ = rs.build_stock_samples(days, old_px, inst)
+    check("分母缺 Trading_Volume 時 AS-17 也不跑（即使當沖快取完整）",
+          a.attach_daytrade_signals(samples2, days, old_px, full, {}) is False)
+
+    # AS-15/16 與 AS-17 的閘門互不連坐
+    samples3, _, _ = rs.build_stock_samples(days, price, inst)
+    a.attach_all(samples3, days, price)
+    diag3 = {}
+    check("當沖快取不完整不影響 AS-15/16 解鎖",
+          a.attach_volume_signals(samples3, days, price, diag3) is True)
+
+    # 揭露行
+    cov = a._dt_cov_line((have, nonempty))
+    check("當沖揭露行印出涵蓋日數", f"{len(have)}/{len(nonempty)}" in cov)
+    check("當沖揭露行印出涵蓋起訖日", have[0] in cov and have[-1] in cov)
+
+
+def test_daytrade_signal_fires():
+    """AS-17 判別日：比率落在 0.60 兩側窄帶，門檻與分子分母方向都被夾住。
+
+    ⚠ 突變測試（2026-08-30 實跑，結果貼在交付說明）：
+      1. `DT_RATIO_MIN` 0.60 → 0.50：day80（比率 0.58）會改為觸發 → 本檔亮紅。
+      2. `DT_RATIO_MIN` 0.60 → 0.70：day60（比率 0.62）會停止觸發 → 本檔亮紅。
+      3. 分子分母對調（`total / dt_vol`）：所有日的倒數都遠大於 0.60，
+         day80 與平靜日全部誤觸發 → 本檔亮紅。
+      4. 比較符號 `>` → `>=`：day108 的比率**恰等於** 0.60，改成 `>=` 就會觸發 → 本檔亮紅。
+         （使用者裁定的字面是「當沖比率 > 60%」，邊界不含等於。）
+    每個判別日**先斷言其前提**（比率確實落在該側的窄帶），
+    避免斷言因「量根本不夠」這種錯的理由通過。
+    """
+    days, price, inst = volume_market()
+    dtc = daytrade_cache(days, price)
+    samples, _, _ = rs.build_stock_samples(days, price, inst)
+    a.attach_all(samples, days, price)
+    diag = {}
+    check("當沖快取完整時 attach_daytrade_signals 回 True",
+          a.attach_daytrade_signals(samples, days, price, dtc, diag) is True)
+    by_d = {r["d"]: r for r in samples}
+    code = next(c for c in price[days[0]] if c != "_TAIEX")
+
+    def ratio(i):
+        d = days[i]
+        return dtc[d][code] / price[d][code][a.VOL_IDX]
+
+    # ── 前提：兩個判別日的比率確實夾住 0.60（窄帶，不是隨便一個大／小數）──
+    r_hi, r_lo = ratio(DT_D_HI), ratio(DT_D_LO)
+    check(f"day{DT_D_HI} 的當沖比 {r_hi:.4f} 落在 (0.60, 0.70) 窄帶"
+          "——門檻改大就會失效，這是本條能測到門檻的前提", 0.60 < r_hi < 0.70)
+    check(f"day{DT_D_LO} 的當沖比 {r_lo:.4f} 落在 (0.50, 0.60) 窄帶"
+          "——門檻改小就會誤觸發，這是本條能測到門檻的前提", 0.50 < r_lo < 0.60)
+
+    r_eq = ratio(DT_D_EQ)
+    check(f"day{DT_D_EQ} 的當沖比恰等於門檻 {a.DT_RATIO_MIN}（實際 {r_eq!r}）"
+          "——這是本條能測到 `>` / `>=` 差別的前提", r_eq == a.DT_RATIO_MIN)
+
+    for i in (DT_D_HI, DT_D_LO, DT_D_EQ, DT_MISSING_DAY):
+        if days[i] not in by_d:
+            check(f"day{i} 有樣本（否則其斷言全部落空）", False)
+    check(f"day{DT_D_HI}（當沖比 {r_hi:.4f} > 0.60）觸發 AS-17",
+          "AS-17" in by_d[days[DT_D_HI]]["sig"])
+    check(f"day{DT_D_LO}（當沖比 {r_lo:.4f} ≤ 0.60）不觸發 AS-17"
+          "——門檻是唯一擋得住的條件", "AS-17" not in by_d[days[DT_D_LO]]["sig"])
+
+    check(f"day{DT_D_EQ}（當沖比恰為 {a.DT_RATIO_MIN}）不觸發 AS-17"
+          "——裁定是「> 60%」，邊界不含等於", "AS-17" not in by_d[days[DT_D_EQ]]["sig"])
+
+    # 缺值：該日有當沖資料但沒有這一檔 → 不算 0、不誤觸發、不炸
+    check(f"day{DT_MISSING_DAY}（該檔缺當沖列）不觸發 AS-17",
+          "AS-17" not in by_d[days[DT_MISSING_DAY]]["sig"])
+
+    # 平靜日：當沖比 DT_BASE_RATIO=0.05，遠低於門檻。分子分母對調的話這些全會誤觸發。
+    quiet = [r for r in samples
+             if r["d"] not in (days[DT_D_HI], days[DT_D_LO], days[DT_D_EQ],
+                               days[DT_MISSING_DAY])]
+    check(f"平靜日樣本數 > 0（實際 {len(quiet)}）", len(quiet) > 0)
+    check(f"平靜日（當沖比 {DT_BASE_RATIO}）全部不觸發 AS-17"
+          "——分子分母對調會讓這條整批亮紅",
+          all("AS-17" not in r["sig"] for r in quiet))
+    check("AS-17 診斷候選數 == 1（只有 day%d）" % DT_D_HI, diag["AS-17"]["cand"] == 1)
+
+    # AS-17 不得污染第一階段旗標：attach 前後，第一階段那 14 個旗標必須逐筆相同
+    s2, _, _ = rs.build_stock_samples(days, price, inst)
+    a.attach_all(s2, days, price)
+    p1_ids = {sig["id"] for sig in a.SIGNALS}
+    before = [r["sig"] & p1_ids for r in s2]
+    a.attach_daytrade_signals(s2, days, price, dtc, {})
+    check("掛 AS-17 前後第一階段 14 個旗標逐筆不變",
+          before == [r["sig"] & p1_ids for r in s2])
+
+
 def test_phase2_report_section():
     days = _days(120)
     _, price, inst = synthetic_market(ncodes=12, ndays=120, seed=9)
@@ -312,7 +469,7 @@ def test_phase2_report_section():
     results = _fake_results(days)
 
     skipped = "\n".join(a.build_report(days, samples, results, {}, "deadbeef", False))
-    check("未跑時報告明說第二階段沒跑", "第二階段：量能訊號（**本次未跑**）" in skipped)
+    check("未跑時報告明說第二階段沒跑", "第二階段：量能與當沖訊號（**本次未跑**）" in skipped)
     check("未跑時報告給解鎖方式", "重跑 `backtest/fetch.py`" in skipped)
     check("未跑時第一階段分層數不受影響", skipped.count("**分層**") == 14)
 
@@ -323,13 +480,28 @@ def test_phase2_report_section():
         check(f"報告含 {sig['id']} 定義原文", sig["desc"] in ran)
         check(f"{sig['id']} 出現在第二階段總表", f"| {sig['id']} |" in ran)
     check("第二階段 K 分開揭露且不與第一階段合併",
-          "另外檢定 3 個訊號" in ran and "不合併" in ran)
+          "另外檢定 5 個訊號" in ran and "不合併" in ran)
     check("第一階段 K 仍是 16", "共檢定 16 個訊號" in ran)
     check("AS-16 雙邊理由寫進報告", "方向不明者明列雙邊並計 2 次" in ran)
     # 預註冊書 §6.2 的誠實標註要同步出現在報告裡，否則讀者會以為 short 是原訂方向
     check("AS-15 方向來源誠實標註寫進報告",
           "非預註冊書原訂" in ran and "DIAG_RULES" in ran)
-    check("兩階段分層合計 16 段", ran.count("**分層**") == 16)
+    check("AS-15 已經使用者裁定確認的事實寫進報告",
+          "經使用者" in ran and "裁定確認採用" in ran)
+    check("AS-17 門檻來源（使用者裁定）寫進報告", "使用者 2026-08-30 裁定" in ran)
+    check("AS-17 方向來源誠實標註寫進報告（非使用者指定）",
+          "方向不是使用者指定的" in ran)
+    check("三階段訊號分層合計 17 段", ran.count("**分層**") == 17)
+
+    # 部分未跑（AS-15/16 跑、AS-17 沒跑）：必須明說沒跑、且不冒充有結果
+    rp_part = {k: v for k, v in rp2.items() if k != "AS-17"}
+    part = "\n".join(a.build_report(days, samples, results, {}, "deadbeef", False, rp_part))
+    check("部分未跑時報告明說 AS-17 未跑", "**本次未跑**" in part and "AS-17" in part)
+    check("部分未跑時 AS-17 不進分層（只有 16 段）", part.count("**分層**") == 16)
+    check("部分未跑時總表仍列出 AS-17 但標未跑",
+          "| AS-17 |" in part and "← **本次未跑**（不分層）" in part)
+    check("部分未跑時 K 仍揭露為 5（不因沒跑而下修）", "另外檢定 5 個訊號" in part)
+    check("部分未跑時說明實跑幾個", "本次實跑 2 個訊號" in part)
 
 
 # ── 1. 候選清單與 K ─────────────────────────────────────────────
@@ -649,7 +821,10 @@ def main():
                # 第二階段（量能）：解鎖 AS-15/16 的守門
                test_phase2_list_separate_from_phase1, test_volume_gate_blocks_old_cache,
                test_volume_gate_blocks_mixed_cache,
-               test_volume_signals_fire_on_planted_events, test_phase2_report_section]:
+               test_volume_signals_fire_on_planted_events,
+               # 第二階段第三候選 AS-17（當沖比率）
+               test_daytrade_gate_blocks_incomplete_cache, test_daytrade_signal_fires,
+               test_phase2_report_section]:
         print(f"\n--- {fn.__name__} ---")
         fn()
     print(f"\n{'=' * 50}")
