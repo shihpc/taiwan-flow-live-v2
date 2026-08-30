@@ -28,6 +28,61 @@ def check(label, cond):
         FAILED.append(label)
 
 
+# ---------- 0. 外資口徑（Foreign_Investor + Foreign_Dealer_Self）----------
+
+def _inst_row(code, name, buy, sell=0):
+    return {"stock_id": code, "name": name, "buy": buy, "sell": sell}
+
+
+def test_inst_streaks_foreign_scope():
+    """build_baseline.inst_streaks 的外資口徑與「不得重複計日數」守門。
+
+    背景：外資＝Foreign_Investor + Foreign_Dealer_Self（證交所 T86 口徑，
+    taiwan-flows CLAUDE.md 已驗證）。原程式只收 Foreign_Investor，2026-08-30 補齊；
+    補的同時必須先按（檔,日）加總再判正負，否則外資兩列會讓連買日數記兩次。
+    """
+    keep = {"2330", "2317"}
+
+    # 單日：外資兩列相加、投信獨立、自營與不在 keep 的檔一律忽略
+    day = [
+        _inst_row("2330", "Foreign_Investor", 1_000_000),
+        _inst_row("2330", "Foreign_Dealer_Self", 500_000),
+        _inst_row("2330", "Investment_Trust", 200_000),
+        _inst_row("2330", "Dealer_self", 999_000),
+        _inst_row("9999", "Foreign_Investor", 888_000),
+    ]
+    it, fi, its, net0 = bb.inst_streaks([day], keep)
+    check("外資兩列相加進 net0（1.0M+0.5M+投信0.2M=1.7M）", net0["2330"] == 1_700_000)
+    check("自營列不進 net0", 999_000 not in net0.values())
+    check("不在 keep 的檔被濾掉", "9999" not in net0)
+    check("外資買超日數＝1（兩列只記一次）", fi["2330"] == 1)
+    check("投信買超日數＝1", it["2330"] == 1)
+    check("投信賣超日數＝0", its.get("2330", 0) == 0)
+
+    # 三日全買 → 日數上限 3（若逐列判斷會變成 6，這是本次的回歸守門）
+    it, fi, _, _ = bb.inst_streaks([day, day, day], keep)
+    check("三日皆買 → 外資日數封頂 3（非 6）", fi["2330"] == 3)
+    check("三日皆買 → 投信日數 3", it["2330"] == 3)
+
+    # Foreign_Dealer_Self 讓外資由買轉賣：日數與 net0 都要跟著翻
+    flip = [
+        _inst_row("2317", "Foreign_Investor", 1_000_000),
+        _inst_row("2317", "Foreign_Dealer_Self", 0, 1_600_000),
+    ]
+    _, fi2, _, net02 = bb.inst_streaks([flip], keep)
+    check("自營列使外資淨額翻負 → 不計買超日", fi2.get("2317", 0) == 0)
+    check("翻負後 net0 為負", net02["2317"] == -600_000)
+
+    # 只有前兩天有資料（days 不足 3）不得崩
+    it3, fi3, _, _ = bb.inst_streaks([day, []], keep)
+    check("某日無列時不崩且日數只算有資料的日", fi3["2330"] == 1 and it3["2330"] == 1)
+
+    # 投信賣超計入 its、不計入 it
+    sell_day = [_inst_row("2330", "Investment_Trust", 0, 300_000)]
+    it4, _, its4, _ = bb.inst_streaks([sell_day], keep)
+    check("投信賣超 → its=1、it 不計", its4["2330"] == 1 and it4.get("2330", 0) == 0)
+
+
 # ---------- 1. nh/nl 對稱性 ----------
 
 def test_nh_nl_symmetry():
@@ -202,7 +257,8 @@ def test_sub_stocks_top():
 
 
 def main():
-    for fn in [test_nh_nl_symmetry, test_sub_signal_stats,
+    for fn in [test_inst_streaks_foreign_scope,
+               test_nh_nl_symmetry, test_sub_signal_stats,
                test_a20_denominator, test_chain_dedup, test_sub_stocks_top]:
         print(f"\n--- {fn.__name__} ---")
         fn()

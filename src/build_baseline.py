@@ -126,6 +126,53 @@ def a20_of(pd, c):
     return round(sum(aw) / len(aw)) if aw else 0
 
 
+def inst_streaks(day_rows, keep):
+    """近 3 交易日的法人連買/連賣日數與最近一日淨買股數。
+
+    day_rows＝[最近日, 次近日, 再前一日] 各自的 TaiwanStockInstitutionalInvestorsBuySell
+    原始列（新→舊，最多 3 天）。回 (it, fi, its, net0)：
+      it/fi  = 投信/外資近 3 日「買超」日數（0~3）
+      its    = 投信近 3 日「賣超」日數（0~3）
+      net0   = 最近一日 (投信+外資) 淨買股數，法人強度 ints 的分子
+
+    外資口徑＝Foreign_Investor + Foreign_Dealer_Self（＝證交所 T86 口徑；
+    taiwan-flows CLAUDE.md「逐檔法人」口徑段已驗證與 T86 完全一致，
+    backtest/fetch.py 亦於 2026-07-29 同步）。本函式原本只收 Foreign_Investor，
+    與回測快取、與生產其餘管線不同口徑，2026-08-30 補齊。
+
+    **外資兩列必須先按（檔, 日）加總再判正負**：沿用逐列判斷的話，同一天會把 fi
+    記兩次，0~3 的旗標會爆成 0~6。這是補口徑時一併要處理的隱性耦合。
+    """
+    it, fi, its, net0 = {}, {}, {}, {}
+    for i, rows in enumerate(day_rows[:3]):
+        day_it, day_fi = {}, {}       # 當日逐檔淨買股數，投信／外資各一份
+        for r in rows or []:
+            c = str(r.get("stock_id") or "")
+            if c not in keep:
+                continue
+            name = r.get("name")
+            if name == "Investment_Trust":
+                tgt = day_it
+            elif name in ("Foreign_Investor", "Foreign_Dealer_Self"):
+                tgt = day_fi
+            else:
+                continue
+            tgt[c] = tgt.get(c, 0) + (r.get("buy") or 0) - (r.get("sell") or 0)
+        for c, net in day_it.items():
+            if i == 0:
+                net0[c] = net0.get(c, 0) + net
+            if net > 0:
+                it[c] = it.get(c, 0) + 1
+            elif net < 0:
+                its[c] = its.get(c, 0) + 1
+        for c, net in day_fi.items():
+            if i == 0:
+                net0[c] = net0.get(c, 0) + net
+            if net > 0:
+                fi[c] = fi.get(c, 0) + 1
+    return it, fi, its, net0
+
+
 def build_subs_y(s1, s2, stats):
     """subs_y 組裝：{sub: [y1, y2, C, R]}（僅旗標非零者）。
     C=當日集中度（2位小數）、R=成員等權漲跌（小數4位）；當日未過門檻者為 None。"""
@@ -219,26 +266,12 @@ def main():
                     print(f"price {today_iso} ok ({len(m)})", flush=True)
 
     # 投信/外資近 3 交易日買超日數 + 最近一日淨買股數（法人強度用）
-    it, fi, its, net0 = {}, {}, {}, {}
+    day_rows = []
     for ds in days[:3]:
-        for r in fin.api_get("TaiwanStockInstitutionalInvestorsBuySell", start_date=ds, end_date=ds):
-            c = str(r.get("stock_id") or "")
-            if c not in keep:
-                continue
-            name = r.get("name")
-            if name not in ("Investment_Trust", "Foreign_Investor"):
-                continue
-            net = (r.get("buy") or 0) - (r.get("sell") or 0)
-            if ds == days[0]:
-                net0[c] = net0.get(c, 0) + net
-            if net > 0:
-                if name == "Investment_Trust":
-                    it[c] = it.get(c, 0) + 1
-                else:
-                    fi[c] = fi.get(c, 0) + 1
-            elif net < 0 and name == "Investment_Trust":
-                its[c] = its.get(c, 0) + 1
+        day_rows.append(fin.api_get("TaiwanStockInstitutionalInvestorsBuySell",
+                                    start_date=ds, end_date=ds))
         print(f"inst {ds} ok", flush=True)
+    it, fi, its, net0 = inst_streaks(day_rows, keep)
 
     y1, y2 = day_signal(pd, 0), day_signal(pd, 1)
     s1, sub_stats = sub_signal(pd, 0, members)   # 當日 stats 供 subs_y 的 C/R

@@ -94,8 +94,16 @@ def inst_total():
             continue
         net = (fv(r.get("buy")) or 0) - (fv(r.get("sell")) or 0)
         m[r.get("name")] = round(net / 1e8, 1)
+    # 外資＝Foreign_Investor + Foreign_Dealer_Self（證交所 T86 口徑，與自營＝
+    # Dealer_self + Dealer_Hedging 同一套合成規則；taiwan-flows CLAUDE.md 口徑段）。
+    # 原本只取 Foreign_Investor，口徑不完整，2026-08-30 補齊。
+    # 2026-08-30 實測：FinMind 此 dataset 的 Foreign_Dealer_Self 列常態 buy=sell=0
+    # （抽驗 2025-06/2026-01/2026-06/2026-08 共 30 個交易日全為 0），所以現值不變；
+    # 補的是口徑正確性與未來該列有值時不漏帳。
+    fo = m.get("Foreign_Investor")
     return {"date": last,
-            "foreign": m.get("Foreign_Investor"),
+            # 保留「查無該列→null」語意，不因補加總把缺資料變成 0
+            "foreign": fo if fo is None else round(fo + (m.get("Foreign_Dealer_Self") or 0), 1),
             "trust": m.get("Investment_Trust"),
             "dealer": round((m.get("Dealer_self") or 0) + (m.get("Dealer_Hedging") or 0), 1)}
 
