@@ -165,6 +165,7 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
     <div class="tab" data-tab="flow">資金湧入</div>
     <div class="tab" data-tab="outflow">資金退出</div>
     <div class="tab" data-tab="insight">摘要分析</div>
+    <div class="tab" data-tab="mtx">MTX回測</div>
   </div>
 </header>
 <div class="card" id="mkcard" style="margin:8px 10px"></div>
@@ -2415,6 +2416,87 @@ function ovCopySummary(){
   else fallback();
 }
 
+// ======== MTX回測 tab（Playbook v3 靜態內容 ＋ walkforward ledger 前推對帳）========
+// ledger 來源：backtest/mtx-range-fade/walkforward/ledger.csv（同源相對路徑，無 CSP meta 限制）。
+// fetch 失敗或 CSV 空 → 靜默降級顯示提示文字，不拋例外。
+const MTX={status:"idle",rows:null};   // status: idle|loading|done|fail
+function mtxParseCsv(t){
+  const lines=String(t||"").trim().split(/\r?\n/).filter(l=>l.trim());
+  if(lines.length<2)return[];
+  const head=lines[0].split(",").map(s=>s.trim());
+  return lines.slice(1).map(l=>{const c=l.split(",");const o={};
+    head.forEach((h,i)=>o[h]=(c[i]==null?"":c[i]).trim());return o;});
+}
+function mtxLoad(){
+  if(MTX.status==="loading"||MTX.status==="done")return;
+  MTX.status="loading";
+  fetch("backtest/mtx-range-fade/walkforward/ledger.csv?t="+Date.now(),{cache:"no-store"})
+    .then(r=>r.ok?r.text():Promise.reject(new Error("HTTP "+r.status)))
+    .then(t=>{MTX.rows=mtxParseCsv(t);MTX.status="done";})
+    .catch(()=>{MTX.rows=null;MTX.status="fail";})
+    .then(()=>{if(state.tab==="mtx")renderMtx();});
+}
+const mtxN=v=>{const n=+v;return v===""||v==null||!isFinite(n)?"—":n.toLocaleString("en-US",{maximumFractionDigits:1});};
+const mtxPnl=v=>{const n=+v;if(v===""||v==null||!isFinite(n))return"—";
+  return `<span class="${n>0?"up":n<0?"down":"mut"}">${(n>0?"+":"")+n.toLocaleString("en-US",{maximumFractionDigits:1})}</span>`;};
+const mtxPct=v=>{const n=+v;return v===""||v==null||!isFinite(n)?"—":(n>0?"+":"")+(n*100).toFixed(2)+"%";};
+const MTX_MDD_BT=-2997;   // 現代段回測 MDD（點），前推回落超過此值時警示
+function renderMtx(){
+  let h=`<div class="crumb"><b>MTX回測</b> <span class="mut">小台指日內策略 · SOX 訊號（Playbook v3，2026-09-03 定版）</span></div>`;
+  // 免責卡（誠實原則：中性色、不寫該買該賣）
+  h+=`<div class="card" style="font-size:12px;color:var(--dim)">回測與模擬記錄為歷史資料研究、非投資建議；模擬損益未含滑價，實際交易結果會不同。</div>`;
+  // --- 1. 策略參數 ---
+  h+=`<div class="crumb"><b>策略參數</b></div>`;
+  h+=`<div class="note">訊號＝前一晚費城半導體指數（^SOX）收盤漲跌幅；美股 T 日訊號對台股 T+1 日操作。</div>`;
+  const pb=[["大跌 &lt;−2%","空手"],["跌 −2%～−1%","開盤空 → 收盤平"],["小跌 −1%～0%","空手"],
+    ["小漲 0%～1%","開盤多 → 收盤平"],["漲 1%～2%","開盤多 → 收盤平"],["大漲 &gt;2%","10:00 空 → 收盤平"]];
+  h+=`<div class="tablewrap"><table><thead><tr><th class="l">SOX 前收漲跌幅</th><th class="l">動作</th></tr></thead><tbody>`+
+    pb.map(r=>`<tr><td class="l">${r[0]}</td><td class="l">${r[1]}</td></tr>`).join("")+`</tbody></table></div>`;
+  // --- 2. 回測摘要（靜態數字，來源見 repo backtest/mtx-range-fade/README.md）---
+  h+=`<div class="crumb"><b>回測摘要</b></div>`;
+  const statCard=(title,items)=>`<div class="card" style="flex:1;min-width:260px;margin:0">`+
+    `<div class="mut" style="font-size:12px;margin-bottom:4px">${title}</div>`+
+    `<div class="mkrow">`+items.map(([k,v])=>`<span>${k} <b>${v}</b></span>`).join("")+`</div></div>`;
+  h+=`<div style="display:flex;flex-wrap:wrap;gap:8px">`+
+    statCard("歷史段 2005–2022（TAIEX近似、未扣成本）",[["正報酬年","18/18"],["年均","+2,972 點"],["最差年","+1,326 點"]])+
+    statCard("現代段 2023–2026（小台實價、扣成本 2 點）",[["正報酬年","4/4"],["各年","+773 / +4,848 / +4,446 / +7,371"],["週平均","+115 點"],["MDD","−2,997 點"]])+
+    `</div>`;
+  h+=`<div class="note">詳細分析見 repo backtest/mtx-range-fade/README.md。</div>`;
+  // --- 3. 前推對帳記錄 ---
+  h+=`<div class="crumb"><b>前推對帳記錄</b> <span class="mut">walkforward ledger（模擬、扣成本口徑同回測）</span></div>`;
+  if(MTX.status==="fail")h+=`<div class="loading">記錄載入失敗</div>`;
+  else if(MTX.status!=="done")h+=`<div class="loading">載入中…</div>`;
+  else if(!MTX.rows.length)h+=`<div class="loading">尚無記錄</div>`;
+  else{
+    const rows=MTX.rows;
+    const trades=rows.filter(r=>r.pnl_sim!==""&&isFinite(+r.pnl_sim));
+    const tot=trades.reduce((s,r)=>s+ +r.pnl_sim,0);
+    const wins=trades.filter(r=>+r.pnl_sim>0).length;
+    // 累積與回落：依 CSV 時序（舊→新）掃 cum_pnl，峰值含起始 0
+    let peak=0,cum=0;
+    for(const r of rows){const c=+r.cum_pnl;if(r.cum_pnl!==""&&isFinite(c)){cum=c;if(c>peak)peak=c;}}
+    const dd=cum-peak, ddBad=dd<MTX_MDD_BT;
+    const ddTxt=(dd>0?"+":"")+dd.toLocaleString("en-US",{maximumFractionDigits:1});
+    h+=`<div class="card" style="font-size:13px"><div class="mkrow">`+
+      `<span>出勤 <b>${trades.length}</b> 筆</span>`+
+      `<span>總損益 <b>${mtxPnl(tot)}</b> 點</span>`+
+      `<span>勝率 <b>${trades.length?Math.round(wins/trades.length*100)+"%":"—"}</b></span>`+
+      `<span>目前累積 <b>${mtxPnl(cum)}</b> 點</span>`+
+      `<span>目前回落 <b>${ddBad?`<span class="db">${ddTxt} 已超過回測MDD</span>`:ddTxt}</b> 點</span>`+
+      `</div></div>`;
+    const cols=[["date","台股日"],["sox_date","SOX日"],["sox_ret","SOX漲跌"],["bucket","級距"],["action","動作"],
+      ["entry_time","進場時間"],["entry_px","進場價"],["exit_px","出場價"],["pnl_sim","損益(點)"],["cum_pnl","累積(點)"]];
+    h+=`<div class="tablewrap scrollbox"><table><thead><tr>`+
+      cols.map(([k,lab],i)=>`<th${i<1?' class="l"':''}>${lab}</th>`).join("")+`</tr></thead><tbody>`+
+      rows.slice().reverse().map(r=>`<tr>`+
+        `<td class="l">${escI(r.date)}</td><td>${escI(r.sox_date)}</td><td>${mtxPct(r.sox_ret)}</td>`+
+        `<td>${escI(r.bucket)}</td><td>${escI(r.action)}</td><td>${escI(r.entry_time)}</td>`+
+        `<td>${mtxN(r.entry_px)}</td><td>${mtxN(r.exit_px)}</td><td>${mtxPnl(r.pnl_sim)}</td><td>${mtxN(r.cum_pnl)}</td>`+
+        `</tr>`).join("")+`</tbody></table></div>`;
+  }
+  document.getElementById("main").innerHTML=h;
+}
+
 function render(){
   for(const k in T)delete T[k];
   document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===state.tab));
@@ -2422,6 +2504,8 @@ function render(){
   document.getElementById("mkcard").style.display=(state.tab==="ov")?"none":"";
   // 摘要分析：未載入 live 也要能顯示 key 輸入 UI（安全通過，不擋在 live/cl 檢查之後）
   if(state.tab==="insight"){if(state.live&&state.cl)renderMarket();renderInsight();return;}
+  // MTX回測：靜態內容＋ledger，同 insight 不擋在 live/cl 檢查之後
+  if(state.tab==="mtx"){if(state.live&&state.cl)renderMarket();renderMtx();mtxLoad();return;}
   if(state.tab==="ov"){if(!state.live||!state.cl){document.getElementById("main").innerHTML='<div class="loading">載入中…</div>';return;}renderOverview();return;}
   if(!state.live||!state.cl){document.getElementById("main").innerHTML='<div class="loading">載入中…</div>';return;}
   renderMarket();
