@@ -151,6 +151,16 @@ FinMind `TaiwanStockKBar` 新增 TAIEX 加權指數分 K（2005 起），提供�
 （時段差 15 分鐘、無期現價差滑價）；量能過濾（v2 的 rv≥1）歷史段無法驗證，
 僅供現代側選配。FinMind 期貨分 K 上線後應以真期貨價重做歷史段。
 
+## 前推對帳（walkforward/，2026-09-03 啟動）
+
+playbook v3 定版後的每日模擬記帳，規則凍結、不得回頭改：
+`walkforward/walkforward_daily.py` 由 `.github/workflows/walkforward.yml`
+（台北 21:07 主班＋23:07 兜底，冪等、hour<12 回推防跨午夜）每日執行，
+append `walkforward/ledger.csv`（date／費半桶／動作／模擬進出價／損益／累積）。
+對帳判準：累積回落超過回測 MDD（−2,997 點）＝停機檢討訊號（log 會標 warning）；
+跑滿一季後把 ledger 與回測分布對照（平均、勝率、實際滑價），對得上才談加碼。
+首筆 2026-09-03：小漲桶做多 −367 點。
+
 ## 工作紀律備忘（本專案的方法論教訓）
 
 - 單一年份調參的數字是上限不是期望；**任何新策略先過「調參年以外 ≥2 個年份、參數凍結」的驗證再談部位**。

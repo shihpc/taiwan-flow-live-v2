@@ -1,0 +1,46 @@
+# Playbook v3 前推對帳 — 每日模擬記帳 (backtest/mtx-range-fade/walkforward/)
+# 排程注意: 兩班都在台北午夜前 (21:07 主班 / 23:07 兜底)。GitHub cron 常態延遲
+# 1~2 小時, 若延遲跨台北午夜, 腳本以「hour<12 回推一天」決定目標日, 不會滾成隔日
+# (同 taiwan-flows target_trading_day; taiwan-stock-news 2026-07-16 事故的教訓)。
+# 腳本冪等: 同日已記帳即跳過; tick 未落地則本班放棄、由下一班或隔日補。
+name: walkforward
+on:
+  schedule:
+    - cron: "7 13 * * 1-5"   # 台北 21:07 主班
+    - cron: "7 15 * * 1-5"   # 台北 23:07 兜底
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ledger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet pandas requests
+      - name: 記帳
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python backtest/mtx-range-fade/walkforward/walkforward_daily.py
+      - name: Commit & push
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add backtest/mtx-range-fade/walkforward/ledger.csv
+          if git diff --staged --quiet; then
+            echo "無新記帳, 不 commit"; exit 0
+          fi
+          git commit -m "walkforward ledger $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for i in 1 2 3 4 5; do
+            git push && exit 0
+            git pull --rebase && sleep $((i*3))
+          done
+          exit 1
