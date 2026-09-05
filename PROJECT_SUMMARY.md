@@ -799,6 +799,76 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
       `src/archive_intraday.py` 產出，內容只有 `series`／`times`／`frames`（各時點的 `t` 與 `stale`）／
       `total`／`nstk`／`g`——**完全沒有 `/live` 的 `ts`**（`src_ts` 抓了但沒存）。
       只要不動 `storeFrame`，改 `aggregate` 的 `ts` **不會**讓新舊樣本不可比較。
+  - **量測管道已建好：`/livediag` 唯讀診斷路徑（2026-09-05，本次上線；C 案本身仍未做）**——
+    上一則說的「量測受阻」的解法是三條路裡的第二條「在 Worker 加診斷欄位並部署」。
+    程式在 `worker/src/index.js` 的 `export function tsDiag`（純函式，無 I/O）＋
+    `fetch` handler 內 `url.pathname === "/livediag"` 那段；測試 `worker/test/livediag.mjs`（51 項）。
+    - **為什麼另開路徑而非 `/live?diag=1`**：`/live` 的 cf 快取 cacheKey 是
+      **寫死的 `new URL("/live", url.origin)`、不含 query**（見 `/live` 分支的 `const cacheKey`）。
+      若走 `?diag=1`，診斷版回應會被 `cache.put` 進**同一個 key**，之後所有正常消費者
+      都會收到帶診斷欄位的 payload（反之亦然）。這足以否決 query 參數方案。
+      另開 `/livediag` 則保證：不寫 KV、不碰 `caches.default`、`/live` 回傳零改動
+      （本次 diff 對 `worker/src/index.js` 是 **118 行純新增、0 行刪改**）。
+    - **拿得到未快取的即時資料**：`/livediag` 自己呼叫 `finSnapshot()`（該函式**沒掛** cf 快取，
+      每次都真的打 FinMind），回應帶 `Cache-Control: no-store`，完全不經過 `/live` 的
+      stale-while-revalidate 路徑。
+    - **節流**：`export function diagThrottle` —— 兩次間隔 ≥30 秒（`DIAG_MIN_GAP_MS`）＋
+      每台北日 60 次（`DIAG_DAILY_CAP`），計數放**模組層 in-isolate 變數**、**刻意不寫 KV**
+      （要維持「唯讀」這條性質）。被擋時回 `{error, reason:"too_frequent"|"daily_cap", ...}`，
+      **不會打 FinMind**。**殘留風險（已知並接受）**：CF 可能同時有多個 isolate，
+      上限實質是「每 isolate 每日 60」，最壞情況 isolate 數 × 60；isolate 回收後計數歸零。
+      緩解只有「不列進根路徑 `endpoints` 清單」（已如此，有測試守著）＋低頻使用；
+      **刻意不加密碼/token**（那會變成另一個要管的祕密）。真被打爆的正解是改走 KV 計數
+      （代價＝放棄唯讀）。
+    - **怎麼用**：`curl -s https://taiwan-flow-v2.shihpc.workers.dev/livediag | jq .`
+      （30 秒內重打會被節流擋下，屬預期）。輸出欄位：
+
+      | 欄位 | 意義 |
+      |------|------|
+      | `ts_current` | **對照組**＝現行 `/live` 的 `ts`（有分類個股 `max(date)`） |
+      | `ts_le_close` | 候選一（派工單字面）：只取時間 ≤`13:30` 的列取 max |
+      | `ts_regular` | 候選一（真正時窗）：`09:00`–`13:30` 內的列取 max |
+      | `ts_index.twse/.tpex` | **候選二**＝指數列 `001`/`101` 的 `date`（`/live` 的 `index` 由 `idxOut` 產生、不含 date，這是唯一觀測管道） |
+      | `classified.{pre_open,regular,late,no_date}` | 有分類個股逐列時戳落在 <09:00／09:00–13:30／>13:30／無 date 的**列數** |
+      | `hist[]` | 逐列 `date` 的 `YYYY-MM-DD HH:MM` 分桶計數（保留日期部分，跨日才分得出來） |
+      | `dates[]` | 出現過的日期部分（去重排序）；**長度 >1 ＝ 同一份快照混了不同日的列** |
+      | `latest[]` | 最新 8 列樣本（`code`+`date`），用來看「收盤後是誰把 max 推上去的」 |
+
+      刻意**不吐原始列**（快照約 1.2 萬列）。`window` 可讀回實際用的門檻。
+    - **為什麼要兩個門檻**：(乙) 的殘留時戳是 **08:30**，它**也 ≤13:30**，單邊門檻濾不掉；
+      加 `09:00` 下界才分得出「盤前殘留」與「正規盤真實成交」。所以 `ts_le_close` 只是
+      派工單字面的對照，**真正該看的是 `ts_regular` 與 `classified.pre_open`**。
+    - **要觀察什麼／觀察到什麼才能決定改法**（下一個 session 照這張表做）：
+
+      | 時點 | 至少幾次 | 看什麼 | 判準 |
+      |------|---------|--------|------|
+      | 交易日 **收盤後**（台北 15:30 後）| 5 個交易日 | `classified.regular` 與 `ts_regular` | `regular > 0` 且 `ts_regular` 落在 13:2x/13:30 → **(甲) 改法＝候選一（時窗過濾取 max）**，不必回 null |
+      | 同上 | 同上 | `ts_regular` vs `ts_index.twse` | 兩者**每天都一致**（或差 <1 分）→ 候選二也可用，且更便宜；**不一致** → 候選二不可信，走候選一 |
+      | 同上 | 同上 | `hist` 尾端與 `latest` | 確認 >13:30 的列確實是盤後定盤/零股（量少、集中在 14:30/15:00），而非正規盤資料 |
+      | **非交易日**（週六/週日/國定假日，任意時間）| 3 次以上，**且要涵蓋週六與週日各至少一次** | `classified.pre_open`、`classified.regular`、`dates` | `regular > 0` → **(乙) 也走候選一**，過濾後拿得到前一盤真實時戳（正解）；`regular === 0`（全落在 `pre_open`）→ **候選一在非交易日只能回 `null`** |
+      | 同上 | 同上 | `dates` 長度 | `>1` → 殘留時戳跨日（2026-08-30 週日看到 08-29 週六那型），任何「殘留＝當日 08:30」的假設都不成立 |
+
+      **決策規則**：兩個時點都 `regular > 0` → C 案直接做候選一（對外 `ts` 改成時窗 max、
+      內部另存 `snap_ts`＝原 `max(date)` 給 `pickFrames`／`computeFlow`／`series:<date>` 用，
+      理由見上方 `framesDegenerate` 那條）。非交易日 `regular === 0` → `ts` 必須容許 `null`，
+      **前端閘門已於 2026-09-05 放寬（見下一則），這條硬阻斷已解除**。
+  - **前端 live 閘門已放寬（2026-09-05，本次上線）**：`index.html` 的 `state.live` 唯一賦值點
+    原為 `if(j&&j.ts){state.live=j;…}`——`ts` falsy 時**整包 `/live` 被丟棄**、boot 只重試一次，
+    全站永遠停在「載入中…」。已改為 `if(liveUsable(j))`（`export`-less 區域函式，判準＝
+    `!j.error && j.stocks` 為物件）：**payload 本體有效就採用**，`ts` 缺失只讓「顯示時間」降級。
+    理由與判準寫在 `index.html` 的 `function liveUsable` 上方註解。
+    - **Worker 失敗回 `{error:"…"}` 仍然拒收**（無 `stocks`），boot 的重試行為不變——
+      headless 實測 `{error}`／`{}`／`{ts, stocks:null}` 三種都不被採用。
+    - **順手修掉兩處會吐空日期的顯示**（不是日期邏輯，只是「取不到就不顯示」）：
+      `ovMarketPhase` 凌晨盤前徽章由 `「 收盤定格」`（前綴空白）改成 `「收盤定格」`；
+      `OV_SUMMARY_TEXT` 標題由 `【今日總結 】` 改成 `【今日總結】`。
+    - **五個 `ts` 下游消費者已逐一 headless 實測不爆**（`ts` 給 `null`／缺欄／空字串三種）：
+      `#tsline`（顯示「最後成交 —」，08-30 定的文案不動）、`insightGatherContext`
+      （本來就有 `generated_at` 後備，primary 落到台北今日、text 長度與正常時相同）、
+      收盤定格徽章、`OV_SUMMARY_TEXT`、`ovDaySeries` 的 `/replay?date=`
+      （`d` 為 `""` 時本來就有正則守門 → 不帶 date，由 Worker 取台北今日）與
+      `ovRrgEnsure`（`d` 只當快取鍵，變 `""` 無害）。
+    這解除了「任何可能回 `null` 的方案都不能上線」的硬阻斷。
   注意：本次 bug 與 07-16/17 FinMind 上游時戳停滯**是不同問題**（那次是上游真斷、本次是我方取第一檔）。
 - **build_aetf.py 逐股加市值（2026-07-21，`grab_holding()`）**：`stocks[c]` 由 `[股數,名稱,權重%]`
   改 `[股數,名稱,權重%, mv]`（mv=`fnum(r.get("market_value"))`，同列 FinMind 回應本就有、原只拿去加總 aum

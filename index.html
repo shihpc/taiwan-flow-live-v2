@@ -952,7 +952,9 @@ function ovMarketPhase(){
   if(afterClose)return {badge:"收盤定格 13:30", closed:true};
   // 凌晨盤前（00:00–09:00）：市場尚未開盤，/live 仍握上一交易日收盤資料 → 視同收盤定格，
   // 徽章帶上該收盤資料日期（state.live.ts 的 MM-DD），避免誤以為是「盤前無資料」而隱藏今日總結
-  if(min<9*60)return {badge:`${(state.live.ts||"").slice(5,10)} 收盤定格`, closed:true};
+  // ts 可能為 null（見 pull() 的 liveUsable 註解）→ 取不到 MM-DD 就不顯示日期，不吐空前綴
+  if(min<9*60){const md=(state.live.ts||"").slice(5,10);
+    return {badge:md?`${md} 收盤定格`:"收盤定格", closed:true};}
   return null;
 }
 // series 太短時 sparkline 顯示的替代文字：收盤後（今日已無盤可等）用「明日」；盤前/盤中用「盤中累積後」
@@ -2384,7 +2386,8 @@ function ovSummaryCard(){
   // 全日口徑定調句（無短窗子句；「升幅最大」以全日貢獻點最高口徑呈現——盤中佔比升降屬短窗，收盤後無基準）
   const tone=`今日大盤 ${sgnTxt(ix.chgP)} 點（${pctTxt(ix.chg)}）；廣度 漲${up}／跌${down}；全日成交佔比最高 ${shareTxt}，貢獻最強 ${ptsTxt}，拖累最多 ${botTxt}。`;
   const fmtP=r=>`${r.code} ${r.name} ${r.chg==null?"—":pctTxt(r.chg)} ${sgnTxt(r.pts)}`;
-  OV_SUMMARY_TEXT=[`【今日總結 ${(state.live.ts||"").slice(0,10)}】`,tone,
+  const sumDay=(state.live.ts||"").slice(0,10);   // ts 可能為 null → 標題略去日期，不吐「【今日總結 】」
+  OV_SUMMARY_TEXT=[`【今日總結${sumDay?" "+sumDay:""}】`,tone,
     `貢獻前5：${top5.map(fmtP).join("、")||"—"}`,`拖累前5：${bot5.map(fmtP).join("、")||"—"}`].join("\n");
   // 每檔顯示：代號 名稱 漲跌%（紅漲綠跌）貢獻點（2026-07-21 使用者回饋）
   const fmtStk=r=>`${r.code} ${escI(r.name)} ${r.chg==null?'<span class="mut">—</span>':sgn(r.chg,pct(r.chg))} ${sgn(r.pts,sgnTxt(r.pts))}`;
@@ -2480,6 +2483,15 @@ async function boot(){
   if(!state.live){await new Promise(s=>setTimeout(s,6000));await pull(false);}  // 首拉失敗重試一次，避免卡「載入中」
   initAuto();
 }
+// /live payload 可用性判定（state.live 唯一賦值點的閘門，2026-09-05 放寬）。
+// 舊寫法是 `if(j&&j.ts)` ——**ts falsy 時整包好資料被丟棄**，而 boot 只重試一次就放棄，
+// 症狀是全站永遠停在「載入中…」。ts 只是顯示用欄位，且未來可能合法地回 null
+// （C 案：非交易日正規盤時窗過濾後無列可取，見 PROJECT_SUMMARY「/live 資料時間改取 max(date)」段），
+// 因此閘門改看**本體**：有 stocks 物件就採用；ts 缺失只讓「顯示時間」降級（#tsline 顯示「—」）。
+// Worker 失敗時回 {error:"…"}（無 stocks）→ 仍然拒收，boot 的重試行為不變。
+function liveUsable(j){
+  return !!(j && !j.error && j.stocks && typeof j.stocks==="object" && !Array.isArray(j.stocks));
+}
 // 抓一次即時資料並重繪；manual=true 時在按鈕顯示狀態。in-flight 防重疊（慢回應時自動刷新不疊發）
 let pulling=false;
 async function pull(manual){
@@ -2489,7 +2501,7 @@ async function pull(manual){
   try{
     const j=await loadJSON(liveURL());
     // 第五期：回放中暫停自動重繪（state.live 照更新，「回到即時」立即接上最新盤面）
-    if(j&&j.ts){state.live=j;if(!(OV_REPLAY&&state.tab==="ov"))render();}
+    if(liveUsable(j)){state.live=j;if(!(OV_REPLAY&&state.tab==="ov"))render();}
   }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
   finally{ pulling=false; if(manual){btn.textContent=old;btn.disabled=false;} }
 }
