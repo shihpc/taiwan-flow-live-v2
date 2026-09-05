@@ -2489,8 +2489,15 @@ async function boot(){
 // （C 案：非交易日正規盤時窗過濾後無列可取，見 PROJECT_SUMMARY「/live 資料時間改取 max(date)」段），
 // 因此閘門改看**本體**：有 stocks 物件就採用；ts 缺失只讓「顯示時間」降級（#tsline 顯示「—」）。
 // Worker 失敗時回 {error:"…"}（無 stocks）→ 仍然拒收，boot 的重試行為不變。
+// 另要求 **stocks 非空**（2026-09-05 收緊）：`aggregate` 在「快照回來但全體分類失敗」時
+// 的真實輸出形狀是 `{ts:null, stocks:{}}`，舊閘門會採用它，全站渲染成
+// 「加權市場全個股（0）／指數 —」的空儀表板——看起來像真有一個 0 檔的市場，比停在
+// 「載入中…」更誤導。改為拒收 → boot 重試一次。
+// 這條**不會**擋到 C 案要放行的形狀（`ts:null` ＋**完整** stocks）；受影響的只有
+// 空 stocks，含舊閘門下會被採用的 `{ts:"…", stocks:{}}`（行為改變，屬有意收緊）。
 function liveUsable(j){
-  return !!(j && !j.error && j.stocks && typeof j.stocks==="object" && !Array.isArray(j.stocks));
+  return !!(j && !j.error && j.stocks && typeof j.stocks==="object" && !Array.isArray(j.stocks)
+    && Object.keys(j.stocks).length>0);
 }
 // 抓一次即時資料並重繪；manual=true 時在按鈕顯示狀態。in-flight 防重疊（慢回應時自動刷新不疊發）
 let pulling=false;

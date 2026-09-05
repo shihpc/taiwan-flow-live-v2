@@ -104,7 +104,9 @@ const row = (code, date, extra = {}) => ({ stock_id: code, date, close: 100, tot
   chk("D hist 依時間升序", d.hist.every((h, i, a) => i === 0 || a[i - 1].t <= h.t));
   chk("D 無 date 的列進 no_date、不進 hist", d.classified.no_date === 1);
   chk("D dates 去重排序", eq(d.dates, ["2026-09-03", "2026-09-04"]));
-  chk("D 不吐原始列，只吐 ≤8 筆 latest 樣本", d.latest.length <= 8 && !("rows" in d));
+  chk("D 不吐原始列，只吐 ≤8 筆 latest 樣本（下界一併釘住，空陣列不得通過）",
+    d.latest.length === 5 && d.latest.length <= 8 && d.latest[0].date === "2026-09-04 14:30:00.000000"
+    && !("rows" in d), JSON.stringify(d.latest));
 }
 
 // ---- 情境 E：自訂時窗 ----
@@ -197,25 +199,45 @@ const row = (code, date, extra = {}) => ({ stock_id: code, date, close: 100, tot
   chk("路由 /livediag 沒污染 /live 的 cf 快取 key", ![...store.keys()].some((k) => k.includes("livediag")),
     [...store.keys()].join(","));
   chk("路由 /livediag 打的是未快取即時快照", hits.filter((h) => h.includes("tick_snapshot")).length >= 2);
-  chk("路由 /livediag 不寫 KV", true);   // env.FLOW_KV.put 未被呼叫（下方以 spy 驗）
 
   globalThis.fetch = origFetch;
   globalThis.caches = origCaches;
 }
 
 // ---- /livediag 唯讀（不寫 KV）----
+// **為什麼要另取模組實例**：節流計數 `diagQuota` 是 `src/index.js` 的**模組層 in-isolate 變數**，
+// 上一區塊已打過一次 `/livediag`，同一個模組實例下 30 秒內第二次必被 `diagThrottle` 短路
+// （回 `{error:"診斷路徑節流中",reason:"too_frequent"}`）——**請求根本進不了 try 主體**，
+// 那樣 `puts === 0` 只是「沒跑到」的假通過（2026-09-05 覆驗實測到的假測試）。
+// 解法選 `await import("../src/index.js?<唯一值>")`：Node ESM 以**完整 specifier** 當模組快取鍵，
+// 帶不同 query 即得全新模組實例、`diagQuota` 歸零。不選「把 `diagQuota` export 出來讓測試重置」
+// 的理由有二：① 那要動 `worker/src/index.js` 的對外介面（為測試而擴大生產程式的 API 面）；
+// ② 新模組實例正好對應 CF「另一顆 isolate」的真實語意，比手動重置更貼近被測情境。
 {
   const origFetch = globalThis.fetch;
   globalThis.fetch = async (u) => {
     const s = String(u);
-    if (s.includes("taiwan_stock_tick_snapshot")) return new Response(JSON.stringify({ status: 200, data: [] }));
-    return new Response(JSON.stringify({ map: {} }));
+    if (s.includes("taiwan_stock_tick_snapshot")) {
+      return new Response(JSON.stringify({ status: 200, data: [
+        row("2330", "2026-09-04 15:00:00.000000"),
+        row("2317", "2026-09-04 13:29:30.000000"),
+        row("001", "2026-09-04 13:30:00.000000"),
+      ] }));
+    }
+    return new Response(JSON.stringify({ map: CL }));
   };
   let puts = 0;
   const env = { FINMIND_TOKEN: "x", DATA_BASE: "https://example.invalid/data",
-    FLOW_KV: { get: async () => null, put: async () => { puts += 1; } } };
-  await worker.fetch(new Request("https://w.invalid/livediag"), env, { waitUntil: () => {} });
-  chk("唯讀 /livediag 全程零 KV put", puts === 0);
+    FLOW_KV: { get: async () => null, put: async (...a) => { puts += 1; return a; } } };
+  const fresh = (await import(`../src/index.js?isolate=readonly-${Date.now()}`)).default;
+  const res = await (await fresh.fetch(new Request("https://w.invalid/livediag"), env,
+    { waitUntil: () => {} })).json();
+  // 前置斷言：確認這次請求**真的走完主體**（產出診斷而非節流錯誤）。
+  // 沒有這條，下面的 puts === 0 隨時可能退化成空轉的假通過。
+  chk("唯讀 前置：新模組實例未被節流、確實跑完診斷主體",
+    res.schema === 1 && res.ts_regular === "2026-09-04 13:29:30.000000",
+    JSON.stringify(res).slice(0, 160));
+  chk("唯讀 /livediag 全程零 KV put", puts === 0, `puts=${puts}`);
   globalThis.fetch = origFetch;
 }
 
