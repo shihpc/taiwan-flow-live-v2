@@ -253,6 +253,105 @@ export function aggregate(cl, rows, limits, lw) {
 }
 const mkZero = () => ({ amt: 0, up: 0, down: 0, flat: 0, n: 0, ul: 0, dl: 0 });
 
+// ---- /livediag 唯讀診斷（2026-09-05，為 `/live` 的 `ts` 語意改造（C 案）提供量測管道）----
+// 背景見 PROJECT_SUMMARY.md「/live 資料時間改取 max(date)」段。要決定 (甲) 收盤後語意漂移與
+// (乙) 非交易日殘留時戳怎麼改，必須先回答「分水嶺問題」：非交易日／收盤後，究竟是**所有列**
+// 都被改寫成盤後（或盤前殘留）時戳，還是**部分列保留正規盤的真實時戳**？`/live` 只吐一個 max，
+// 兩種情況外觀完全相同，因此需要逐列時戳的分布。本函式為純函式（無 I/O），可離線測試。
+//
+// 刻意不吐原始列（快照約 1.2 萬列，全吐會很大）：只吐「YYYY-MM-DD HH:MM」分桶計數
+// ＋兩個候選改法各自算出來的 ts ＋現行 ts（對照）＋最新幾列的樣本。
+// 兩個門檻分開報：
+//   DIAG_CLOSE_HM 之前（`ts_le_close`）＝派工單字面上的「候選一：只取 ≤13:30 的 rows」；
+//   [DIAG_OPEN_HM, DIAG_CLOSE_HM] 時窗內（`ts_regular`）＝真正的正規盤時窗。
+// 為什麼要分兩個：(乙) 非交易日的殘留時戳是 **08:30**，它同樣 ≤13:30，光用單邊門檻
+// 濾不掉——2026-08-30 線上實打得 `2026-08-29 08:30:00.000000`（週六）就是這一型。
+// 只有加下界（≥09:00 開盤）才分得出「盤前殘留」與「正規盤真實成交」。
+export const DIAG_OPEN_HM = "09:00";     // 正規盤開盤
+export const DIAG_CLOSE_HM = "13:30";    // 正規盤集合競價收盤
+
+export function tsDiag(cl, rows, win = {}) {
+  const open = win.open || DIAG_OPEN_HM;
+  const close = win.close || DIAG_CLOSE_HM;
+  const hist = new Map();               // "YYYY-MM-DD HH:MM" → 列數（只統計有分類個股）
+  const dates = new Set();
+  const idx = { "001": null, "101": null };
+  let tsCurrent = null;                 // 現行 aggregate 的口徑：全體有分類個股 max(date)
+  let tsLeClose = null;                 // 候選一（字面）：時間部分 ≤ close 的 max
+  let tsRegular = null;                 // 候選一（時窗）：open ≤ 時間部分 ≤ close 的 max
+  let nClassified = 0, nPre = 0, nRegular = 0, nLate = 0, nNoDate = 0;
+  let nRows = 0, nUnclassified = 0;
+  const latest = [];                    // 最新 N 列樣本（回答「收盤後是誰把 max 推上去的」）
+
+  for (const r of rows) {
+    nRows += 1;
+    const code = String(r.stock_id || "");
+    if (!code) continue;
+    if (code === "001" || code === "101") { idx[code] = r.date ? String(r.date) : null; continue; }
+    if (!cl[code]) { nUnclassified += 1; continue; }
+    nClassified += 1;
+    const d = r.date ? String(r.date) : "";
+    if (!d) { nNoDate += 1; continue; }
+    dates.add(d.slice(0, 10));
+    const bucket = d.slice(0, 16);      // YYYY-MM-DD HH:MM（跨日時仍可區分，故保留日期部分）
+    hist.set(bucket, (hist.get(bucket) || 0) + 1);
+    if (!tsCurrent || d > tsCurrent) tsCurrent = d;
+    // 時間部分（date 是定寬字串 YYYY-MM-DD HH:MM:SS.ffffff，字典序即時序）
+    const hm = d.slice(11, 16);
+    if (hm > close) { nLate += 1; }
+    else {
+      if (!tsLeClose || d > tsLeClose) tsLeClose = d;
+      if (hm < open) { nPre += 1; }
+      else {
+        nRegular += 1;
+        if (!tsRegular || d > tsRegular) tsRegular = d;
+      }
+    }
+    latest.push([code, d]);
+  }
+
+  latest.sort((a, b) => (a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0));
+  return {
+    schema: 1,
+    generated_at: new Date().toISOString(),   // Worker 牆鐘 ISO（UTC Z），非台北
+    window: { open, close },
+    // 四個候選並列：ts_current＝現行 /live 的 ts（對照）；ts_le_close／ts_regular＝候選一的
+    // 兩種門檻；ts_index＝候選二（指數列 001/101 的 date——`/live` 的 index 由 idxOut 產生、
+    // 不含 date 欄，這是候選二唯一的對外觀測管道）。
+    ts_current: tsCurrent,
+    ts_le_close: tsLeClose,
+    ts_regular: tsRegular,
+    ts_index: { twse: idx["001"], tpex: idx["101"] },
+    // 分水嶺問題的直接答案：
+    //   classified.regular > 0 → 有列保留正規盤真實時戳 → 候選一（時窗）拿得到正解；
+    //   classified.regular === 0 → 過濾後無列可取 → 候選一只能回 null（前端必須撐得住）。
+    //   classified.pre_open 大 → 該批列被改寫成盤前殘留時戳（(乙) 的形狀）。
+    rows_total: nRows,
+    classified: { n: nClassified, pre_open: nPre, regular: nRegular, late: nLate, no_date: nNoDate },
+    unclassified: nUnclassified,
+    dates: [...dates].sort(),
+    hist: [...hist.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([t, n]) => ({ t, n })),
+    latest: latest.slice(0, 8).map(([code, date]) => ({ code, date })),
+  };
+}
+
+// 診斷路徑節流：**刻意不寫 KV**（本路徑要維持唯讀），改用模組層 in-isolate 計數。
+// 殘留風險：Cloudflare 同時可能有多個 isolate，上限實質是「每 isolate 每日 cap」，
+// 最壞情況為 isolate 數 × cap；且 isolate 回收後計數歸零。因為本路徑
+// **不列進根路徑 endpoints 清單**、只有知道路徑的人會打，低頻使用下這個上限已足夠。
+// 若哪天真的被打爆，正解是改走 KV 計數（就得放棄「唯讀」這條性質）。
+export const DIAG_MIN_GAP_MS = 30000;    // 兩次之間至少 30 秒
+export const DIAG_DAILY_CAP = 60;        // 每 isolate 每（台北）日上限
+const diagQuota = { date: "", used: 0, last: 0 };
+export function diagThrottle(now, tpDate, st = diagQuota, gap = DIAG_MIN_GAP_MS, cap = DIAG_DAILY_CAP) {
+  if (st.date !== tpDate) { st.date = tpDate; st.used = 0; st.last = 0; }   // 跨台北日重置
+  if (st.used >= cap) return { ok: false, reason: "daily_cap", used: st.used, cap };
+  const wait = st.last + gap - now;
+  if (wait > 0) return { ok: false, reason: "too_frequent", retry_after_s: Math.ceil(wait / 1000) };
+  st.used += 1; st.last = now;
+  return { ok: true, used: st.used, cap };
+}
+
 // ---- 盤中分鐘 frame（Cron 每分鐘寫入 KV，資金湧入的時間序列）----
 // key = f:<台北日期>:<HH:MM>——2026-07-18 起取「喚醒時間」event.scheduledTime 的台北牆鐘。
 //   舊制取 FinMind 快照自身時戳，07-16/17 上游時戳停滯時同 key 被反覆覆寫、當日格數塌縮
@@ -3917,6 +4016,25 @@ export default {
         const events = lg.ev.filter((e) => now - e.ts < 24 * 3600e3)
           .map((e) => ({ at: new Date(e.ts).toISOString(), id: e.id, msg: e.msg, sent: e.sent }));
         return json({ events }, { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+      }
+    }
+    if (url.pathname === "/livediag") {  // 唯讀時戳診斷（C 案量測管道；見 tsDiag 上方註解）
+      // 三個「不侵入」的性質：① 不寫 KV ② 不碰 caches.default（`/live` 的 cf 快取 key 是
+      // `/live`，本路徑另開 path 且回 no-store，兩邊互不污染，也拿得到未快取的即時快照
+      // ——finSnapshot 本身沒掛 cf 快取）③ 不改 `/live` 任何既有欄位。
+      // 節流：見 diagThrottle 上方註解（in-isolate、非 KV，殘留風險已記載）。
+      const th = diagThrottle(Date.now(), taipeiParts().date);
+      if (!th.ok) return json({ error: "診斷路徑節流中", ...th }, { "Cache-Control": "no-store" });
+      try {
+        const token = env.FINMIND_TOKEN;
+        if (!token) throw new Error("缺少 FINMIND_TOKEN（wrangler secret put FINMIND_TOKEN）");
+        const [classifyJson, rows] = await Promise.all([
+          fetchJSON(`${env.DATA_BASE}/classify.json`, 86400),
+          finSnapshot(token),
+        ]);
+        return json(tsDiag(classifyJson.map, rows), { "Cache-Control": "no-store" });
       } catch (e) {
         return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
       }
