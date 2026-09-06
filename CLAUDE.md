@@ -35,10 +35,10 @@
 
 台股盤中即時資金流向監控站，同時是「股市雷達」四站家族的**資料中樞**
 （見 `PROJECT_SUMMARY.md`「一句話說明」段）。線上 https://shihpc.github.io/taiwan-flow-live-v2/ 。
-前端是單檔 `index.html`（166KB，2026-08-09 實測 170,046 bytes），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
+前端是單檔 `index.html`（184KB，2026-09-06 實測 188,281 bytes），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
 資金湧入／資金退出＋摘要分析（`index.html` 的 `<div class="tabs" id="tabs">` 區塊，
 一個 tab 一個 `data-tab` 值）。
-**`PROJECT_SUMMARY.md`（50KB）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
+**`PROJECT_SUMMARY.md`（143KB，2026-09-06 實測 146,133 bytes）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
 前端有兩組跨站同步碼：**三站逐字同步**的 `callClaude`／`mdToHtml`／`linkifyStocks`／
 `ghSaveAnalysis`／`sumCtx*` 與費用估算 `insightCostText`／`INSIGHT_PRICES`／`USD_TWD`
 （`index.html:727-749`）；**四站同步但非逐字**的 `loadSiteVer()`＋footer `#siteVer`
@@ -190,7 +190,7 @@
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 19 支要個別跑（離線、免 token）
+node test/sentinel.mjs              # 其餘 20 支要個別跑（離線、免 token；2026-09-06 實查 worker/test/ 共 21 支）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 
@@ -245,3 +245,17 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
      只讓「顯示時間」降級，全站不再停在「載入中」——原本的硬阻斷已解除。
    **動 `aggregate` 的 `ts` 前先讀** `PROJECT_SUMMARY.md`「/live 資料時間改取 max(date)」段的
    「量測管道已建好：`/livediag`」條——那裡有**要觀察什麼／觀察到什麼才能決定 (甲)(乙) 改法**的表格。
+6. **`/live` 的 stale-while-revalidate 重建無 in-flight 去重（2026-09-06 分析發現，尚未修）**：
+   `worker/src/index.js` 內 `const FRESH_MS` 附近的 `const rebuild` 每次被呼叫都各自跑一次
+   `buildLive`，多個落在 stale 區（`FRESH_MS` < age < `STALE_MS`）的並發請求會**各自觸發一次重建**、
+   互不合併；且前端 `index.html` 的 `CFG.autoSec:20` 大於 `worker/wrangler.toml` 的
+   `LIVE_TTL = "15"`，**單一客戶端每次輪詢都必落 stale 區、每次都觸發背景重建**——快取實際上
+   只擋得住 15 秒內的第二個客戶端。修法（先量測 rebuild 次數／上游成敗／快照年齡／併發 →
+   加 in-flight 去重 → 再以資料選 TTL 25／30）列於 claude-harness
+   `docs/site-optimization-plan-20260906.md` 批次二 #9，動手前先讀。
+7. **哨兵 dispatch 失敗只 log、不告警（2026-09-06 分析發現，尚未修）**：
+   `function runSentinel` 內 `ghDispatch` 的 catch 分支只 `console.log`、**未接 `alertJob`**
+   （對照同檔 `backupPipelines`／summary／cards 各班的 catch 都有接 `bk-err-*`／`sum-err-*`
+   等告警）；另 `runSentinel` 開頭 `!env.GH_DISPATCH_TOKEN || !env.FINMIND_TOKEN` 時為**安靜
+   return**，secret 缺失整晚不觸發也無任何訊號，只能靠下游 GH cron 兜底。修法列於同上文件
+   批次二 #11（哨兵 catch 接 `alertJob`＋獨立於 Worker 的低頻 GH cron 看門狗）。
