@@ -868,17 +868,39 @@ async function ghDispatchWithRetry(env, repo, wf, fetchFn = fetch, sleepFn = sle
     await ghDispatch(env, repo, wf, fetchFn, inputs);   // 仍失敗就往外丟
   }
 }
-async function probeSignal(env, sig, date) {
+async function probeSignal(env, sig, date, fetchFn = fetch) {
   // 最便宜探測：data_id=2330、start=end=今日。不掛 cf 快取——要看的是「剛剛落地了沒」
   const u = `${FIN_BASE}?dataset=${sig.dataset}&data_id=2330&start_date=${date}&end_date=${date}&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
-  const r = await fetch(u);
+  const r = await fetchFn(u);
   if (!r.ok) throw new Error(`${sig.dataset} HTTP ${r.status}`);
   const j = await r.json();
   if (j.status !== 200) throw new Error(`${sig.dataset}: ${j.msg}`);
   return signalLanded(sig, j.data || []);
 }
-async function runSentinel(env, tp) {
-  if (!env.GH_DISPATCH_TOKEN || !env.FINMIND_TOKEN) return;   // secret 未設 → 安靜跳過（部署順序安全）
+// ---- secret 缺失告警（2026-09-06，取代原本的「安靜 return」）----
+// 原本 runSentinel／dispatchNews 開頭 secret 未設就安靜 return（部署順序安全），代價是
+// secret 被誤刪／過期時整晚不 dispatch 也無任何訊號，只能靠下游 GH cron 兜底（CLAUDE.md
+// 已知限制第 7 條）。改為走 alertJob（每日每 tag 一則，KV 去重）。但 alertJob → sendAlert
+// 本身也靠 secret（ALERT_WEBHOOK，或 LINE_TOKEN＋LINE_USER_ID）：通道也缺時發不出，
+// 那就只 console.error 並 return（`npx wrangler tail` 至少看得到），且**不呼叫 alertJob**——
+// 避免它在 sendAlert 回 {sent:false} 後仍寫 alerted:<date>:<tag> 去重鍵，把當天唯一一則機會用掉。
+export function alertChannelReady(env) {
+  return !!(env.ALERT_WEBHOOK || (env.LINE_TOKEN && env.LINE_USER_ID));
+}
+export async function alertSecretMissing(env, tp, job, missing, fetchFn = fetch) {
+  const tag = `secret-missing-${job}`;
+  const text = `❌ ${job} 停擺：缺 secret ${missing.join("、")}（wrangler secret put），本班不會 dispatch；下游 GH 兜底 cron 仍會跑`;
+  console.error(`${tag}: ${text}`);
+  if (!alertChannelReady(env)) {
+    console.error(`${tag}: 告警通道（ALERT_WEBHOOK 或 LINE_TOKEN＋LINE_USER_ID）亦未設，無法送出`);
+    return { sent: false, reason: "no-channel" };
+  }
+  return alertJob(env, tp, tag, text, fetchFn);
+}
+// fetchFn 供測試注入（探測、dispatch、告警三處共用同一個 mock）；生產走預設 fetch。
+export async function runSentinel(env, tp, fetchFn = fetch) {
+  const missing = ["GH_DISPATCH_TOKEN", "FINMIND_TOKEN"].filter((k) => !env[k]);
+  if (missing.length) { await alertSecretMissing(env, tp, "sentinel", missing, fetchFn); return; }
   const keys = SENTINEL_SIGNALS.map((s) => sentinelKey(tp.date, s.name));
   const done = await Promise.all(keys.map((k) => env.FLOW_KV.get(k)));
   if (done.every(Boolean)) return;                            // 四訊號都觸發過 → 當晚短路
@@ -886,16 +908,21 @@ async function runSentinel(env, tp) {
     if (done[i]) continue;                                    // 已觸發過的訊號跳過探測（省請求）
     const sig = SENTINEL_SIGNALS[i];
     let landed;
-    try { landed = await probeSignal(env, sig, tp.date); }
+    try { landed = await probeSignal(env, sig, tp.date, fetchFn); }
     catch (e) { console.log(`sentinel probe ${sig.name}:`, e && e.message); continue; }
     if (!landed) continue;                                    // 未落地 → 下輪再探
     try {
-      await ghDispatch(env, sig.repo, sig.wf);
+      await ghDispatch(env, sig.repo, sig.wf, fetchFn);
       await env.FLOW_KV.put(keys[i], "dispatched", { expirationTtl: 172800 });
       console.log(`sentinel: ${sig.name} 落地 → dispatched ${sig.repo}/${sig.wf}`);
     } catch (e) {
-      // dispatch 失敗（token 權限不足等）→ log 後放棄該輪，KV 不記，下輪自動重試
-      console.log(`sentinel dispatch ${sig.name}:`, e && e.message);
+      // dispatch 失敗（token 權限不足等）→ log＋告警後放棄該輪，KV 不記，下輪（5 分後）自動重試。
+      // 告警比照 backupPipelines 的 bk-err-*：每日每 tag 一則（alertJob 內 KV 去重），
+      // 同一晚重試 30+ 次不會洗版（2026-09-06，CLAUDE.md 已知限制第 7 條）
+      const msg = String((e && e.message) || e);
+      console.log(`sentinel dispatch ${sig.name}:`, msg);
+      await alertJob(env, tp, `sentinel-err-${sig.name}`,
+        `❌ 哨兵 ${sig.name} 已落地但 dispatch ${sig.repo}/${sig.wf} 失敗：${msg}（KV 不記、5 分後重試；GH 兜底 cron 仍會跑）`, fetchFn);
     }
   }
 }
@@ -908,7 +935,10 @@ async function runSentinel(env, tp) {
 const NEWS_REPO = "taiwan-stock-news";
 const NEWS_WF = "build-news.yml";
 export async function dispatchNews(env, fetchFn = fetch, sleepFn = sleep) {
-  if (!env.GH_DISPATCH_TOKEN) return false;   // secret 未設 → 安靜跳過（同哨兵）
+  if (!env.GH_DISPATCH_TOKEN) {   // secret 未設 → 告警（每日一則）後跳過（2026-09-06，原為安靜跳過）
+    await alertSecretMissing(env, taipeiParts(), "news", ["GH_DISPATCH_TOKEN"], fetchFn);
+    return false;
+  }
   await ghDispatchWithRetry(env, NEWS_REPO, NEWS_WF, fetchFn, sleepFn);
   console.log(`news: dispatched ${NEWS_REPO}/${NEWS_WF}`);
   return true;

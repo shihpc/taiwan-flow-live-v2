@@ -259,9 +259,15 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    `/live` 回應另帶 header `x-swr: fresh|stale|miss`（與既有 `x-gen` 並列）。
    **`LIVE_TTL` 刻意未動**：先看 `coalesced / rebuilds` 與 `staleHits / freshHits` 比例，再依
    優化計畫批次二 #9 決定 25／30。測試 `node test/swr.mjs`（mock buildLive／cache／時鐘）。
-7. **哨兵 dispatch 失敗只 log、不告警（2026-09-06 分析發現，尚未修）**：
-   `function runSentinel` 內 `ghDispatch` 的 catch 分支只 `console.log`、**未接 `alertJob`**
-   （對照同檔 `backupPipelines`／summary／cards 各班的 catch 都有接 `bk-err-*`／`sum-err-*`
-   等告警）；另 `runSentinel` 開頭 `!env.GH_DISPATCH_TOKEN || !env.FINMIND_TOKEN` 時為**安靜
-   return**，secret 缺失整晚不觸發也無任何訊號，只能靠下游 GH cron 兜底。修法列於同上文件
-   批次二 #11（哨兵 catch 接 `alertJob`＋獨立於 Worker 的低頻 GH cron 看門狗）。
+7. **哨兵 dispatch 失敗與 secret 缺失：已接告警（2026-09-06）；獨立看門狗仍未做**：
+   `export async function runSentinel` 內 `ghDispatch` 的 catch 現已接 `alertJob`（tag
+   `sentinel-err-<signal>`，沿用每日每 tag 一則的 KV 去重；KV 仍不記、5 分後照舊重試）。
+   `runSentinel`／`dispatchNews` 開頭 secret 缺失原為安靜 return，現走
+   `export async function alertSecretMissing`（tag `secret-missing-sentinel`／`secret-missing-news`，
+   每日一則）——但 `alertJob` → `sendAlert` 本身也靠 secret，**告警通道（`ALERT_WEBHOOK`，或
+   `LINE_TOKEN`＋`LINE_USER_ID`）也缺時只 `console.error` 並 return、不呼叫 `alertJob`**
+   （避免白寫去重鍵把當日唯一一則用掉；`export function alertChannelReady` 判定）。
+   `runSentinel` 加了第三參數 `fetchFn`（探測／dispatch／告警共用，供測試注入），生產呼叫不變。
+   測試 `node test/sentinel.mjs` 有 dispatch 401／204、secret 缺失有／無通道四組案例。
+   **仍未做**：獨立於 Worker 的低頻 GH cron 看門狗（Worker 整個掛掉時上述告警一樣發不出，
+   見已知限制第 2 條），列於優化計畫批次二 #11。

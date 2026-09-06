@@ -1,7 +1,8 @@
 // FinMind 哨兵離線單元測試（無需 token、不打網路）
 // 執行：cd worker && node test/sentinel.mjs
 import { taipeiParts, scheduledRole, sentinelKey, signalLanded, ghDispatchRequest,
-  FRAME_CRON, dispatchNews, dispatchMorning }
+  FRAME_CRON, dispatchNews, dispatchMorning, runSentinel, alertSecretMissing, alertChannelReady,
+  alertedKey }
   from "../src/index.js";
 
 let pass = 0, fail = 0;
@@ -203,6 +204,111 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
 
   const skipped = await dispatchMorning({}, flaky, noSleep);
   chk("dispatchMorning 無 token → 跳過不打網路", skipped === false);
+}
+
+// ---- runSentinel：dispatch 失敗接告警／secret 缺失告警（2026-09-06）----
+// mock：KV（Map）＋依 URL 分流的 fetch（FinMind 探測 → 落地；GitHub dispatch → 可控狀態；
+// webhook → 收集告警文字）。console.error 暫時攔下來驗「無通道時至少留下錯誤 log」。
+function mockKV() {
+  const m = new Map();
+  return { m, async get(k) { return m.has(k) ? m.get(k) : null; }, async put(k, v) { m.set(k, v); } };
+}
+function mockNet({ ghStatus = 204, landed = true } = {}) {
+  const calls = { fin: 0, gh: [], hook: [] };
+  const fetchFn = async (url, init) => {
+    const u = String(url);
+    if (u.startsWith("https://api.finmindtrade.com/")) {
+      calls.fin += 1;
+      return { ok: true, status: 200, async json() { return { status: 200, data: landed ? [{ buy: 1, Volume: 5 }] : [] }; } };
+    }
+    if (u.startsWith("https://api.github.com/")) { calls.gh.push(u); return { status: ghStatus, ok: ghStatus < 300 }; }
+    if (u.startsWith("https://hook.example/")) { calls.hook.push(JSON.parse(init.body).content); return { ok: true, status: 200 }; }
+    throw new Error(`unexpected fetch ${u}`);
+  };
+  return { calls, fetchFn };
+}
+const captureErr = () => { const msgs = []; const orig = console.error; console.error = (...a) => msgs.push(a.join(" ")); return { msgs, restore: () => { console.error = orig; } }; };
+const TP = taipeiParts(new Date("2026-07-14T11:00:00Z"));   // 台北 2026-07-14(二) 19:00
+
+{ // alertChannelReady：三種組合
+  chk("channel：webhook 即可", alertChannelReady({ ALERT_WEBHOOK: "https://hook.example/x" }) === true);
+  chk("channel：LINE 需 token＋user", alertChannelReady({ LINE_TOKEN: "t" }) === false
+    && alertChannelReady({ LINE_TOKEN: "t", LINE_USER_ID: "u" }) === true);
+  chk("channel：全缺 → false", alertChannelReady({}) === false);
+}
+
+{ // 落地 + dispatch 401 → alertJob（sentinel-err-inst）、sentinel KV 不記、同晚第二輪不重複告警
+  const kv = mockKV();
+  const { calls, fetchFn } = mockNet({ ghStatus: 401 });
+  const env = { GH_DISPATCH_TOKEN: "T", FINMIND_TOKEN: "F", FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" };
+  await runSentinel(env, TP, fetchFn);
+  chk("dispatch 失敗：四訊號都探測且都嘗試 dispatch", calls.fin === 4 && calls.gh.length === 4, `${calls.fin}/${calls.gh.length}`);
+  chk("dispatch 失敗：sentinel KV 不記", ![...kv.m.keys()].some((k) => k.startsWith("sentinel:")), [...kv.m.keys()].join(","));
+  chk("dispatch 失敗：每訊號一則告警（共 4）", calls.hook.length === 4, String(calls.hook.length));
+  chk("dispatch 失敗：告警文字含訊號名與 HTTP 狀態", calls.hook.some((t) => t.includes("inst") && t.includes("401")), calls.hook[0]);
+  chk("dispatch 失敗：告警走【排程】前綴", calls.hook.every((t) => t.startsWith("【排程】")));
+  chk("dispatch 失敗：KV 記 alerted:<date>:sentinel-err-inst", kv.m.has(alertedKey(TP.date, "sentinel-err-inst")));
+  await runSentinel(env, TP, fetchFn);   // 5 分後下一輪：仍失敗 → 重試 dispatch 但不再重複告警
+  chk("dispatch 失敗：下一輪仍重試 dispatch", calls.gh.length === 8, String(calls.gh.length));
+  chk("dispatch 失敗：同日同 tag 不重複告警", calls.hook.length === 4, String(calls.hook.length));
+}
+
+{ // 落地 + dispatch 204 → KV 記、無告警
+  const kv = mockKV();
+  const { calls, fetchFn } = mockNet({ ghStatus: 204 });
+  const env = { GH_DISPATCH_TOKEN: "T", FINMIND_TOKEN: "F", FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" };
+  await runSentinel(env, TP, fetchFn);
+  chk("dispatch 成功：四訊號 KV 皆記 dispatched", ["inst", "holding", "margin", "daytrade"].every((n) => kv.m.get(sentinelKey(TP.date, n)) === "dispatched"));
+  chk("dispatch 成功：無告警", calls.hook.length === 0);
+  await runSentinel(env, TP, fetchFn);
+  chk("dispatch 成功：四訊號齊 → 當晚短路不再探測", calls.fin === 4 && calls.gh.length === 4);
+}
+
+{ // secret 缺失 + 有通道 → alertJob secret-missing-sentinel（每日一則），不探測、不碰 sentinel KV
+  const kv = mockKV();
+  const { calls, fetchFn } = mockNet();
+  const env = { FINMIND_TOKEN: "F", FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" };   // 缺 GH_DISPATCH_TOKEN
+  const cap = captureErr();
+  await runSentinel(env, TP, fetchFn);
+  await runSentinel(env, TP, fetchFn);
+  cap.restore();
+  chk("secret 缺失：不探測不 dispatch", calls.fin === 0 && calls.gh.length === 0);
+  chk("secret 缺失：告警一則且點名缺的 secret", calls.hook.length === 1 && calls.hook[0].includes("GH_DISPATCH_TOKEN"), calls.hook.join("|"));
+  chk("secret 缺失：KV 記 secret-missing-sentinel 去重鍵", kv.m.has(alertedKey(TP.date, "secret-missing-sentinel")));
+  chk("secret 缺失：console.error 每輪都有", cap.msgs.length >= 2 && cap.msgs[0].includes("secret-missing-sentinel"));
+  const both = mockNet();
+  const cap2 = captureErr();
+  await runSentinel({ FLOW_KV: mockKV(), ALERT_WEBHOOK: "https://hook.example/x" }, TP, both.fetchFn);
+  cap2.restore();
+  chk("secret 兩者皆缺：告警文字列出兩個", both.calls.hook.length === 1 && both.calls.hook[0].includes("GH_DISPATCH_TOKEN") && both.calls.hook[0].includes("FINMIND_TOKEN"));
+}
+
+{ // secret 缺失 + 無通道 → 只 console.error、不打任何網路、不寫 KV（去重鍵不被白白用掉）
+  const kv = mockKV();
+  const { calls, fetchFn } = mockNet();
+  const cap = captureErr();
+  const r = await alertSecretMissing({ FLOW_KV: kv }, TP, "sentinel", ["GH_DISPATCH_TOKEN"], fetchFn);
+  cap.restore();
+  chk("無通道：回 no-channel", r && r.sent === false && r.reason === "no-channel", JSON.stringify(r));
+  chk("無通道：不打網路", calls.hook.length === 0 && calls.gh.length === 0);
+  chk("無通道：不寫 KV", kv.m.size === 0);
+  chk("無通道：console.error 兩則（訊息＋通道亦缺）", cap.msgs.length === 2 && cap.msgs[1].includes("通道"), cap.msgs.join("|"));
+}
+
+{ // dispatchNews 無 token：有通道 → 告警一則；無通道 → 只 console.error；兩者皆回 false、不打 GitHub
+  const kv = mockKV();
+  const { calls, fetchFn } = mockNet();
+  const cap = captureErr();
+  const r1 = await dispatchNews({ FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" }, fetchFn);
+  const r2 = await dispatchNews({ FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" }, fetchFn);
+  cap.restore();
+  chk("news 無 token：回 false、不打 GitHub", r1 === false && r2 === false && calls.gh.length === 0);
+  // alertJob 週末不發：依「現在」的台北星期判定，週末跑測試時 hook 為 0 也正確
+  const wk = taipeiParts().dow;
+  const expectHook = (wk >= 1 && wk <= 5) ? 1 : 0;
+  chk("news 無 token：有通道 → 每日一則 secret-missing-news（週末 0）", calls.hook.length === expectHook
+    && (expectHook === 0 || calls.hook[0].includes("news")), `${calls.hook.length} dow=${wk}`);
+  chk("news 無 token：console.error 留痕", cap.msgs.some((m) => m.includes("secret-missing-news")));
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);
