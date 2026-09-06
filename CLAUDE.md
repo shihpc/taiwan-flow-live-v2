@@ -144,10 +144,11 @@
   缺席、不整卡失敗。`export function fxCardMorningBrief` 以它渲染 `j.quote`。
 - **跨 repo 契約（`daily-brief-card.json` 的 `quote`）**：上游 taiwan-stock-news 的產製規範
   2026-08-30 起收緊為 **≤120 字、至多 3 句、單行純文字**（見該 repo CLAUDE.md「每日晨報產製
-  規範」第 4 條）。**上游目前沒有任何自動守門在檢查字數**——實查該 repo 只有
-  `tests/test_incremental.py`（新聞增量管線）、`build-news.yml`／`test.yml`／`canon.yml`
-  三支 workflow，全無 `quote` 字數檢查，只有規範文字在守。因此**本站的 `FX_QUOTE_MAX`=360
-  是實際生效的唯一防線，不可因「上游已改 120 字」而拿掉**。
+  規範」第 4 條）。**上游守門現況（2026-09-06 更新，隨同批 PR 合併後生效）**：該 repo 已加 `tests/test_daily_brief.py`
+  （驗 quote ≤120 字／≤3 句／單行、正文 ≤5,000 漢字、存檔 7 期、postMessage 契約），且 `test.yml`
+  paths 已納入 `daily-brief-card.json`，產製 session push 後 CI 會跑——但那是**事後告警**
+  （紅了才知道，檔案已在 main 上），不是寫入前的閘門。因此**本站的 `FX_QUOTE_MAX`=360
+  仍是渲染端實際生效的防線，不可因「上游已有測試」而拿掉**。
 - 測試：`node test/morningcards.mjs`（含 `fxSplitQuote` 的分句與截斷案例）。
 
 ## /status 全系統資料健康端點（2026-08-11，新資料規範 schema:1 首例）
