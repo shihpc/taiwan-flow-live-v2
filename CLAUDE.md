@@ -55,7 +55,12 @@
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
   （每月 1 日重生比對班）；無 cron 4 支：`backtest.yml`（離線煙霧＋規格守門）、
   `canon.yml`（守 CLAUDE.md 頂端 CANON 區塊）、`pages.yml`（部署）、
-  `worker-deploy.yml`（動到 `worker/**` 即跑全部測試後 `wrangler deploy`））
+  `worker-deploy.yml`（動到 `worker/**` 即跑全部測試後 `wrangler deploy`））。
+  **14 支全裝 notify-failure（2026-09-06 覆驗）**：`.github/actions/notify-failure/action.yml`
+  與 `claude-harness/templates/notify-failure/action.yml` 逐字相同（`diff` 空），每支 workflow
+  每個 job 的末步都是 `uses: ./.github/actions/notify-failure`＋`if: failure() || cancelled()`
+  ＋`with: pipeline: v2-<name>`，workflow 頂層 `permissions` 皆含 `issues: write`
+  （以 `yaml.safe_load` 逐支掃過確認，非目測）。同日同管線只開一張 issue、重複失敗改留言。
 - **`backtest.yml` 有一個隱含依賴**：它的「規格引用的報告節仍存在且有結論行」步驟會解析
   `docs/line-cards-spec.md` §3.1 表格，**要求恰 6 列 5 欄、末欄為 `backtest/report_sorting.md`
   的一級節代號**（M1/M3/M4/S1/S2/S3）。改該表的欄位順序、欄數或列數會讓 workflow 長紅
