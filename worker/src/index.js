@@ -3763,6 +3763,86 @@ const json = (obj, extra) => new Response(JSON.stringify(obj), {
   headers: { "Content-Type": "application/json; charset=utf-8", ...CORS, ...(extra || {}) },
 });
 
+// ---- /live SWR（stale-while-revalidate）＋ in-flight 去重＋量測（2026-09-06）----
+// 問題（CLAUDE.md「已知限制／坑」第 6 條、優化計畫批次二 #9）：舊版 `rebuild` 每次被呼叫都各自跑一次
+// buildLive，stale 區（FRESH_MS ≤ age < LIVE_STALE_MS）的並發請求各自觸發一次重建、互不合併；且前端
+// `CFG.autoSec:20` > `LIVE_TTL` 15s，單一客戶端每輪都落 stale 區、每輪都觸發背景重建。
+// 修法：isolate 內模組級 `liveRebuildInflight`——同一 isolate 內同時只有一份 buildLive 在跑，
+// 其餘請求（stale 背景刷新或 cache miss 同步重建）共用同一個 promise（計入 coalesced）；
+// 重建成功或失敗都清空，失敗後下一個請求可立即重試。promise 解析為 {live, gen} 純物件而非
+// Response——Response body 只能讀一次，多個等待者各自 json() 一份才安全。
+// 量測（不寫 KV）：`liveStats` 為 **isolate 級**計數——isolate 重啟即歸零、多 isolate 各自一份，
+// 只能看趨勢、不能當精確總量——由 `/livediag` 的 `swr` 欄位吐出；`/live` 回應另帶
+// `x-swr: fresh|stale|miss`（與既有 `x-gen` 並列）。
+// **TTL（`LIVE_TTL`）刻意不動**：先量 rebuilds／coalesced／staleHits 比例，再決定 25／30。
+export const LIVE_STALE_MS = 120 * 1000;
+let liveRebuildInflight = null;
+const liveStats = { rebuilds: 0, rebuildFails: 0, staleHits: 0, freshHits: 0, misses: 0, coalesced: 0,
+  lastRebuildMs: null, lastGen: null };
+export function liveSwrStats() {
+  return { ...liveStats, inflight: !!liveRebuildInflight,
+    note: "isolate 級計數：isolate 重啟歸零、多 isolate 各自獨立，只能看趨勢" };
+}
+// 測試用：重置 isolate 級狀態（生產程式不呼叫）
+export function _resetLiveSwr() {
+  liveRebuildInflight = null;
+  for (const k of Object.keys(liveStats)) liveStats[k] = (k === "lastRebuildMs" || k === "lastGen") ? null : 0;
+}
+const liveResponse = (live, gen, swr) => json(live, { "Cache-Control": "public, max-age=120",
+  "x-gen": String(gen), ...(swr ? { "x-swr": swr } : {}) });
+// cache.match 回來的 Response headers 不可改，另建一份加 x-swr（body stream 只轉手一次）
+const withSwrHeader = (resp, swr) => {
+  const h = new Headers(resp.headers); h.set("x-swr", swr);
+  return new Response(resp.body, { status: resp.status, headers: h });
+};
+function liveRebuild(env, cache, cacheKey, deps) {
+  if (liveRebuildInflight) { liveStats.coalesced += 1; return liveRebuildInflight; }
+  const now = deps.now || Date.now;
+  const build = deps.buildLive || buildLive;
+  const t0 = now();
+  liveStats.rebuilds += 1;
+  liveRebuildInflight = (async () => {
+    try {
+      const live = await build(env);
+      const gen = now();
+      await cache.put(cacheKey, liveResponse(live, gen));   // 快取那份不帶 x-swr，回應時再依路徑標
+      liveStats.lastRebuildMs = now() - t0;
+      liveStats.lastGen = gen;
+      return { live, gen };
+    } catch (e) {
+      liveStats.rebuildFails += 1;
+      throw e;
+    } finally {
+      liveRebuildInflight = null;   // 成功／失敗都清空 → 下一個請求可重試
+    }
+  })();
+  return liveRebuildInflight;
+}
+// deps 供測試注入：{ buildLive, cache, now }；生產走預設（buildLive／caches.default／Date.now）
+export async function serveLive(env, ctx, url, deps = {}) {
+  const FRESH_MS = Number(env.LIVE_TTL || 15) * 1000;
+  const now = deps.now || Date.now;
+  const cache = deps.cache || caches.default;
+  const cacheKey = new Request(new URL("/live", url.origin).toString());
+  const hit = await cache.match(cacheKey);
+  if (hit) {
+    const age = now() - Number(hit.headers.get("x-gen") || 0);
+    if (age < FRESH_MS) { liveStats.freshHits += 1; return withSwrHeader(hit, "fresh"); }
+    if (age < LIVE_STALE_MS) {
+      liveStats.staleHits += 1;
+      ctx.waitUntil(liveRebuild(env, cache, cacheKey, deps).catch(() => {}));   // 背景刷新，失敗下次再試
+      return withSwrHeader(hit, "stale");
+    }
+  }
+  liveStats.misses += 1;
+  try {
+    const { live, gen } = await liveRebuild(env, cache, cacheKey, deps);
+    return liveResponse(live, gen, "miss");
+  } catch (e) {
+    return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store", "x-swr": "miss" });
+  }
+}
+
 export default {
   // Cron 三個時段共用同一個 handler（見 wrangler.toml [triggers]）：
   //   盤中每分鐘 → 存分鐘 frame；傍晚哨兵窗口 → FinMind 落地探測（每 5 分一輪）；
@@ -4034,9 +4114,10 @@ export default {
           fetchJSON(`${env.DATA_BASE}/classify.json`, 86400),
           finSnapshot(token),
         ]);
-        return json(tsDiag(classifyJson.map, rows), { "Cache-Control": "no-store" });
+        // swr：/live SWR in-flight 去重的 isolate 級計數（見 serveLive 上方註解）
+        return json({ ...tsDiag(classifyJson.map, rows), swr: liveSwrStats() }, { "Cache-Control": "no-store" });
       } catch (e) {
-        return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
+        return json({ error: String(e && e.message || e), swr: liveSwrStats() }, { "Cache-Control": "no-store" });
       }
     }
     if (url.pathname !== "/live") {
@@ -4059,29 +4140,7 @@ export default {
     }
     // stale-while-revalidate：新鮮(≤LIVE_TTL秒)直接回；過期但未太舊(≤STALE秒)先回舊資料、
     // 背景重建下一份（使用者永遠毫秒級回應，不用同步等 FinMind）；太舊才同步重建。
-    const FRESH_MS = Number(env.LIVE_TTL || 15) * 1000;
-    const STALE_MS = 120 * 1000;
-    const cache = caches.default;
-    const cacheKey = new Request(new URL("/live", url.origin).toString());
-    const rebuild = async () => {
-      const live = await buildLive(env);
-      const resp = json(live, { "Cache-Control": "public, max-age=120", "x-gen": String(Date.now()) });
-      await cache.put(cacheKey, resp.clone());
-      return resp;
-    };
-    const hit = await cache.match(cacheKey);
-    if (hit) {
-      const age = Date.now() - Number(hit.headers.get("x-gen") || 0);
-      if (age < FRESH_MS) return hit;
-      if (age < STALE_MS) {
-        ctx.waitUntil(rebuild().catch(() => {}));   // 背景刷新，失敗下次再試
-        return hit;
-      }
-    }
-    try {
-      return await rebuild();
-    } catch (e) {
-      return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
-    }
+    // 2026-09-06 抽成 serveLive（加 in-flight 去重＋量測，見其上方註解；行為與 TTL 不變）。
+    return serveLive(env, ctx, url);
   },
 };

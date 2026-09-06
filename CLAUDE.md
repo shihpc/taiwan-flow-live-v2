@@ -246,14 +246,19 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
      只讓「顯示時間」降級，全站不再停在「載入中」——原本的硬阻斷已解除。
    **動 `aggregate` 的 `ts` 前先讀** `PROJECT_SUMMARY.md`「/live 資料時間改取 max(date)」段的
    「量測管道已建好：`/livediag`」條——那裡有**要觀察什麼／觀察到什麼才能決定 (甲)(乙) 改法**的表格。
-6. **`/live` 的 stale-while-revalidate 重建無 in-flight 去重（2026-09-06 分析發現，尚未修）**：
-   `worker/src/index.js` 內 `const FRESH_MS` 附近的 `const rebuild` 每次被呼叫都各自跑一次
-   `buildLive`，多個落在 stale 區（`FRESH_MS` < age < `STALE_MS`）的並發請求會**各自觸發一次重建**、
-   互不合併；且前端 `index.html` 的 `CFG.autoSec:20` 大於 `worker/wrangler.toml` 的
-   `LIVE_TTL = "15"`，**單一客戶端每次輪詢都必落 stale 區、每次都觸發背景重建**——快取實際上
-   只擋得住 15 秒內的第二個客戶端。修法（先量測 rebuild 次數／上游成敗／快照年齡／併發 →
-   加 in-flight 去重 → 再以資料選 TTL 25／30）列於 claude-harness
-   `docs/site-optimization-plan-20260906.md` 批次二 #9，動手前先讀。
+6. **`/live` 的 stale-while-revalidate：去重已做（2026-09-06），TTL 待量測後定**：
+   原問題——`rebuild` 每次被呼叫都各自跑一次 `buildLive`，stale 區（`FRESH_MS` ≤ age <
+   `LIVE_STALE_MS`）的並發請求各自觸發一次重建、互不合併；且前端 `index.html` 的
+   `CFG.autoSec:20` 大於 `worker/wrangler.toml` 的 `LIVE_TTL = "15"`，單一客戶端每輪都落
+   stale 區。**已修**：`/live` 路由抽成 `export async function serveLive`（`worker/src/index.js`，
+   grep `function serveLive`），isolate 內模組級 `liveRebuildInflight` 讓 stale 背景刷新與
+   cache-miss 同步重建共用同一份 in-flight promise（成功／失敗都清空，失敗後下一請求可重試）。
+   **量測（不寫 KV）**：`GET /livediag` 回應新增 `swr` 欄位＝`export function liveSwrStats`
+   吐出的 **isolate 級**計數 `{rebuilds, rebuildFails, staleHits, freshHits, misses, coalesced,
+   lastRebuildMs, lastGen, inflight}`（isolate 重啟歸零、多 isolate 各自一份，只能看趨勢）；
+   `/live` 回應另帶 header `x-swr: fresh|stale|miss`（與既有 `x-gen` 並列）。
+   **`LIVE_TTL` 刻意未動**：先看 `coalesced / rebuilds` 與 `staleHits / freshHits` 比例，再依
+   優化計畫批次二 #9 決定 25／30。測試 `node test/swr.mjs`（mock buildLive／cache／時鐘）。
 7. **哨兵 dispatch 失敗只 log、不告警（2026-09-06 分析發現，尚未修）**：
    `function runSentinel` 內 `ghDispatch` 的 catch 分支只 `console.log`、**未接 `alertJob`**
    （對照同檔 `backupPipelines`／summary／cards 各班的 catch 都有接 `bk-err-*`／`sum-err-*`
