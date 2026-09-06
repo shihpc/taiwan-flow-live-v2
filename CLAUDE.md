@@ -41,7 +41,7 @@
 **`PROJECT_SUMMARY.md`（50KB）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
 前端有兩組跨站同步碼：**三站逐字同步**的 `callClaude`／`mdToHtml`／`linkifyStocks`／
 `ghSaveAnalysis`／`sumCtx*` 與費用估算 `insightCostText`／`INSIGHT_PRICES`／`USD_TWD`
-（`index.html:727-746`）；**四站同步但非逐字**的 `loadSiteVer()`＋footer `#siteVer`
+（`index.html:727-749`）；**四站同步但非逐字**的 `loadSiteVer()`＋footer `#siteVer`
 （`index.html:172`、`:2539`，本站 sessionStorage key `tf2_site_ver`，打
 `api.github.com/repos/shihpc/taiwan-flow-live-v2/commits/main`，免金鑰、限 60 req/hr/IP，
 失敗靜默隱藏）。清單正本在 `postmkt/CLAUDE.md`「不可破壞的約定」第 2 條。
@@ -170,10 +170,12 @@
 由「`category=='domestic'` 且 `type=='twse'` 且 A 結尾」改為「**A 結尾且 `category != 'foreign'`**」
 ——上櫃台股型（00411A／00998A）在 FinMind Info 的 `category` 是空字串，舊條件會漏。規則式動態
 取檔、不寫死檔數（`FALLBACK_ETFS` 是當日符合條件的 24 檔快照，僅 Info 失敗時備援）。
-**副作用**：上櫃檔在 TWSE ETFortune 無頁面 → `grab_twse_aum`（`:107`）回 `None` →
-`twse_aum_yi` 恆 `null`，postmkt 前端規模欄顯「—」（既有降級路徑，**無替代 AUM 來源**）。
-非台股型若混入，`grab_holding` 因無台股持股會落 `errors` 自動排除（今日快照即 20 檔落地＋4 檔在
-`errors`）。**這是 postmkt 的上游，改口徑＝跨站變更。**
+**副作用（未直接觀測，依 commit `5d046c0` 記載）**：上櫃檔在 TWSE ETFortune 無頁面 →
+`grab_twse_aum`（`:107`）回 `None` → `twse_aum_yi` 為 `null`，postmkt 前端規模欄顯「—」
+（既有降級路徑，**無替代 AUM 來源**）。**2026-09-06 覆驗時無樣本可驗**——當時快照
+（`generated_at` 2026-09-05T01:36）20 檔落地的 `twse_aum_yi` 全非 null，兩檔上櫃
+`00411A`／`00998A` 都卡在更前面的 `grab_holding`、落在 `errors`，根本沒走到 AUM 那一步。
+非台股型若混入，`grab_holding` 因無台股持股會落 `errors` 自動排除。**這是 postmkt 的上游，改口徑＝跨站變更。**
 
 **日期／時戳欄位語意一律查 `postmkt/docs/date-semantics.md`**（跨五站的唯一對照表）。
 其中 Worker `/live` 的 **`ts` 不是「資料時間」也不是產出時刻**，而是「全體有分類個股中最後一筆
