@@ -39,14 +39,27 @@
 資金湧入／資金退出＋摘要分析（`index.html` 的 `<div class="tabs" id="tabs">` 區塊，
 一個 tab 一個 `data-tab` 值）。
 **`PROJECT_SUMMARY.md`（50KB）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
+前端有兩組跨站同步碼：**三站逐字同步**的 `callClaude`／`mdToHtml`／`linkifyStocks`／
+`ghSaveAnalysis`／`sumCtx*` 與費用估算 `insightCostText`／`INSIGHT_PRICES`／`USD_TWD`
+（`index.html:727-746`）；**四站同步但非逐字**的 `loadSiteVer()`＋footer `#siteVer`
+（`index.html:172`、`:2539`，本站 sessionStorage key `tf2_site_ver`，打
+`api.github.com/repos/shihpc/taiwan-flow-live-v2/commits/main`，免金鑰、限 60 req/hr/IP，
+失敗靜默隱藏）。清單正本在 `postmkt/CLAUDE.md`「不可破壞的約定」第 2 條。
 
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 20 支 `.mjs`）；
-  `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`（12 支＝9 支排程
-  builder（多為 Worker 主觸發的兜底備援）＋`canon.yml` 守 CLAUDE.md 頂端的 CANON 區塊
-  ＋`pages.yml` 部署＋`backtest.yml`，後三支無 cron）
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 21 支 `.mjs`）；
+  `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
+  （**14 支**＝帶 cron 10 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
+  lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
+  （每月 1 日重生比對班）；無 cron 4 支：`backtest.yml`（離線煙霧＋規格守門）、
+  `canon.yml`（守 CLAUDE.md 頂端 CANON 區塊）、`pages.yml`（部署）、
+  `worker-deploy.yml`（動到 `worker/**` 即跑全部測試後 `wrangler deploy`））
+- **`backtest.yml` 有一個隱含依賴**：它的「規格引用的報告節仍存在且有結論行」步驟會解析
+  `docs/line-cards-spec.md` §3.1 表格，**要求恰 6 列 5 欄、末欄為 `backtest/report_sorting.md`
+  的一級節代號**（M1/M3/M4/S1/S2/S3）。改該表的欄位順序、欄數或列數會讓 workflow 長紅
+  （前例：run #17 與 run #28）。規格前言已同步補記（commit `eb693d7`）。
 
 ## Worker 哨兵（跨 repo 觸發中樞，改動前必讀）
 
@@ -124,7 +137,18 @@
   （2026-08-13 起 per-card gate）＝us.json 的 date 達最近預期美股交易日，不再被
   morning generated_at 連坐（美國國定假日該卡當天缺席，屬可接受行為）。
   全不新鮮 → 空卡＋date=null → Python 拒渲染。
-- 測試：`node test/morningcards.mjs`。
+- **晨報卡的分句／截斷層**（2026-08-29 後補，起因：當日 `quote` 實際 673 字糊成一整塊）：
+  `export function fxSplitQuote` 依全形句讀（。；！？）切句成段（前後兩句皆 ≤ `FX_QUOTE_SHORT`
+  才併同段避免過碎）；總長超過 `export const FX_QUOTE_MAX`（360 字）即**截到最近句尾**並在
+  末段補「（全文見網頁版晨報）」，連第一句就超標則硬截加「…」。非字串／空值回空陣列＝該段
+  缺席、不整卡失敗。`export function fxCardMorningBrief` 以它渲染 `j.quote`。
+- **跨 repo 契約（`daily-brief-card.json` 的 `quote`）**：上游 taiwan-stock-news 的產製規範
+  2026-08-30 起收緊為 **≤120 字、至多 3 句、單行純文字**（見該 repo CLAUDE.md「每日晨報產製
+  規範」第 4 條）。**上游目前沒有任何自動守門在檢查字數**——實查該 repo 只有
+  `tests/test_incremental.py`（新聞增量管線）、`build-news.yml`／`test.yml`／`canon.yml`
+  三支 workflow，全無 `quote` 字數檢查，只有規範文字在守。因此**本站的 `FX_QUOTE_MAX`=360
+  是實際生效的唯一防線，不可因「上游已改 120 字」而拿掉**。
+- 測試：`node test/morningcards.mjs`（含 `fxSplitQuote` 的分句與截斷案例）。
 
 ## /status 全系統資料健康端點（2026-08-11，新資料規範 schema:1 首例）
 
@@ -141,6 +165,15 @@
 `taiwan-stock-news` 讀 `data/morning.json`；`postmkt` 讀 `data/aetf/latest.json`（含
 `stocks[code][3]` 市值欄）。**改輸出格式屬跨站變更**
 （見 `PROJECT_SUMMARY.md`「五、目前待辦與已知限制」）。
+
+**aetf 入池口徑 2026-08-29 放寬**（`src/build_aetf.py:54` `list_active_etfs`，commit `5d046c0`）：
+由「`category=='domestic'` 且 `type=='twse'` 且 A 結尾」改為「**A 結尾且 `category != 'foreign'`**」
+——上櫃台股型（00411A／00998A）在 FinMind Info 的 `category` 是空字串，舊條件會漏。規則式動態
+取檔、不寫死檔數（`FALLBACK_ETFS` 是當日符合條件的 24 檔快照，僅 Info 失敗時備援）。
+**副作用**：上櫃檔在 TWSE ETFortune 無頁面 → `grab_twse_aum`（`:107`）回 `None` →
+`twse_aum_yi` 恆 `null`，postmkt 前端規模欄顯「—」（既有降級路徑，**無替代 AUM 來源**）。
+非台股型若混入，`grab_holding` 因無台股持股會落 `errors` 自動排除（今日快照即 20 檔落地＋4 檔在
+`errors`）。**這是 postmkt 的上游，改口徑＝跨站變更。**
 
 **日期／時戳欄位語意一律查 `postmkt/docs/date-semantics.md`**（跨五站的唯一對照表）。
 其中 Worker `/live` 的 **`ts` 不是「資料時間」也不是產出時刻**，而是「全體有分類個股中最後一筆
