@@ -723,10 +723,15 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
   21:03→mktbal 21:11→pm summary 21:25），aetf2 21:45 無條件二段 success。
   **待改進（非阻斷）**：① GH cron 兜底 schedule run 仍延遲約 1.5-2.5h（daysummary 17:12／aetf
   23:52／baseline 23:17／pm summary 午夜）——正好印證翻轉必要性，功能無礙（Worker 已準點主發）；
-  ② daysummary／aetf／intraday 三單體班**無「已產出守門」**，延遲的 GH 兜底 run 會冪等重跑並把產物
+  ② ~~daysummary／aetf／intraday 三單體班**無「已產出守門」**，延遲的 GH 兜底 run 會冪等重跑並把產物
   `generated_at` 覆寫成較晚時點（如 daysummary 17:12）；因 generated_at 每跑必變→必有 diff→必
-  commit，架構原設「無 diff 不 commit 空跑」不成立，會產生多餘 commit＋產物時間戳失真。建議比照
-  summary 加「今日產物已存在即秒退」守門，或產物時間戳改用資料日而非 wall-clock。③ 待眼：diag
+  commit，架構原設「無 diff 不 commit 空跑」不成立，會產生多餘 commit＋產物時間戳失真。~~
+  **已做（2026-09-06）**：`tools/noop_guard.py`（純標準函式庫）在 commit 步驟比對 staged 與 HEAD 的
+  `data/**/*.json`，只忽略**頂層** `generated_at`／`built_at`，全同即 exit 3 → workflow `git reset`
+  略過 commit；非 JSON／新增／刪除／解析失敗一律算真變化，守門自身出錯 fail-open 照常 commit。
+  裝在 daysummary／aetf／intraday 三班＋同型的 lastweek／morning／meta（us.yml 原有自家 strip
+  generated_at 邏輯、baseline.yml 產物無 generated_at、cards.yml 為 PNG，三者未動）。
+  測試 `python tests/test_noop_guard.py`（純函式＋臨時 git repo 端到端）。③ 待眼：diag
   dispatch（21:00）略早於 postmkt build（21:05 起/21:07 落），需下個交易日確認 chainStep
   dep=postmkt.json 今日守門確實生效、diag 未吃到前日資料（首日成功落地暫判無礙）。
 - **intraday 歸檔修復＋搶救（2026-07-22，commit `d85e49f`）**：archive_intraday.py 補格邏輯

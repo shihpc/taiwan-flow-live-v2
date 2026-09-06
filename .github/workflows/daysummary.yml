@@ -49,6 +49,12 @@ jobs:
           if [ ! -d data/daysummary ]; then echo "no data/daysummary（優雅退出）"; exit 0; fi
           git add data/daysummary/
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          # noop 守門（2026-09-06）：GH 兜底 cron 延遲後冪等重跑，內容全同、只有頂層 generated_at
+          # 被覆寫也會有 diff → 多餘 commit＋時間戳失真。只有時間戳變動就放棄本次 commit
+          # （exit 3）；守門自身出錯 fail-open 回 0 照常 commit。詳見 tools/noop_guard.py 檔頭。
+          rc=0; python tools/noop_guard.py || rc=$?
+          if [ "$rc" = "3" ]; then echo "只有時間戳變動（noop）→ 略過 commit"; git reset -q; exit 0
+          elif [ "$rc" != "0" ]; then exit "$rc"; fi
           git commit -m "daysummary $(date -u +%FT%TZ)"
           pushed=0
           for i in 1 2 3 4 5; do
