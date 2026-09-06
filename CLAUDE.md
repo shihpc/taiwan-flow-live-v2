@@ -190,6 +190,35 @@
 同 payload 的 `generated_at` 才是我方產出時刻（`toISOString()`＝**UTC `Z`**，非台北）。
 改 `ts` 語意＝改 `/live` 回傳值，屬待裁決的 C 案（見 `PROJECT_SUMMARY.md` 該條目），勿逕自動手。
 
+## CSP 與注入面（2026-09-06）
+
+`index.html:13` 的 `<meta http-equiv="Content-Security-Policy">`（比照 `postmkt/index.html:10`，另加 `form-action 'none'`）。
+同批把 `:6-8` 原三行 `<meta http-equiv="Cache-Control|Pragma|Expires">` 移除（現代瀏覽器以 HTTP 標頭為準、忽略此類
+meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE`（grep 唯一命中）決定：`/live` 仍 `no-store` 但**不再帶
+`?t=` buster**（Worker cf cache 以 URL 為 key，帶 buster 每次都新 key、cf 快取永遠不命中）；`data/*.json`（classify／rrg_base）
+改 `no-cache` 條件請求（本機 http.server 實測 reload 後 304）；`/replay?t=HH:MM` 的 `?t=` 是回放時點參數不是 buster，維持 `no-store`。
+回退＝把 `FETCH_CACHE` 兩值改回 `"no-store"`。**新增資料源時 `connect-src` 要同步加**，否則 fetch 被靜默擋下
+（console 出現 `Refused to connect`）。盤點（2026-09-06 grep 實查，行號為當時）：
+
+| 面向 | 現況 | CSP 對應 |
+|------|------|---------|
+| 內嵌 script | 只有 1 個 `<script>` 區塊（`index.html:179` 起） | `script-src 'self' 'unsafe-inline'`（不為 CSP 重構、不搬外部檔） |
+| 內嵌事件屬性 | **零**（`on*=` 屬性 grep 無命中；事件全走 `addEventListener`／`el.onclick=` 指派） | — |
+| 外連 script／`<link>`／`<img>`／`<iframe>`／`<object>`／`<form>`／`<base>`／`@import`／`url()`／`javascript:`／`eval`／`document.write` | 皆無 | `img-src 'self' data:`（預留）、`object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、不需 `'unsafe-eval'` |
+| `style=` 屬性 | 52 處（表格內距、連結色等） | `style-src 'self' 'unsafe-inline'` |
+| fetch 目標 origin | 同源 `data/classify.json`／`data/rrg_base.json`／`data/live.json`（無 Worker 時）；`taiwan-flow-v2.shihpc.workers.dev`（`/live`、`/replay`）；`api.anthropic.com`（`callClaude`）；`raw.githubusercontent.com`（postmkt analyses 雲端歷史 `CLOUD_RAW`）；`api.github.com`（`ghSaveAnalysis` 寫 postmkt＋`loadSiteVer`） | `connect-src` 白名單恰為此 4 個外部 origin＋`'self'` |
+| 純導覽外連 | Yahoo（`yahoo()`／摘要 `link`）、`shihpc.github.io/postmkt/`；皆 `target="_blank" rel="noopener"` | 不受 CSP 限制（無 `navigate-to`） |
+| localStorage | `anthropic_key`／`gh_token`／`insight_model`／`tflive2_auto`（金鑰只送 Authorization header，不進 DOM） | — |
+
+**`innerHTML` 拼字串（grep 14 行）**：股名／產業名／次產業名來自自家 `classify.json` 與 Worker `/live`（信任邊界＝自家管線產出），
+數值欄走 `toFixed`／`Math.round`；含使用者可影響或第三方字串的路徑（回放錯誤訊息 `OV_REPLAY_ERR`、定格資料日、雲端歷史 meta）
+用 `escI()`（43 處）。LLM 輸出走三站同步的 `mdToHtml`（`esc2` 逃 `&<>`）＋`linkifyStocks`（href 只由 regex 命中的代號組成）。
+**未做逐處稽核**（2026-09-06 只做盤點）：若日後改讀第三方 JSON 進 innerHTML，要補 `escI()`。
+
+驗證（2026-09-06 實測，Playwright 本機 http.server＋`/live` route mock 凍結檔 `data/live.json`）：7 tab console 無 `Refused to`、
+pageerror 零；反向 `fetch("https://example.com/")` 被擋（`Failed to fetch`＋1 則 `Refused to connect`）；**304 要在無 `page.route` 的
+context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 route 時 reload 永遠 200。
+
 ## 驗證方式
 
 ```bash

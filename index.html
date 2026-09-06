@@ -3,9 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta http-equiv="Pragma" content="no-cache">
-<meta http-equiv="Expires" content="0">
+<!-- 2026-09-06 移除原本三行 <meta http-equiv="Cache-Control|Pragma|Expires">：
+     它們只影響極舊瀏覽器，現代瀏覽器以 HTTP 回應標頭為準、忽略這種 meta；本頁的快取策略
+     改由各 fetch 的 cache 選項決定（見 FETCH_CACHE 常數）。
+     CSP（比照 postmkt index.html:10）：注入面盤點見 CLAUDE.md「CSP 與注入面（2026-09-06）」節。
+     script/style 需 'unsafe-inline'（單一內嵌 <script>＋大量 style 屬性，無外部腳本）；
+     connect-src 白名單＝Worker／Anthropic／raw（雲端歷史）／api.github.com（存分析＋版本列）。
+     新增資料源時要同步加進 connect-src，否則 fetch 會被靜默擋下（console 有 Refused to）。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'self' https://taiwan-flow-v2.shihpc.workers.dev https://api.anthropic.com https://raw.githubusercontent.com https://api.github.com">
 <title>即時資金流向</title>
 <style>
 :root{--bg:#0a0e14;--panel:#0f1620;--panel2:#141d29;--line:#1e2a38;--fg:#e6edf3;--dim:#8b98a8;
@@ -179,10 +184,18 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
 // 留空時退化成讀靜態 data/live.json（只顯示最後一次快照，無即時）。
 const CFG={worker:"https://taiwan-flow-v2.shihpc.workers.dev", autoSec:20};   // autoSec：自動刷新間隔（秒）
 const isLocal=["localhost","127.0.0.1"].includes(location.hostname);
+// 前端快取策略（2026-09-06）。回退開關：把兩個值都改回 "no-store" 即為舊行為（全部 no-store＋?t= buster）。
+//   live ＝ /live：仍 no-store（即時性），但**不再帶 ?t=**——Worker 端 cf cache（LIVE_TTL＋SWR）
+//          以 URL 為 key，帶 buster 每次都是新 key、cf 快取永遠不命中，等於前端自己打穿 Worker 快取。
+//          瀏覽器端 no-store 照舊不存，故即時性不變。
+//   data ＝ data/*.json（classify.json 月更 585KB、rrg_base.json 日更）：改 "no-cache"＝條件請求
+//          （If-None-Match／If-Modified-Since，GitHub Pages 有 ETag），未變回 304 不重傳本體。
+//   replay＝Worker /replay?t=HH:MM（?t= 是回放時點參數、不是 buster）：維持 no-store 不動。
+const FETCH_CACHE={live:"no-store", data:"no-cache", replay:"no-store"};
 // 即時資料來源：有 Worker 走 Worker；本機開發走 /api/refresh（server.py 即時重算）；否則靜態檔
-const liveURL=()=> CFG.worker ? CFG.worker+"/live?t="+Date.now()
+const liveURL=()=> CFG.worker ? CFG.worker+"/live"
                 : isLocal ? "/api/refresh"
-                : "data/live.json?t="+Date.now();
+                : "data/live.json";
 
 // 摘要分析可選模型（與 postmkt/news 三站共用 localStorage key：insight_model / anthropic_key）
 const INSIGHT_MODELS=[["claude-opus-4-8","Opus 4.8（最佳判讀，約NT$3/次）"],["claude-sonnet-5","Sonnet 5（近Opus、約半價更快）"]];
@@ -1384,7 +1397,7 @@ function ovRrgEnsure(times){
   // 不帶 date：Worker 明訂「date 僅供驗證/測試，正式前端不帶＝台北今日」（worker/src/index.js 的 replayFrame()）。
   // 週末／假日因此必然取不到 frame → 落到下方降級文案，這正是規格 §6 要的行為
   // （帶 date 會畫出上一交易日軌跡，使用者易誤認為即時盤面）。
-  Promise.all(need.map(hm=>loadJSON(CFG.worker+"/replay?t="+encodeURIComponent(hm))
+  Promise.all(need.map(hm=>loadJSON(CFG.worker+"/replay?t="+encodeURIComponent(hm),FETCH_CACHE.replay)
       .then(j=>({hm,j})).catch(()=>({hm,j:null}))))
     .then(res=>{
       if(seq!==OV_RRG.seq)return;
@@ -2296,7 +2309,7 @@ async function ovReplayGo(hm){
   if(!CFG.worker){OV_REPLAY_ERR="未設定 Worker，無法回放";renderOverview(true);return;}
   const seq=++OV_REPLAY_SEQ;   // 防競態：拖動連發時只認最後一發
   try{
-    const j=await loadJSON(CFG.worker+"/replay?t="+encodeURIComponent(hm));
+    const j=await loadJSON(CFG.worker+"/replay?t="+encodeURIComponent(hm),FETCH_CACHE.replay);
     if(seq!==OV_REPLAY_SEQ)return;
     if(!j||!j.stocks){
       OV_REPLAY_ERR="今日無盤中資料"+(j&&j.error?`（${j.error}）`:"（週末/假日或該時段無快照）");
@@ -2345,7 +2358,7 @@ function ovDaySeries(){
     // 用 /live 的交易日（週末=上一交易日，與總結卡標題/定格資料同口徑），非真實今日
     const d=(state.live.ts||"").slice(0,10);
     const q=/^\d{4}-\d{2}-\d{2}$/.test(d)?"?date="+d:"";
-    loadJSON(CFG.worker+"/replay"+q).then(j=>{
+    loadJSON(CFG.worker+"/replay"+q,FETCH_CACHE.replay).then(j=>{
       if(j&&j.series&&j.series.length){
         OV_DAY.series=j.series;
         // 回放中滑桿常持有焦點（renderOverview 輸入保護會跳過重繪）→ 該情境放行 force，
@@ -2475,7 +2488,8 @@ document.addEventListener("click",e=>{const b=e.target.closest("[data-idx]");if(
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{state.tab=t.dataset.tab;state.pool=null;render();});
 
 // ---- data load / refresh ----
-async function loadJSON(u){return (await fetch(u,{cache:"no-store"})).json();}
+// mode 預設 FETCH_CACHE.data（data/*.json 條件請求）；/live、/replay 由呼叫端明示（見 FETCH_CACHE 註解）
+async function loadJSON(u,mode){return (await fetch(u,{cache:mode||FETCH_CACHE.data})).json();}
 async function boot(){
   try{state.cl=(await loadJSON("data/classify.json")).map;}catch(e){document.getElementById("main").innerHTML='<div class="loading">無法載入 classify.json：'+e+'</div>';return;}
   ovRrgBaseLoad();   // 輪動雷達基準表（data/rrg_base.json）：不 await，缺檔只影響該視角
@@ -2506,7 +2520,7 @@ async function pull(manual){
   const btn=document.getElementById("refresh");let old;
   if(manual){old=btn.textContent;btn.textContent="⏳…";btn.disabled=true;}
   try{
-    const j=await loadJSON(liveURL());
+    const j=await loadJSON(liveURL(),FETCH_CACHE.live);
     // 第五期：回放中暫停自動重繪（state.live 照更新，「回到即時」立即接上最新盤面）
     if(liveUsable(j)){state.live=j;if(!(OV_REPLAY&&state.tab==="ov"))render();}
   }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
