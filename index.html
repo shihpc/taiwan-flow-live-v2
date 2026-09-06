@@ -26,6 +26,9 @@ header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px so
 .btn:active{background:#1c2836}
 .btn.on{background:#1c3146;border-color:var(--accent)}
 .tsline{font-size:11px;color:var(--dim);margin-top:3px}
+/* 頂列：資料日｜本站更新｜狀態（四子站統一標示；判準見 liveStatus() 註解） */
+.tsline b{color:var(--fg);font-weight:600}.tsline .tb-sep{color:var(--line);margin:0 3px}
+.tsline .tb-ok{color:#2fbf71}.tsline .tb-lag{color:#e0b341}.tsline .tb-mut{color:var(--dim)}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:8px 0}
 .mkrow{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline}
 .mkrow b{font-size:17px}
@@ -161,7 +164,8 @@ footer{color:var(--muted);font-size:11px;text-align:center;padding:14px}
     <button class="btn" id="auto">⏱ 自動</button>
     <button class="btn" id="refresh">🔄 更新</button>
   </div>
-  <div class="tsline" id="tsline">載入中…</div>
+  <!-- 頂列（2026-09-06 批次二 #6）：資料日｜本站更新｜狀態，由 renderTopline() 填；取值依據見該函式上方註解 -->
+  <div class="tsline" id="tsline">資料日 <b>—</b><span class="tb-sep">｜</span>本站更新 <b>—</b><span class="tb-sep">｜</span>狀態 <b class="tb-mut">載入中</b></div>
   <div class="tabs" id="tabs">
     <div class="tab active" data-tab="ov">即時一覽</div>
     <div class="tab" data-tab="exchange">產業別</div>
@@ -266,21 +270,69 @@ function renderMarket(){
     `<div class="mkrow">${idxLine("加權",ix.tse,m.tse,"tse")}</div>`+
     `<div class="mkrow">${idxLine("櫃買",ix.otc,m.otc,"otc")}</div>`+
     futuresVixLine();
-  const src=CFG.worker?" · 即時(Worker)":isLocal?"":" · 靜態快照";
-  // 產生時間距今 >3 分鐘 → 標示快照偏舊（Worker/上游卡住時可察覺）
-  let stale="";
-  try{const age=(Date.now()-Date.parse(state.live.generated_at))/1000;
-    if(age>180)stale=" · ⚠快照"+Math.round(age/60)+"分前";}catch(e){}
-  // 這行並列兩個語意不同的時間，用詞務必分得開：
-  //   「最後成交」＝ ts ＝上游 FinMind 全體有分類個股中最後一筆成交的時戳（非收盤時刻、非產出時刻；
-  //                  原字串無時區標記；收盤後會被盤後定盤/零股推進到 14:30–15:00；
-  //                  非交易日可能是當日盤前殘留值，日期部分不可當資料日）
-  //   「⚠快照 N 分前」＝依 generated_at（我方 Worker 產出牆鐘，UTC Z）算的年齡
-  // 完整欄位語意見 postmkt/docs/date-semantics.md 的「Worker `/live`」段。
-  const tsEl=document.getElementById("tsline");
-  tsEl.textContent="最後成交 "+(state.live.ts||"—")+src+(autoTimer?" · ⏱自動":"")+stale;
-  tsEl.title="最後成交＝上游最後一筆成交的時戳（非收盤時刻、無時區標記，收盤後會被盤後定盤/零股推進）；"
-            +"⚠快照 N 分前＝本快照產出至今經過的時間（依 generated_at）";
+  renderTopline();   // 頂列「資料日｜本站更新｜狀態」（原「最後成交 ts · ⚠快照 N 分前」列，2026-09-06 改）
+}
+// ---- 頂列「資料日｜本站更新｜狀態」（2026-09-06 批次二 #6；四子站統一標示，四值精神同 postmkt pmStatus()）----
+// 取值依據（欄位語意見 postmkt/docs/date-semantics.md「Worker `/live`」段；本節摘要亦記在 CLAUDE.md「頂列」節）：
+//   資料日：**不可取 ts 的日期部分**——ts 是上游最後一筆成交時戳，非交易日為盤前殘留（2026-08-09 週日線上實打
+//   ts="08-09 08:30" 內容卻是 08-07；2026-08-30 週日實打 ts="08-29 08:30" 內容是 08-28）。/live 沒有獨立的資料日欄
+//   （index 由 Worker idxOut 產生、不含 date；series 只有 HH:MM），可用的依據只有：
+//   ① ts 的「時分」≥ 09:00 → 該日確有成交，日期部分即資料日（盤中為當日；收盤後被盤後定盤/零股推進到 14:30–15:00
+//      仍是同一日）。兩次實打的殘留時戳都是 08:30（盤前試撮），故以 09:00 為分水嶺——**這是依兩次觀測的推論**，
+//      非官方文件保證；若日後 /livediag 觀測到殘留時戳 ≥09:00 的形狀，要回來改這條。
+//   ② ts 時分 < 09:00（殘留）→ 先取 flow_last.date（Worker 於交易日 13:25–13:40 定格時由當時 ts 切出、那時必為真實
+//      交易日；只在 flow 為 null／收盤殘影時附上，正好是殘留發生的時段），且要早於 ts 日期（sanity）；
+//      沒有 flow_last 才退到「ts 日期的前一平日」（國定假日不處理，連假會誤報，與 taiwan-flows siteStatus 同一立場）。
+//      已知失效模式：定格班漏寫時 flow_last.date 會比真實資料日更舊（TTL 7 天內殘留）。
+//   ③ ts 為 null（C 案未來可能）→ flow_last.date，再沒有就顯「—」。
+//   本站更新：generated_at（Worker 產出牆鐘，UTC Z）轉台北到分。
+//   狀態（台北時區，交易日只排週末）：
+//     查詢失敗（未知）＝boot 兩次都拿不到可用 payload（不知道好壞、不代表資料異常；後續自動刷新失敗不改狀態，沿用上一份）；
+//     延遲＝generated_at 距今 >3 分（沿用舊「⚠快照 N 分前」門檻；Worker／上游卡住）；
+//     休市定格＝週末，或平日 09:00 後資料日≠今日（國定假日，或開盤首分鐘尚無成交／上游未更新）；
+//     收盤定格＝平日資料日＝今日且 ≥13:35（同 ovMarketPhase 門檻），或平日 09:00 前握著上一交易日；
+//     盤中＝平日 09:00–13:35 且資料日＝今日。
+function fmtTaipeiMin(iso){
+  const t=Date.parse(iso||""); if(isNaN(t))return "—";
+  return new Date(t).toLocaleString("sv-SE",{timeZone:"Asia/Taipei"}).slice(0,16);
+}
+function taipeiNowStr(ms){return new Date(ms==null?Date.now():ms).toLocaleString("sv-SE",{timeZone:"Asia/Taipei"});}
+function prevWeekday(d){   // YYYY-MM-DD → 前一個平日（僅排週末）
+  let t=Date.parse(d+"T00:00:00Z"); if(isNaN(t))return null;
+  do{t-=864e5;}while([0,6].includes(new Date(t).getUTCDay()));
+  return new Date(t).toISOString().slice(0,10);
+}
+function liveDataDate(live){
+  const m=/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/.exec(String((live&&live.ts)||""));
+  const fl=(live&&live.flow_last&&/^\d{4}-\d{2}-\d{2}$/.test(String(live.flow_last.date||"")))?live.flow_last.date:null;
+  if(!m)return fl;
+  if(m[2]>="09:00")return m[1];
+  if(fl&&fl<m[1])return fl;
+  return prevWeekday(m[1]);
+}
+function liveStatus(live,err,nowMs){
+  if(!live)return err?{txt:"查詢失敗（未知）",cls:"tb-mut",title:"/live 載入失敗，無法判斷資料狀態（不代表資料異常）"}
+                    :{txt:"載入中",cls:"tb-mut",title:""};
+  const now=nowMs==null?Date.now():nowMs, ns=taipeiNowStr(now), today=ns.slice(0,10), hm=ns.slice(11,16);
+  const dow=new Date(today+"T00:00:00Z").getUTCDay();
+  const age=(now-Date.parse(live.generated_at||""))/1000;
+  const d=liveDataDate(live)||"—";
+  if(!isNaN(age)&&age>180)return {txt:"延遲",cls:"tb-lag",title:`快照產出於 ${Math.round(age/60)} 分鐘前（generated_at），Worker 或上游可能卡住；資料日 ${d}`};
+  if(dow===0||dow===6)return {txt:"休市定格",cls:"tb-mut",title:`週末休市，資料停在最近交易日 ${d}`};
+  if(d===today)return hm>="13:35"?{txt:"收盤定格",cls:"tb-mut",title:`今日 ${d} 已收盤，資料定格（最後成交 ${live.ts}）`}
+                              :{txt:"盤中",cls:"tb-ok",title:`盤中即時（最後成交 ${live.ts}）`};
+  if(hm<"09:00")return {txt:"收盤定格",cls:"tb-mut",title:`盤前，資料停在上一交易日 ${d}`};
+  return {txt:"休市定格",cls:"tb-mut",title:`今日 ${today} 尚無成交（國定假日，或開盤首分鐘尚無成交／上游未更新），資料停在 ${d}`};
+}
+function renderTopline(){
+  const el=document.getElementById("tsline"); if(!el)return;
+  const live=state.live, st=liveStatus(live,!!state.liveErr);
+  const d=live?(liveDataDate(live)||"—"):"—", gen=live?fmtTaipeiMin(live.generated_at):"—";
+  const src=CFG.worker?"":isLocal?"（本機）":"（靜態快照）";
+  el.innerHTML=`資料日 <b title="${escI(live&&live.ts?"最後成交 "+live.ts+"（上游時戳，非資料日依據）":"")}">${escI(d)}</b>`
+    +`<span class="tb-sep">｜</span>本站更新 <b>${escI(gen)}</b>${escI(src)}`
+    +`<span class="tb-sep">｜</span>狀態 <b class="${st.cls}" title="${escI(st.title)}">${escI(st.txt)}</b>`
+    +(autoTimer?`<span class="tb-mut"> · ⏱自動</span>`:"");
 }
 function idxSeg(){return `<div style="display:flex;gap:6px;margin:2px 0 8px;align-items:center"><span class="mut" style="font-size:11px">市場</span>`+
   `<button class="seg2 ${state.idx==='tse'?'on':''}" data-idx="tse">加權(TSE)</button>`+
@@ -2495,6 +2547,7 @@ async function boot(){
   ovRrgBaseLoad();   // 輪動雷達基準表（data/rrg_base.json）：不 await，缺檔只影響該視角
   await pull(false);
   if(!state.live){await new Promise(s=>setTimeout(s,6000));await pull(false);}  // 首拉失敗重試一次，避免卡「載入中」
+  if(!state.live){state.liveErr=true;renderTopline();}   // 兩次都拿不到可用 payload → 頂列「查詢失敗（未知）」
   initAuto();
 }
 // /live payload 可用性判定（state.live 唯一賦值點的閘門，2026-09-05 放寬）。
@@ -2522,7 +2575,7 @@ async function pull(manual){
   try{
     const j=await loadJSON(liveURL(),FETCH_CACHE.live);
     // 第五期：回放中暫停自動重繪（state.live 照更新，「回到即時」立即接上最新盤面）
-    if(liveUsable(j)){state.live=j;if(!(OV_REPLAY&&state.tab==="ov"))render();}
+    if(liveUsable(j)){state.liveErr=false;state.live=j;if(!(OV_REPLAY&&state.tab==="ov"))render();}
   }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
   finally{ pulling=false; if(manual){btn.textContent=old;btn.disabled=false;} }
 }
@@ -2534,7 +2587,7 @@ function setAuto(on){
     autoTimer=setInterval(()=>pull(false), CFG.autoSec*1000); }
   else{ b.classList.remove("on"); localStorage.removeItem("tflive2_auto");
     if(autoTimer){clearInterval(autoTimer);autoTimer=null;} }
-  if(state.live)renderMarket();  // 更新時間列的 ⏱自動 標記
+  if(state.live)renderMarket();  // 頂列的 ⏱自動 標記（renderMarket → renderTopline）
 }
 function initAuto(){
   const b=document.getElementById("auto");

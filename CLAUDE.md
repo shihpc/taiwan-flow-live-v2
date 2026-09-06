@@ -219,6 +219,26 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 pageerror 零；反向 `fetch("https://example.com/")` 被擋（`Failed to fetch`＋1 則 `Refused to connect`）；**304 要在無 `page.route` 的
 context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 route 時 reload 永遠 200。
 
+## 頂列「資料日｜本站更新｜狀態」（2026-09-06）
+
+`#tsline`（`index.html` 的 `function renderTopline`，判準在 `function liveStatus`／`function liveDataDate`，取值依據寫在其上方
+區塊註解）取代原「最後成交 ts · ⚠快照 N 分前」列，與 postmkt／taiwan-flows 頂列同款式。**資料日不取 `ts` 的日期部分**
+（見「已知限制」第 5 條與 `postmkt/docs/date-semantics.md`「Worker `/live`」段）；`/live` 沒有獨立資料日欄（`index` 由
+`idxOut` 產生、不含 date；`series` 只有 HH:MM），取值規則：
+
+| 情況 | 資料日 | 依據 |
+|------|--------|------|
+| `ts` 時分 ≥ 09:00 | `ts` 的日期 | 該日確有成交（盤中＝當日；收盤後被盤後定盤/零股推到 14:30–15:00 仍同日） |
+| `ts` 時分 < 09:00（盤前殘留） | `flow_last.date`（須早於 `ts` 日期），無則 `ts` 日期的前一平日 | 兩次線上實打殘留時戳皆為 08:30（08-09／08-30），故以 09:00 為分水嶺——**依兩次觀測的推論，非官方保證**；`flow_last.date` 由 Worker 交易日 13:25–13:40 定格時切出、那時必為真實交易日，且只在 flow 為 null／殘影時附上（正是殘留時段）。已知失效：定格班漏寫時 `flow_last.date` 偏舊；國定假日不處理（前一平日會誤報，與 taiwan-flows 同立場） |
+| `ts` 為 null | `flow_last.date`，無則「—」 | C 案未來可能形狀 |
+
+本站更新＝`generated_at`（Worker 牆鐘 UTC Z）轉台北到分。狀態五值（台北時區、交易日只排週末）：**查詢失敗（未知）**＝boot 兩次
+都拿不到可用 payload（後續自動刷新失敗沿用上一份、不改狀態）；**延遲**＝`generated_at` 距今 >3 分（沿用舊門檻）；**休市定格**＝
+週末，或平日 09:00 後資料日≠今日（國定假日／開盤首分鐘尚無成交／上游未更新，三者無法區分）；**收盤定格**＝平日資料日＝今日且
+≥13:35（同 `ovMarketPhase`），或平日 09:00 前握著上一交易日；**盤中**＝平日 09:00–13:35 且資料日＝今日。
+驗證（2026-09-06，Playwright `page.clock`＋`/live` route 七情境：收盤後凍結檔／盤中／週日有無 `flow_last`／平日盤前殘留／延遲／500）
+全數符合預期、pageerror 零。**若日後 `/livediag` 觀測到殘留時戳 ≥09:00 的形狀，要回來改 `liveDataDate` 的分水嶺。**
+
 ## 驗證方式
 
 ```bash
