@@ -313,6 +313,12 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    `/live` 回應另帶 header `x-swr: fresh|stale|miss`（與既有 `x-gen` 並列）。
    **`LIVE_TTL` 刻意未動**：先看 `coalesced / rebuilds` 與 `staleHits / freshHits` 比例，再依
    優化計畫批次二 #9 決定 25／30。測試 `node test/swr.mjs`（mock buildLive／cache／時鐘）。
+   **讀 `swr` 的實務陷阱（2026-09-07 線上實打）**：計數是 isolate 級，而 `/livediag` 的請求
+   **經常落在與服務 `/live` 不同的 isolate**——實測連打 8 次 `/live`（header 明確回 1 次 `miss`
+   ＋7 次 `fresh`，證明 Worker 每次都有跑）後立刻打 `/livediag`，`swr` 仍全 0；同樣手法重複三輪，
+   只有第三輪抓到 `freshHits: 2`（另一輪撞上 30 秒節流、回應根本沒有 `swr` 欄位）。
+   **所以單次讀到全 0 不代表 SWR 沒作用**，那只是抓到冷 isolate。要判 `LIVE_TTL` 必須在
+   **交易時段**（有真實客戶端輪詢時）多次取樣看趨勢，非交易時段打出來的比例沒有代表性。
 7. **哨兵 dispatch 失敗與 secret 缺失：已接告警（2026-09-06）；獨立看門狗仍未做**：
    `export async function runSentinel` 內 `ghDispatch` 的 catch 現已接 `alertJob`（tag
    `sentinel-err-<signal>`，沿用每日每 tag 一則的 KV 去重；KV 仍不記、5 分後照舊重試）。
