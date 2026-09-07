@@ -212,7 +212,7 @@ const yi=v=>v==null?"—":v.toLocaleString("en-US",{minimumFractionDigits:1,maxi
 const num=v=>v==null?"—":Math.round(v).toLocaleString("en-US");
 const pct=v=>v==null?"—":(v>0?"+":"")+v.toFixed(2)+"%";
 const sgn=(v,t)=>`<span class="${v>0?'up':v<0?'down':'mut'}">${t}</span>`;
-const yahoo=c=>`<a href="https://tw.stock.yahoo.com/quote/${c}" target="_blank" rel="noopener" style="color:var(--accent)">${c}</a>`;
+const yahoo=c=>`<a href="https://tw.stock.yahoo.com/quote/${encodeURIComponent(c)}" target="_blank" rel="noopener" style="color:var(--accent)">${escI(c)}</a>`;
 const cleanSub=s=>(s||"").replace(/\s*[（(].*$/,"");  // 次產業顯示去掉括號內說明
 const SC=["chg","amt","close","vol","bv","sv","pts","dp","lim","lw","f10","c10","c30","r10","it","fi","y1","y2","ints","nl","f30"]; // live.stocks 陣列欄位（後備）
 const sval=(code)=>{const a=state.live.stocks[code]; if(!a)return null; const cols=(state.live&&state.live.stock_cols)||SC; const o={}; cols.forEach((k,i)=>o[k]=a[i]); return o;};
@@ -256,7 +256,7 @@ function futuresVixLine(){
   const parts=[];
   if(fu){
     const b=fu.basis, word=b>0?"正價差":b<0?"逆價差":"價差平";
-    parts.push(`期指(${(fu.contract||"").slice(4)}月) ${sgn(b,(b>0?"+":"")+b+" "+word)}`);
+    parts.push(`期指(${escI(String(fu.contract||"").slice(4))}月) ${sgn(b,(b>0?"+":"")+b+" "+word)}`);
   }
   if(vix!=null){
     const cls=vix>=30?"down":vix>=20?"":"mut", tag=vix>=30?"（恐慌）":vix>=20?"（警戒）":"（平靜）";
@@ -372,9 +372,9 @@ function stockCols(){return[
   {h:"漲跌額",w:W[8],f:r=>r.dp==null?'<span class="mut">—</span>':sgn(r.dp,(r.dp>0?"+":"")+r.dp.toFixed(2))},
   {h:"最新價",w:W[9],cf:r=>r.lim===1?'lu':r.lim===-1?'ld':'',f:r=>r.price==null?'<span class="mut">—</span>':r.price.toLocaleString("en-US")},
   C_LWSHR, C_LWAVG];}
-function sumRow(a,label){return {name:`<b>${label} 合計</b>`,amt_yi:a.amt_yi,lw_amt_yi:a.lw_amt_yi,n:a.n,pts:a.pts,chgp:a.avg_chg,dp:null,price:null};}
+function sumRow(a,label){return {name:`<b>${escI(label)} 合計</b>`,amt_yi:a.amt_yi,lw_amt_yi:a.lw_amt_yi,n:a.n,pts:a.pts,chgp:a.avg_chg,dp:null,price:null};}
 function mkStockRow(c){const v=sval(c);if(!v)return null;const info=state.cl[c]||{};const a=v.amt/1e8;
-  return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,amt_yi:a,lw_amt_yi:(v.lw||0)/1e8,n:1,pts:v.pts,chgp:v.chg,dp:v.dp,price:v.close,lim:v.lim};}
+  return {name:`${yahoo(c)}<span class="nm">${escI(info.n||c)}</span>`,amt_yi:a,lw_amt_yi:(v.lw||0)/1e8,n:1,pts:v.pts,chgp:v.chg,dp:v.dp,price:v.close,lim:v.lim};}
 function stockRows(codes){
   const want=state.idx==="tse"?"twse":"tpex";
   return codes.filter(c=>(state.cl[c]||{}).t===want).map(mkStockRow).filter(Boolean).filter(r=>r.amt_yi>0).sort((x,y)=>y.amt_yi-x.amt_yi);}
@@ -423,7 +423,7 @@ function flowStockRow(c){const v=sval(c);if(!v)return null;const info=state.cl[c
   let f10,c10,c30,r10;
   if(FLOW_STK_SRC){const s=FLOW_STK_SRC[c];if(!s)return null;[f10,c10,c30,r10]=s;}
   else{if(v.f10==null)return null;f10=v.f10;c10=v.c10;c30=v.c30;r10=v.r10;}
-  return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,f10,c10,c30,r10,
+  return {name:`${yahoo(c)}<span class="nm">${escI(info.n||c)}</span>`,f10,c10,c30,r10,
     chgp:v.chg,price:v.close,lim:v.lim,it:v.it,fi:v.fi,y1:v.y1,y2:v.y2,ints:v.ints,nl:v.nl};}
 // 各次產業總成員數（分母，讓「檔」有參與率意義；由 classify 現算、快取一次）
 // 只計上市/上櫃（與湧入統計的分子同一母體；興櫃不在 baseline，不能進分母）
@@ -504,7 +504,7 @@ function renderFlow(){
   }
   // 案四：使用收盤定格資料時的徽章（同案三象限圖徽號樣式），標註資料日
   if(usingLast)html+=`<div class="note"><span class="ovlastbadge">資金動向：${escI(String(fl.date||"").slice(5))} 收盤定格</span></div>`;
-  html+=`<div class="note mut">窗口：10分(自${fl.frames["10"]||"—"}) / 30分(自${fl.frames["30"]||"—"}) · 基準日 ${fl.baseline_date}</div>`;
+  html+=`<div class="note mut">窗口：10分(自${escI(fl.frames["10"]||"—")}) / 30分(自${escI(fl.frames["30"]||"—")}) · 基準日 ${escI(fl.baseline_date)}</div>`;
   if(!usingLast&&fl.frames["10"]&&fl.frames["10"]===fl.frames["30"]){
     main.innerHTML=html+`<div class="loading">盤中分鐘序列尚未累積出多筆快照（目前僅單一時間點），暫無法判斷窗內漲跌方向。`+
       `盤中每分鐘寫入後會自動補齊，稍後再查看。</div>`;
@@ -514,7 +514,7 @@ function renderFlow(){
   const dirStk=r=>out?(r.r10!=null&&r.r10<0):(r.r10==null||r.r10>=0);
   const openState=state.sub[state.tab];
   const subs=(fl.subs||[]).filter(s=>s.d_yi>=FLOW_SUB_MIN_YI).filter(dirSub).map(s=>({...s,raw:s.name,
-    name:`<span class="sl ${openState.open===s.name?'sel':''}" data-fsub="${encodeURIComponent(s.name)}">${cleanSub(s.name)}</span>`}))
+    name:`<span class="sl ${openState.open===s.name?'sel':''}" data-fsub="${encodeURIComponent(s.name)}">${escI(cleanSub(s.name))}</span>`}))
     .sort((a,b)=>(b.c1||0)-(a.c1||0));
   html+=`<div class="crumb"><b>次產業${word}排行</b>（近10分額≥${FLOW_SUB_MIN_YI}億，依集中度）</div>`;
   html+=tbl([
@@ -530,7 +530,7 @@ function renderFlow(){
   if(open){
     const codes=Object.keys(state.cl).filter(c=>(state.cl[c].p||[]).some(p=>p[1]===open));
     const rows=codes.map(flowStockRow).filter(Boolean).filter(r=>r.f10>0).sort((a,b)=>b.f10-a.f10);
-    html+=`<div id="dd"><div class="crumb"><b>${cleanSub(open)}</b> 成分股（${rows.length}，依近10分額，再點收合）</div>`+tbl(flowStockCols(out),rows)+`</div>`;
+    html+=`<div id="dd"><div class="crumb"><b>${escI(cleanSub(open))}</b> 成分股（${rows.length}，依近10分額，再點收合）</div>`+tbl(flowStockCols(out),rows)+`</div>`;
   }
   const rows=Object.keys(state.live.stocks).map(flowStockRow).filter(Boolean)
     .filter(r=>r.f10>=FLOW_STK_MIN).filter(dirStk).sort((a,b)=>(b.c10||0)-(a.c10||0)).slice(0,80);
@@ -2008,8 +2008,8 @@ function ovHeadline(){
   if(Math.abs(pIdx)<15){
     const up1=[...subs].sort((a,b)=>b.pts-a.pts)[0], dn1=[...subs].sort((a,b)=>a.pts-b.pts)[0];
     const parts=[];
-    if(up1&&up1.pts>0)parts.push(`上有${cleanSub(up1.name)}（${sgnTxt(up1.pts)}點）`);
-    if(dn1&&dn1.pts<0)parts.push(`下有${cleanSub(dn1.name)}（${sgnTxt(dn1.pts)}點）`);
+    if(up1&&up1.pts>0)parts.push(`上有${escI(cleanSub(up1.name))}（${sgnTxt(up1.pts)}點）`);
+    if(dn1&&dn1.pts<0)parts.push(`下有${escI(cleanSub(dn1.name))}（${sgnTxt(dn1.pts)}點）`);
     return `<div class="ovsent">${aiBtn}多空拉鋸：大盤${sgnTxt(pIdx)}點（${pctTxt(ix.chg)}）。${parts.join("，")}${parts.length?"。":""}`+
       `${flowOk?"":`<span class="mut">${flowSuffix}</span>`}</div>`;
   }
@@ -2022,18 +2022,18 @@ function ovHeadline(){
     // 佔跌/漲點 % 依範例定義為「領頭股」貢獻點佔指數總點數（非整個次產業群組）
     const sharePct=pIdx?Math.abs(top.leaderPts)/Math.abs(pIdx)*100:0;
     const conc=ovConcentration(pIdx);
-    topClause=`${cleanSub(top.name)}${isUp?"貢獻":"拖累"} ${sgnTxt(top.pts)} 點（${leaderName} ${sgnTxt(top.leaderPts)}，佔${isUp?"漲":"跌"}點 ${sharePct.toFixed(0)}%，行情${conc}）`;
+    topClause=`${escI(cleanSub(top.name))}${isUp?"貢獻":"拖累"} ${sgnTxt(top.pts)} 點（${escI(leaderName)} ${sgnTxt(top.leaderPts)}，佔${isUp?"漲":"跌"}點 ${sharePct.toFixed(0)}%，行情${conc}）`;
   }
   let shareClause="";
   if(flowOk){
     const rising=withShare.filter(s=>s.diff!=null).sort((a,b)=>isUp?b.diff-a.diff:a.diff-b.diff)[0];
     if(rising&&Math.abs(rising.diff)>=1)
-      shareClause=`；${cleanSub(rising.name)}近30分成交佔比 ${rising.fullDay.toFixed(1)}%→${rising.now30.toFixed(1)}%，資金${isUp?"湧入":"流出"}`;
+      shareClause=`；${escI(cleanSub(rising.name))}近30分成交佔比 ${rising.fullDay.toFixed(1)}%→${rising.now30.toFixed(1)}%，資金${isUp?"湧入":"流出"}`;
   }else shareClause=`；<span class="mut">${flowSuffix}</span>`;
   const dragCandidates=[...subs].filter(s=>s!==top).filter(s=>isUp?s.pts<0:s.pts>0)
     .sort((a,b)=>isUp?a.pts-b.pts:b.pts-a.pts).slice(0,2);
   let dragClause="";
-  if(dragCandidates.length)dragClause=`；${dragCandidates.map(s=>cleanSub(s.name)).join("、")}小幅${isUp?"拖累":"助漲"}`;
+  if(dragCandidates.length)dragClause=`；${dragCandidates.map(s=>escI(cleanSub(s.name))).join("、")}小幅${isUp?"拖累":"助漲"}`;
   return `<div class="ovsent">${aiBtn}大盤 ${sgnTxt(pIdx)} 點：${topClause||"資料不足"}${shareClause}${dragClause}。</div>`;
 }
 // 貢獻點發散長條三視角：次產業(自聚合)／產業鏈(直接用 live.chain 既有加總)／個股(僅前5拉抬+前5拖累，無殘差)
@@ -2074,7 +2074,7 @@ function ovDivergingBar(view){
   const barRow=r=>{
     const w=Math.min(100,Math.abs(r.pts)/maxAbs*100)/2;
     const bar=r.pts>=0?`<div class="ovbarpos" style="width:${w}%"></div>`:`<div class="ovbarneg" style="width:${w}%"></div>`;
-    return `<div class="ovdiv"><span class="ovlbl">${r.name}</span><span class="ovtrack">${bar}</span>`+
+    return `<div class="ovdiv"><span class="ovlbl">${escI(r.name)}</span><span class="ovtrack">${bar}</span>`+
       `<span class="ovval ${r.pts>=0?'up':'down'}">${sgnTxt(r.pts)}</span></div>`;
   };
   return `<div>${rows.map(barRow).join("")}</div>${noteHtml}`;
@@ -2100,22 +2100,22 @@ function renderOvTable(){
   const rows=ovStrengthRows(), openState=state.sub.ov;
   const shown=openState.expandAll?rows:rows.slice(0,10);
   const cols=[
-    {h:"次產業",cls:"l",w:100,f:r=>`<span class="sl ${openState.open===r.name?'sel':''}" data-sec="${encodeURIComponent(r.name)}">${cleanSub(r.name)}</span>`},
+    {h:"次產業",cls:"l",w:100,f:r=>`<span class="sl ${openState.open===r.name?'sel':''}" data-sec="${encodeURIComponent(r.name)}">${escI(cleanSub(r.name))}</span>`},
     {h:"貢獻點",w:60,f:r=>sgn(r.pts,sgnTxt(r.pts))},
     {h:"成交佔比",w:64,f:r=>r.shr.toFixed(2)+"%"},
     {h:"近30分佔比",w:100,f:r=>r.shr30==null?`<span class="mut">${OV_REPLAY?"回放模式不適用":"盤中生效"}</span>`:`${r.shr30.toFixed(1)}%${ovArrow(r.diff)}`},
     {h:"30分動能",w:64,f:r=>`<span class="ovmom ${r.mom.cls}">${r.mom.label}</span>`},
     {h:"廣度",w:60,f:r=>`<span class="up">${r.up}</span>/${r.n}`},
-    {h:"領頭股",cls:"l",w:110,f:r=>r.leader}];
+    {h:"領頭股",cls:"l",w:110,f:r=>escI(r.leader)}];
   let html=`<div class="crumb"><b>次產業強弱總表</b> <span class="mut">依|貢獻點|排序${openState.expandAll?`（全部${rows.length}）`:"（前10）"}</span> `+
     `<span class="clk" id="ovExpand">${openState.expandAll?"收合":"展開全部"}</span></div>`;
   html+=tbl(cols,shown);
   const open=openState.open, si=open?OV_SUB_CACHE[open]:null;
   if(si){
     const rows2=si.codes.map(c=>{const v=ovVal(c)||{},info=state.cl[c]||{};
-      return {name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,chgp:v.chg,pts:v.pts,amt_yi:(v.amt||0)/1e8};})
+      return {name:`${yahoo(c)}<span class="nm">${escI(info.n||c)}</span>`,chgp:v.chg,pts:v.pts,amt_yi:(v.amt||0)/1e8};})
       .sort((a,b)=>Math.abs(b.pts)-Math.abs(a.pts));
-    html+=`<div id="ddOv"><div class="crumb"><b>${cleanSub(open)}</b> 成分股（${rows2.length}，依|貢獻|排序，再點收合）</div>`+
+    html+=`<div id="ddOv"><div class="crumb"><b>${escI(cleanSub(open))}</b> 成分股（${rows2.length}，依|貢獻|排序，再點收合）</div>`+
       tbl([{h:"個股",cls:"l",w:110,f:r=>r.name},
            {h:"漲跌%",w:64,f:r=>sgn(r.chgp,pct(r.chgp))},
            {h:"貢獻",w:60,f:r=>sgn(r.pts,sgnTxt(r.pts))},
@@ -2215,7 +2215,7 @@ function ovRadarStocks(){
     const v=sval(c); if(!v||v.r10==null||v.f10==null)continue;
     if(v.f10<OV_RADAR_STK_MIN)continue;
     const info=state.cl[c]||{};
-    rows.push({c,name:`${yahoo(c)}<span class="nm">${info.n||c}</span>`,r10:v.r10,f10:v.f10,chgp:v.chg,price:v.close,amt:v.amt||0});
+    rows.push({c,name:`${yahoo(c)}<span class="nm">${escI(info.n||c)}</span>`,r10:v.r10,f10:v.f10,chgp:v.chg,price:v.close,amt:v.amt||0});
   }
   rows.sort((a,b)=>b.r10-a.r10);
   return rows;
@@ -2258,7 +2258,7 @@ function ovRadarHtml(){
         {h:"漲跌%",w:60,f:r=>r.chgp==null?'<span class="mut">—</span>':sgn(r.chgp,pct(r.chgp))}],[...up,...dn]);
       const subs=ovRadarSubs();
       const b2=tbl([
-        {h:"佔比升溫次產業",cls:"l",w:110,f:r=>cleanSub(r.name)},
+        {h:"佔比升溫次產業",cls:"l",w:110,f:r=>escI(cleanSub(r.name))},
         {h:"近10分佔比",w:76,f:r=>r.now10.toFixed(1)+"%"},
         {h:"全日佔比",w:66,f:r=>r.full.toFixed(1)+"%"},
         {h:"落差",w:60,f:r=>sgn(r.diff,(r.diff>0?"+":"")+r.diff.toFixed(1)+"pp")}],subs);
@@ -2444,10 +2444,10 @@ function ovSummaryCard(){
   const ptsTop=[...subs].sort((a,b)=>b.pts-a.pts)[0];
   const m=state.live.market||{};
   const up=(m.tse&&m.tse.up||0)+(m.otc&&m.otc.up||0), down=(m.tse&&m.tse.down||0)+(m.otc&&m.otc.down||0);
-  const shareTxt=shareTop?`${cleanSub(shareTop.name)}（${(mktAmt?(shareTop.amt/1e8)/mktAmt*100:0).toFixed(1)}%）`:"—";
-  const ptsTxt=(ptsTop&&ptsTop.pts>0)?`${cleanSub(ptsTop.name)}（${sgnTxt(ptsTop.pts)} 點）`:"—";
+  const shareTxt=shareTop?`${escI(cleanSub(shareTop.name))}（${(mktAmt?(shareTop.amt/1e8)/mktAmt*100:0).toFixed(1)}%）`:"—";
+  const ptsTxt=(ptsTop&&ptsTop.pts>0)?`${escI(cleanSub(ptsTop.name))}（${sgnTxt(ptsTop.pts)} 點）`:"—";
   const ptsBot=[...subs].sort((a,b)=>a.pts-b.pts)[0];
-  const botTxt=(ptsBot&&ptsBot.pts<0)?`${cleanSub(ptsBot.name)}（${sgnTxt(ptsBot.pts)} 點）`:"—";
+  const botTxt=(ptsBot&&ptsBot.pts<0)?`${escI(cleanSub(ptsBot.name))}（${sgnTxt(ptsBot.pts)} 點）`:"—";
   // 全日口徑定調句（無短窗子句；「升幅最大」以全日貢獻點最高口徑呈現——盤中佔比升降屬短窗，收盤後無基準）
   const tone=`今日大盤 ${sgnTxt(ix.chgP)} 點（${pctTxt(ix.chg)}）；廣度 漲${up}／跌${down}；全日成交佔比最高 ${shareTxt}，貢獻最強 ${ptsTxt}，拖累最多 ${botTxt}。`;
   const fmtP=r=>`${r.code} ${r.name} ${r.chg==null?"—":pctTxt(r.chg)} ${sgnTxt(r.pts)}`;
@@ -2455,7 +2455,7 @@ function ovSummaryCard(){
   OV_SUMMARY_TEXT=[`【今日總結${sumDay?" "+sumDay:""}】`,tone,
     `貢獻前5：${top5.map(fmtP).join("、")||"—"}`,`拖累前5：${bot5.map(fmtP).join("、")||"—"}`].join("\n");
   // 每檔顯示：代號 名稱 漲跌%（紅漲綠跌）貢獻點（2026-07-21 使用者回饋）
-  const fmtStk=r=>`${r.code} ${escI(r.name)} ${r.chg==null?'<span class="mut">—</span>':sgn(r.chg,pct(r.chg))} ${sgn(r.pts,sgnTxt(r.pts))}`;
+  const fmtStk=r=>`${escI(r.code)} ${escI(r.name)} ${r.chg==null?'<span class="mut">—</span>':sgn(r.chg,pct(r.chg))} ${sgn(r.pts,sgnTxt(r.pts))}`;
   return `<div class="ovsent" id="ovSummary"><button class="seg2" data-ov-copy style="float:right;margin-left:8px">複製文字摘要</button>`+
     `<b>今日總結</b> <span class="mut" style="font-size:11px">收盤後全日口徑 · 曲線：${srcNote}</span>`+
     `<div style="margin-top:4px">${tone}</div>`+
@@ -2498,7 +2498,7 @@ function render(){
   if(state.tab==="rank")return renderRank();
   const open=state.sub[state.tab].open;
   const list=(state.live[state.tab]||[]).map(s=>{const o={sector:s.sector,...s[state.idx]};
-      o.name=`<span class="sl ${open===s.sector?'sel':''}" data-sec="${encodeURIComponent(s.sector)}">${s.sector}</span>`;return o;})
+      o.name=`<span class="sl ${open===s.sector?'sel':''}" data-sec="${encodeURIComponent(s.sector)}">${escI(s.sector)}</span>`;return o;})
     .filter(r=>r.n>0).sort((a,b)=>b.amt_yi-a.amt_yi);
   let html="";
   if(state.tab==="chain"){const c=state.live.chain_coverage||{};
@@ -2510,7 +2510,7 @@ function render(){
     if(state.tab==="exchange"){
       const codes=Object.keys(state.cl).filter(c=>state.cl[c].e===open);
       const rows=stockRows(codes), agg=list.find(r=>r.sector===open);
-      html+=`<div id="dd"${/ETF/.test(open)?' class="wrap2"':''}><div class="crumb"><b>${open}</b> 成分股（${rows.length}，再點類股收合）</div>`+tbl(stockCols(),rows,agg?sumRow(agg,open):null)+`</div>`;
+      html+=`<div id="dd"${/ETF/.test(open)?' class="wrap2"':''}><div class="crumb"><b>${escI(open)}</b> 成分股（${rows.length}，再點類股收合）</div>`+tbl(stockCols(),rows,agg?sumRow(agg,open):null)+`</div>`;
     }else html+=`<div id="dd">`+chainSub(open, list.find(r=>r.sector===open))+`</div>`;
   }
   document.getElementById("main").innerHTML=html;
@@ -2527,12 +2527,12 @@ function chainSub(ind,indAgg){
       if(v.chg>0)o.up++;else if(v.chg<0)o.down++;}}
   const subs=Object.values(agg).map(o=>({sub:o.sub,amt_yi:o.amt/1e8,lw_amt_yi:o.lw/1e8,
     avg_chg:o.amt?o.wchg/o.amt:0,up:o.up,down:o.down,n:o.n,pts:o.pts,
-    name:`<span class="sl ${opensub===o.sub?'sel':''}" data-sub="${encodeURIComponent(o.sub)}">${cleanSub(o.sub)}</span>`}))
+    name:`<span class="sl ${opensub===o.sub?'sel':''}" data-sub="${encodeURIComponent(o.sub)}">${escI(cleanSub(o.sub))}</span>`}))
     .filter(o=>o.amt_yi>0).sort((a,b)=>b.amt_yi-a.amt_yi);
-  let html=`<div class="crumb"><b>${ind}</b> · ${subs.length} 次產業（點看成分股；再點類股收合）</div>`+tbl(aggCols("次產業"),subs,indAgg?{...indAgg,name:`<b>${ind} 合計</b>`}:null);
+  let html=`<div class="crumb"><b>${escI(ind)}</b> · ${subs.length} 次產業（點看成分股；再點類股收合）</div>`+tbl(aggCols("次產業"),subs,indAgg?{...indAgg,name:`<b>${escI(ind)} 合計</b>`}:null);
   if(opensub){const codes=Object.keys(state.cl).filter(c=>state.cl[c].p.some(p=>p[0]===ind&&p[1]===opensub));
     const rows=stockRows(codes), sa=subs.find(s=>s.sub===opensub);
-    html+=`<div id="dd2"><div class="crumb">${ind} › <b>${cleanSub(opensub)}</b> 成分股（${rows.length}）</div>`+tbl(stockCols(),rows,sa?sumRow(sa,cleanSub(opensub)):null)+`</div>`;}
+    html+=`<div id="dd2"><div class="crumb">${escI(ind)} › <b>${escI(cleanSub(opensub))}</b> 成分股（${rows.length}）</div>`+tbl(stockCols(),rows,sa?sumRow(sa,cleanSub(opensub)):null)+`</div>`;}
   return html;
 }
 document.addEventListener("click",e=>{const el=e.target.closest("[data-pool]");if(!el)return;const a=el.dataset.pool.split(":");state.pool={mkt:a[0],kind:a[1]};render();});
@@ -2543,7 +2543,7 @@ document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{state.tab=t.dataset.
 // mode 預設 FETCH_CACHE.data（data/*.json 條件請求）；/live、/replay 由呼叫端明示（見 FETCH_CACHE 註解）
 async function loadJSON(u,mode){return (await fetch(u,{cache:mode||FETCH_CACHE.data})).json();}
 async function boot(){
-  try{state.cl=(await loadJSON("data/classify.json")).map;}catch(e){document.getElementById("main").innerHTML='<div class="loading">無法載入 classify.json：'+e+'</div>';return;}
+  try{state.cl=(await loadJSON("data/classify.json")).map;}catch(e){document.getElementById("main").innerHTML='<div class="loading">無法載入 classify.json：'+escI(e&&e.message||e)+'</div>';return;}
   ovRrgBaseLoad();   // 輪動雷達基準表（data/rrg_base.json）：不 await，缺檔只影響該視角
   await pull(false);
   if(!state.live){await new Promise(s=>setTimeout(s,6000));await pull(false);}  // 首拉失敗重試一次，避免卡「載入中」

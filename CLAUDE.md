@@ -210,10 +210,69 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 | 純導覽外連 | Yahoo（`yahoo()`／摘要 `link`）、`shihpc.github.io/postmkt/`；皆 `target="_blank" rel="noopener"` | 不受 CSP 限制（無 `navigate-to`） |
 | localStorage | `anthropic_key`／`gh_token`／`insight_model`／`tflive2_auto`（金鑰只送 Authorization header，不進 DOM） | — |
 
-**`innerHTML` 拼字串（grep 15 行）**：股名／產業名／次產業名來自自家 `classify.json` 與 Worker `/live`（信任邊界＝自家管線產出），
-數值欄走 `toFixed`／`Math.round`；含使用者可影響或第三方字串的路徑（回放錯誤訊息 `OV_REPLAY_ERR`、定格資料日、雲端歷史 meta）
-用 `escI()`（49 處）。LLM 輸出走三站同步的 `mdToHtml`（`esc2` 逃 `&<>`）＋`linkifyStocks`（href 只由 regex 命中的代號組成）。
-**未做逐處稽核**（2026-09-06 只做盤點）：若日後改讀第三方 JSON 進 innerHTML，要補 `escI()`。
+### `innerHTML` 逐處稽核（2026-09-07 完成，取代 09-06 的「未做逐處稽核」）
+
+**盤點數字（2026-09-07 重新 grep）**：`innerHTML` 15 行（與 09-06 同）、`insertAdjacentHTML`／`outerHTML`／
+`document.write` **零**、`style="` 屬性 52 處、`escI(` 呼叫 **49 → 84 處**。
+
+**信任邊界更正（這是本次稽核最重要的發現）**：09-06 那段寫「股名／產業名／次產業名來自自家 `classify.json`
+與 Worker `/live`（信任邊界＝自家管線產出）」——**這句話會誤導**。`classify.json` 的 `n`／`e`／`c`／`p`
+是 `src/meta.py` 從 FinMind **原字串直寫**（`:37` `stock_name`、`:38-39` `industry_category`、
+`:52-56` `TaiwanStockIndustryChain` 的 `industry`／`sub_industry`），管線端**沒有任何消毒**；Worker `/live` 的
+`exchange[].sector`／`chain[].sector`／`flow.subs[].name` 也全部由同一份 `classify.json` 的鍵長出來
+（`worker/src/index.js` 的 `function acc` 以分類名當 key、`const cl = classifyJson.map`）。所以真正的信任邊界是
+**FinMind**，不是自家字面量；`script-src 'unsafe-inline'` 之下 CSP 對 `<img onerror>` 完全無效。
+姊妹站 taiwan-flows 同型問題已於 2026-09-06 實證會執行（見該 repo CLAUDE.md 注入面表 `innerHTML` 列）。
+
+**修正：補 29 處 `escI()`（新增 35 個呼叫）**，行號為 2026-09-07 當時：
+
+| 區塊 | 位置 | 被逃逸的值 | 來源 |
+|------|------|-----------|------|
+| `yahoo()` | `:215` | 代號（href 走 `encodeURIComponent`、文字走 `escI`） | FinMind `stock_id` → classify key |
+| `futuresVixLine()` | `:259` | 期貨合約月份 | FinMind 期貨 `contract_date` |
+| `sumRow()` | `:375` | 合計列的類股／次產業名 | classify |
+| `mkStockRow`／`flowStockRow`／`ovRadarStocks`／`renderOvTable` 成分股 | `:377`／`:426`／`:2218`／`:2116` | 股名 `info.n` | FinMind `stock_name` |
+| `renderFlow()` | `:507`／`:517`／`:533` | `flow.frames["10"/"30"]`、`baseline_date`、次產業名、下鑽標題 | Worker `/live` |
+| `ovHeadline()` | `:2011`／`:2019`／`:2031`／`:2036` | 次產業名 ×4、領頭股名 | classify |
+| `ovDivergingBar()` | `:2077` | 三視角（次產業／產業鏈／個股）共用出口的 `r.name` | classify |
+| `renderOvTable()` | `:2103`／`:2109`／`:2118` | 次產業名、領頭股欄、下鑽標題 | classify |
+| `ovRadarHtml()` | `:2261` | 佔比升溫次產業名 | classify |
+| `ovSummaryCard()` | `:2447`／`:2448`／`:2450`／`:2458` | 次產業名 ×3、代號 | classify |
+| `render()` | `:2501`／`:2513` | `live.exchange/chain[].sector`、產業別下鑽標題 | Worker `/live` |
+| `chainSub()` | `:2530`／`:2532`／`:2535` | 次產業名、產業名標題／合計列、次產業下鑽標題 | classify |
+| `boot()` | `:2546` | `classify.json` 載入失敗的例外訊息 | fetch 例外 |
+
+**逐一點名的豁免（稽核過、刻意不加 `escI`）**：
+①**數值欄**——全部走 `toFixed`／`Math.round`／`toLocaleString`／算式，型別即保證（`yi`／`num`／`pct`／`pctCell`／
+`sgnTxt`／`cxCell`／`intsCell`／`ovTreemapBadge` 等）；`chain_coverage.with_chain/total` 是 Worker 端
+`Object.keys().length`，同類。②**`data-*` 屬性**——`data-sec`／`data-sub`／`data-fsub`／`data-ovtree-*`／
+`data-ovquad-*`／`data-ovrrg-pick` 全走 `encodeURIComponent`，`data-pool`／`data-idx`／`data-ovmap`／`data-ovview`／
+`data-tab`／`<option value>` 是程式內字面量。③**已在 09-06 就正確的路徑**——`escI` 早已覆蓋 `renderTopline`／
+象限圖 `<title>`＋標籤／RRG 全區（含 `ovChainDisp`）／treemap 格（`escI(nm)`＋`escI(line)`）／`OV_REPLAY_ERR`／
+`OV_RRG.err`／`OV_RRG_BASE_ERR`／雲端歷史 meta／`insightErr`；**實測確認這兩類本來就安全**（見下）。
+④**LLM 輸出**走三站同步的 `mdToHtml`（`esc2` 逃 `&<>`，只進元素內容不進屬性）＋`linkifyStocks`
+（href 只由 regex 命中的純數字代號組成）——**判定為安全但屬三站逐字同步碼，本次一律不動**。
+⑤`insightGatherContext()`（`:704-772`）與 `OV_SUMMARY_TEXT`（`:2453`）雖有大量原字串插值，但**不是 innerHTML**——
+前者是送給 Anthropic 的 prompt 純文字、後者是剪貼簿純文字。⑥`ovToast()` 走 `textContent`。
+
+**注入實測（Playwright，2026-09-07；本沙箱瀏覽器連不到外網，全部走 `page.route` 餵凍結／污染檔）**：
+把 `<img src=x onerror="window.__xss=[...window.__xss||[],'TAG']">` 餵進 `classify.json` 的
+`n`／`e`／`c`／`p[][1]` 與代號鍵、Worker `/live` 的 `exchange/chain[].sector`／`flow.subs[].name`／
+`flow.frames`／`baseline_date`、`/replay` 的 `error`、雲端歷史的 `at`／`model`／`date`／`text`，
+走完 7 tab ＋各層下鑽 ＋ 回放滑桿共 24 個檢查點：
+**修正前 6 類觸發**（`stockname`／`subindustry`／`chainsector`／`exchsector`／`code`／`frames`），
+**修正後 0 類觸發、`#main` 內 `img` 元素 0 個、樣本以字面文字顯示**（每個檢查點另斷言注入字串確實出現在
+`innerText`，證明是「跑到了但被逃掉」而非「沒渲染」）。`replayerr`／`cloudmeta` 兩類**修正前就不觸發＝本來就安全**。
+**注意樣本不可含小括號**：`cleanSub()` 會砍掉「第一個 `(` 之後全部」，帶括號的樣本會被它意外截斷而假陰性。
+**乾淨資料回歸**：以真實 `data/live.json`＋`data/classify.json` 傾印 4 個 tab＋2 層下鑽＋`#mkcard` 的
+`innerHTML`，修正前後**逐字相同**（只差 `tbl()` 的流水號 `data-t="tN"`）——`&` 是全站唯一受影響的字元
+（15 檔 `S&P` ETF 與次產業「MR Headset & SG」），`escI` 後 DOM 文字節點仍是 `&`，排序用的 `ctext()`
+走 `innerHTML→textContent` 也自動還原，實測畫面顯示與排序皆不變。
+
+**根因仍在上游、本次刻意未動**：真正的一勞永逸是在 `src/meta.py` 寫入前消毒 FinMind 字串
+（比照 `taiwan-flows/src/sanitize.py` 的 `sanitize_label()`，**`&` 要保留**否則 `S&P` 會被改名）。
+那會改變 `classify.json` 內容＝Worker `/live` 與姊妹站的上游，屬跨站變更，需另案裁決。
+前端 `escI` 是**必要**的一道（第三方 JSON 隨時可能變），不因上游日後消毒而可以拿掉。
 
 驗證（2026-09-06 實測，Playwright 本機 http.server＋`/live` route mock 凍結檔 `data/live.json`）：7 tab console 無 `Refused to`、
 pageerror 零；反向 `fetch("https://example.com/")` 被擋（`Failed to fetch`＋1 則 `Refused to connect`）；**304 要在無 `page.route` 的
