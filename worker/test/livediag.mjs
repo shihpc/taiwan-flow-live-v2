@@ -146,7 +146,7 @@ const row = (code, date, extra = {}) => ({ stock_id: code, date, close: 100, tot
   chk("tsDiag 前後 aggregate 輸出一致", eq(a1, a2));
   // snap_ts（2026-09-07 拆分）＝內部原始快照時戳，由 aggregate 產出、buildLive 回傳前 delete。
   // 這條守的是 aggregate 的產出鍵集合；「/live 對外 JSON 不含 snap_ts」由下方路由整合區塊守。
-  chk("aggregate 頂層欄位集合未變（/live 契約）",
+  chk("aggregate 頂層欄位集合＝預期清單（含內部 snap_ts；對外契約由下方路由層那條守）",
     eq(Object.keys(a1).sort(), ["chain", "chain_coverage", "exchange", "generated_at", "index",
       "market", "snap_ts", "stock_cols", "stocks", "ts"].filter((k) => k !== "generated_at").sort()),
     JSON.stringify(Object.keys(a1).sort()));

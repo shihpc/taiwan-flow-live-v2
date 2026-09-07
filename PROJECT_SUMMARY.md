@@ -1011,6 +1011,19 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
       （現行因 `ts` 日期是週六、`fi:週六` 不存在而自然為 null）。
       → **`snap_ts` 拆分（對外 `ts` 改語意、內部另存原 `max(date)`）是三案共同的必要前置，不是可選優化。**
       **✅ 已完成（2026-09-07，行為中性）**：`export function aggregate` 產出加 `snap_ts`（值＝現行 `ts` 的算法原封不動），內部窗計算改走 `export async function computeLiveFlow`／`export const snapTs`（`pickFrames`／`computeFlow` 的 `nowTs`／`series:<date>` 三處），`flowLastPayload` 刻意維持吃對外 `ts`；`snap_ts` **不進 `/live` 對外 JSON**（消費者全在 `buildLive` 的記憶體物件上跑完，`serveLive` 只序列化後快取、不會解析回來重跑，故回傳前 delete，對外 payload 逐位元不變），隔離證明見 `worker/test/snapts.mjs`（正反兩向突變）。
+      commit `24bd59a`、`worker-deploy` run 34146092384 success、部署 **version `7cce5708`**；
+      線上實查 `/live` 頂層鍵無 `snap_ts`、除 `generated_at` 外零差異。
+      **fresh-context 覆驗 0 項退回**（2026-09-07）：以新舊模組並存的等價 harness 跑 9 種時戳形狀
+      × KV 有無＝18 組輸出逐字比對（30/30），非只看 diff；三個突變獨立重做（正向 2 紅且僅
+      `ts` 值本身的斷言、反向 8 紅、假綠防護 9 紅）。
+
+      **⚠️ 覆驗順手挖到的既有口徑不一致（非本次引入，改 `ts` 語意時順手釐清）**：
+      `export async function storeFrame` 寫入 frame 的 `_ts` 取的是「**第一筆**有 date 的列」
+      （`ts = ts || String(r.date || "")`），而 `aggregate` 的 `ts`／`snap_ts` 取的是
+      「有分類非指數個股的 **max**(date)」。`computeFlow` 的上游停滯守門
+      （`f.data._ts === nowTs`）等於在比對**兩個不同算法**的值——**實務上只有整份快照
+      完全凍結時才會命中，比它看起來的弱**。`export const snapTs` 上方註解寫 snap_ts 語意是
+      「這份快照走到哪一刻」，容易讓讀者誤以為它與 frame 的 `_ts` 同源，實際不是。
 
       **其他直接從 `ts` 切日期的地方**（改前必看）：Worker `export function flowLastPayload` 的
       `date: live.ts.slice(0,10)`（寫入窗 13:25–13:40——**乙若指數列只在收盤寫一次，會把
