@@ -3704,7 +3704,8 @@ async function syncKey(code) {
 // 資訊量（2026-09-07 18:12 線上實測：/status 報 postmkt yellow，postmkt 站自己的頂列同時報
 // 「正常」；同日 22:03 自然轉綠）。修法＝每站帶一個「預期發布時點」dueHour，平日未到該時點時
 // 預期資料日退成前一個交易日。三個時點**取各站前端現行判準的同一個值，不另創口徑**：
-//   live    9    —— 本站 index.html 的 `function liveDataDate`：以 09:00 為盤前／盤中分水嶺
+//   live    9    —— 本站 index.html 的 `function liveStatus`：`if(hm<"09:00")` 的牆鐘分水嶺
+//                    （注意不是 `liveDataDate` 的 `ts>="09:00"`，那個比的是成交時戳不是牆鐘）
 //   flows   20   —— taiwan-flows/index.html 的 `function lastDueTradingDay`（平日 hour>=20 才
 //                   期待今日），同後端 src/run_daily.py 的 PUBLISH_DEADLINE_HOUR = 20
 //   postmkt 22.5 —— postmkt/index.html 的 `function pmStatus`：資料日為上一交易日且 hm < "22:30"
@@ -3852,7 +3853,11 @@ async function fetchStatusTail(fetchFn, url, bytes = 4096) {
 }
 // live：直接用本站 KV 的 fi 索引（同 `/` 根路徑 health 區塊做法，不外抓）。
 // 依序查最近兩個預期交易日的 frame 索引，第一個非空者為資料日。
-// 這裡**刻意不帶 dueHour**：不帶＝從今日查起、查不到再退前一日，是帶了之後的超集，
+// 這裡**刻意不帶 dueHour**。原註解寫「不帶＝帶了之後的超集」，2026-09-07 驗收實測推翻：
+// 平日 09:00 前兩者是**平移不是包含**（例：週一 08:00 不帶＝[今日, 上一交易日]、帶 9＝
+// [上一交易日, 再前一交易日]），09:00 後與週末才相同。仍不帶的理由是取值方向較保守——
+// 正常情形下今日尚無 frame，自然退到上一交易日；只有「連兩個交易日 KV 全空」時兩者才分歧，
+// 那時不帶會回 null→red、帶了會回更舊的日期→yellow，**不帶不會誤綠**。
 // 資料日的取法不受時間感知影響（時間感知只作用在 gradeMarket 的判級）。
 async function statusSiteLive(env, tp) {
   const exp = lastExpectedTradingDate(tp);

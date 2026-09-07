@@ -195,7 +195,7 @@ fetchStatusTail`；2026-09-07 curl 實測 raw.githubusercontent.com 回 206＋
 
 | 站 | dueHour | 出處（實查） |
 |----|---------|------|
-| live | 9 | 本站 `index.html` 的 `function liveDataDate`：09:00 為盤前／盤中分水嶺 |
+| live | 9 | 本站 `index.html` 的 `function liveStatus`：`if(hm<"09:00")` 的**牆鐘**分水嶺（**不是** `liveDataDate` 的 `ts>="09:00"`，那個比的是成交時戳；2026-09-07 驗收更正） |
 | flows | 20 | `taiwan-flows/index.html` 的 `function lastDueTradingDay`（平日 `hour>=20` 才期待今日），同後端 `src/run_daily.py` 的 `PUBLISH_DEADLINE_HOUR = 20` |
 | postmkt | 22.5 | `postmkt/index.html` 的 `function pmStatus`：資料日為上一交易日且 `hm < "22:30"` 仍判「正常」 |
 
