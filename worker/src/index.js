@@ -3697,8 +3697,21 @@ async function syncKey(code) {
 }
 
 // ---- /status 全系統資料健康端點（新資料規範 schema:1 首例，2026-08-11）----
-// 五站一覽：live（本站 KV）／flows／news／brief／postmkt（跨 repo raw JSON）。
+// 六站一覽：live（本站 KV）／flows／news／brief／postmkt／backtest（跨 repo raw 產出檔）。
 // 單站失敗不拖垮端點（Promise.allSettled）；判級為可測純函式，台北時區。
+// **時間感知判級（2026-09-07）**：各站盤後管線是晚上才跑，舊版 gradeMarket 在平日一律期待
+// 「今日」資料，於是 postmkt 從 00:00 到當晚產出為止都是 yellow（約 21/24 小時），那顆燈沒有
+// 資訊量（2026-09-07 18:12 線上實測：/status 報 postmkt yellow，postmkt 站自己的頂列同時報
+// 「正常」；同日 22:03 自然轉綠）。修法＝每站帶一個「預期發布時點」dueHour，平日未到該時點時
+// 預期資料日退成前一個交易日。三個時點**取各站前端現行判準的同一個值，不另創口徑**：
+//   live    9    —— 本站 index.html 的 `function liveDataDate`：以 09:00 為盤前／盤中分水嶺
+//   flows   20   —— taiwan-flows/index.html 的 `function lastDueTradingDay`（平日 hour>=20 才
+//                   期待今日），同後端 src/run_daily.py 的 PUBLISH_DEADLINE_HOUR = 20
+//   postmkt 22.5 —— postmkt/index.html 的 `function pmStatus`：資料日為上一交易日且 hm < "22:30"
+//                   仍判「正常」（盤後 build 21:53 起跑、含延遲約 22:10 完成）
+// 只有 level 會因此從假 yellow 轉 green；data_date／updated_at 的欄位語意一律不動，schema 形狀不變。
+// 國定假日仍不處理（維持全家族既有立場，repo 無行事曆來源）：假日晚間會誤報一次落後，屬已知可接受。
+export const STATUS_DUE_HOUR = { live: 9, flows: 20, postmkt: 22.5 };
 
 // 日期加減（YYYY-MM-DD 字串運算，不碰本地時區）
 export function addDaysISO(dateISO, days) {
@@ -3706,10 +3719,14 @@ export function addDaysISO(dateISO, days) {
   t.setUTCDate(t.getUTCDate() + days);
   return t.toISOString().slice(0, 10);
 }
-// 最近預期交易日：平日＝今天、週末＝上週五。國定假日不處理（簡化：連假日仍以平日計，
-// 假日當天會誤判 yellow/red，屬已知可接受誤差）。
-export function lastExpectedTradingDate(tp) {
-  if (tp.dow >= 1 && tp.dow <= 5) return tp.date;
+// 最近預期交易日：平日＝今天（但**未到該站的發布時點 dueHour 前退成前一個交易日**）、
+// 週末＝上週五。dueHour 為台北小時、可含小數（22.5 ＝ 22:30），預設 0 ＝不看時間、一律
+// 期待今日——那是 2026-09-07 之前的舊行為，只保留給回歸比對用，buildStatus 每站都明確給值。
+// 國定假日不處理（簡化：連假日仍以平日計，假日當天會誤判 yellow/red，屬已知可接受誤差）。
+export function lastExpectedTradingDate(tp, dueHour = 0) {
+  if (tp.dow >= 1 && tp.dow <= 5) {
+    return tp.hour + (tp.minute || 0) / 60 >= dueHour ? tp.date : prevExpectedTradingDate(tp.date);
+  }
   return addDaysISO(tp.date, tp.dow === 6 ? -1 : -2);   // 週六退1天、週日退2天到週五
 }
 // 往前一個預期交易日（跳過週末；同樣不處理國定假日）
@@ -3720,9 +3737,10 @@ export function prevExpectedTradingDate(dateISO) {
 }
 // 市場資料類判級（live/flows/postmkt）：資料日 ≥ 最近預期交易日 → green；
 // 落後 1 個交易日 → yellow；更舊或無日期 → red。
-export function gradeMarket(dataDate, tp) {
+// dueHour＝該站的預期發布時點（見段首 STATUS_DUE_HOUR）；省略＝舊的「不看時間」行為。
+export function gradeMarket(dataDate, tp, dueHour = 0) {
   if (!dataDate) return "red";
-  const exp = lastExpectedTradingDate(tp);
+  const exp = lastExpectedTradingDate(tp, dueHour);
   if (dataDate >= exp) return "green";
   if (dataDate >= prevExpectedTradingDate(exp)) return "yellow";
   return "red";
@@ -3743,6 +3761,35 @@ export function gradeBrief(dataDate, tp) {
   if (dataDate === tp.date) return "green";
   return dataDate === addDaysISO(tp.date, -1) ? "yellow" : "red";
 }
+// backtest 判級（taiwan-backtest 的 walkforward 前推對帳帳冊）：該站每交易日兩班
+// （台北 21:07 主班／23:07 兜底，見 taiwan-backtest/.github/workflows/walkforward.yml），
+// 且該 workflow 頂端自述「GitHub cron 常態延遲 1~2 小時」，所以 21:07 一到就要求今日資料存在會誤報。
+// **判準逐項對齊該站前端 index.html 的 `function ledgerStatus`，不另創口徑**：先把台北時鐘回推
+// 12 小時得「參考班次日」refDay（同 walkforward_daily.py 的 target=(now-12h)，避免跨午夜滾成隔日），
+// 再看參考時鐘 HH:MM 的兩個門檻——
+//   < 09:07（台北 21:07 前）             ：今日班次尚未排定執行，帳冊停在上一交易日＝正常 → green
+//   09:07~13:07（台北 21:07 ~ 隔日 01:07）：主班＋兜底＋延遲窗內＝等待資料發布 → yellow
+//   >= 13:07（台北隔日 01:07 後）        ：兩班加緩衝都過了仍缺＝資料缺漏 → red
+//   （13:07 ＝ 兜底 23:07 ＋ 上述自述延遲上限 2 小時，與該站前端註解同一個推導。）
+// 落後一個交易日以上一律 red；週末看 refDay 的上一個平日（該站的「休市定格」對應本端點 green，
+// 與 gradeMarket 週末看上週五同一立場）。無法解析的日期 → red（端點無 unknown 級，見 CLAUDE.md）。
+// 國定假日不處理，與其餘各站同立場。
+// 台北時鐘 → 參考時鐘（−12 小時），回 { day, hm }
+export function backtestRefClock(tp) {
+  const back = tp.hour < 12;
+  const h = back ? tp.hour + 12 : tp.hour - 12;
+  return { day: back ? addDaysISO(tp.date, -1) : tp.date,
+    hm: `${String(h).padStart(2, "0")}:${String(tp.minute || 0).padStart(2, "0")}` };
+}
+export function gradeBacktest(lastDate, tp) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lastDate == null ? "" : lastDate))) return "red";
+  const { day, hm } = backtestRefClock(tp);
+  const dow = new Date(day + "T00:00:00Z").getUTCDay();
+  if (dow === 0 || dow === 6) return lastDate >= prevExpectedTradingDate(day) ? "green" : "red";
+  if (lastDate >= day) return "green";
+  if (lastDate < prevExpectedTradingDate(day)) return "red";   // 落後一個交易日以上
+  return hm < "09:07" ? "green" : hm < "13:07" ? "yellow" : "red";
+}
 // epoch ms → ISO8601 +08:00（秒級）
 export function isoTaipei(ms) {
   return new Date(ms + 8 * 3600e3).toISOString().slice(0, 19) + "+08:00";
@@ -3754,6 +3801,16 @@ export function extractHeadFields(text) {
     date: (String(text).match(/"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"/) || [])[1] || null,
     generated_at: (String(text).match(/"generated_at"\s*:\s*"([^"]+)"/) || [])[1] || null,
   };
+}
+// 從 CSV 檔尾文字撈「最後一筆的日期」（第 1 欄 date）。尾段可能從半列切起，故由後往前找第一個
+// 以 YYYY-MM-DD＋逗號開頭的資料列——半列不會命中（切點在列中間），表頭 "date,..." 也不會命中。
+export function extractTailDate(text) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^(\d{4}-\d{2}-\d{2})\s*,/.exec(lines[i].trim());
+    if (m) return m[1];
+  }
+  return null;
 }
 // 小檔 JSON 來源（<300KB）：整包抓＋parse
 async function fetchStatusJson(fetchFn, url) {
@@ -3772,8 +3829,31 @@ async function fetchStatusHead(fetchFn, url, bytes = 2048) {
   reader.cancel().catch(() => {});
   return new TextDecoder().decode(value || new Uint8Array());
 }
+// 會持續成長的來源：Range 只取**檔尾**（後綴範圍 `bytes=-N`，RFC 7233 §2.1）。
+// 已驗證事實（2026-09-07 curl 實打 ledger.csv 帶 `Range: bytes=-120`）：raw.githubusercontent.com
+// 回 `HTTP/2 206` ＋ `content-range: bytes 55-174/175`，確認支援後綴範圍。用在 ledger.csv：它是 CSV 不是
+// JSON、且每交易日追加一列會一直長，我們只要最後一筆，整檔抓下來沒有意義。
+// N 的取法：ledger.csv 一列約 90 bytes（2026-09-07 實測全檔 175 B ＝表頭＋1 列），取 4096 B
+// ≒ 最後 40 餘列，足以在任何情況下涵蓋「最後一筆」；檔案小於 N 時伺服器直接回整檔，成本上限
+// 就是這 4KB。若 CDN 不支援後綴範圍而回 200 全檔，改用 reader 串流並只保留尾端 N 字元，
+// 不把整包留在記憶體（與 fetchStatusHead 的 200 回退同一手法，方向相反）。
+async function fetchStatusTail(fetchFn, url, bytes = 4096) {
+  const r = await fetchFn(url, { headers: { Range: `bytes=-${bytes}` }, signal: timeoutSignal() });
+  if (!r.ok && r.status !== 206) throw new Error(`HTTP ${r.status}`);
+  if (r.status === 206 || !r.body || !r.body.getReader) return r.text();
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let tail = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    tail = (tail + dec.decode(value, { stream: true })).slice(-bytes);
+  }
+  return tail;
+}
 // live：直接用本站 KV 的 fi 索引（同 `/` 根路徑 health 區塊做法，不外抓）。
 // 依序查最近兩個預期交易日的 frame 索引，第一個非空者為資料日。
+// 這裡**刻意不帶 dueHour**：不帶＝從今日查起、查不到再退前一日，是帶了之後的超集，
+// 資料日的取法不受時間感知影響（時間感知只作用在 gradeMarket 的判級）。
 async function statusSiteLive(env, tp) {
   const exp = lastExpectedTradingDate(tp);
   for (const d of [exp, prevExpectedTradingDate(exp)]) {
@@ -3785,15 +3865,16 @@ async function statusSiteLive(env, tp) {
   }
   return { data_date: null, updated_at: null, note: "近兩個交易日 KV 無 frame" };
 }
-// /status 主體：五站併發、單站失敗只染紅該站
+// /status 主體：六站併發、單站失敗只染紅該站
 export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) {
   const FLOWS_STATUS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/status.json";
   const NEWS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/news.json";
   const BRIEF_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/daily-brief-card.json";
   const POSTMKT_URL = `${POSTMKT_BASE}/data/postmkt.json`;
+  const BACKTEST_URL = "https://raw.githubusercontent.com/shihpc/taiwan-backtest/main/walkforward/ledger.csv";
   const defs = [
-    { id: "live", name: "即時類股動態", grade: "market", run: () => statusSiteLive(env, tp) },
-    { id: "flows", name: "盤後法人動態", grade: "market", run: async () => {
+    { id: "live", name: "即時類股動態", grade: "market", due: STATUS_DUE_HOUR.live, run: () => statusSiteLive(env, tp) },
+    { id: "flows", name: "盤後法人動態", grade: "market", due: STATUS_DUE_HOUR.flows, run: async () => {
       const j = await fetchStatusJson(fetchFn, FLOWS_STATUS);   // 353B 小檔
       return { data_date: j.date || null, updated_at: j.checked_at || null, note: `健檢 ${j.status || "unknown"}` };
     } },
@@ -3808,9 +3889,15 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
       return { data_date: j.date || null, updated_at: j.generated_at || null,
         note: j.edition ? `第 ${j.edition} 版` : "" };
     } },
-    { id: "postmkt", name: "盤後分析", grade: "market", run: async () => {
+    { id: "postmkt", name: "盤後分析", grade: "market", due: STATUS_DUE_HOUR.postmkt, run: async () => {
       const h = extractHeadFields(await fetchStatusHead(fetchFn, POSTMKT_URL));   // 1.6MB 大檔只取 Range 檔頭
       return { data_date: h.date, updated_at: h.generated_at, note: "" };
+    } },
+    { id: "backtest", name: "策略回測", grade: "backtest", run: async () => {
+      // CSV 不是 JSON、且逐日追加會一直長 → Range 只取檔尾 4KB（見 fetchStatusTail 註解）。
+      // 帳冊沒有產出時刻欄位，updated_at 一律 null（不臆造；欄位語意不動）。
+      const d = extractTailDate(await fetchStatusTail(fetchFn, BACKTEST_URL));
+      return { data_date: d, updated_at: null, note: d ? "walkforward 帳冊" : "帳冊無可解析的日期列" };
     } },
   ];
   const results = await Promise.allSettled(defs.map((d) => d.run()));
@@ -3823,7 +3910,8 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
     const v = r.value;
     const level = d.grade === "news" ? gradeNews(v.updated_at, nowMs)
       : d.grade === "brief" ? gradeBrief(v.data_date, tp)
-      : gradeMarket(v.data_date, tp);
+      : d.grade === "backtest" ? gradeBacktest(v.data_date, tp)
+      : gradeMarket(v.data_date, tp, d.due);
     return { id: d.id, name: d.name, data_date: v.data_date, updated_at: v.updated_at, level, note: v.note || "" };
   });
   return { schema: 1, generated_at: isoTaipei(nowMs), status: "ok", sites };
@@ -4145,7 +4233,7 @@ export default {
         return json({ error: String(e && e.message || e) }, { "Cache-Control": "no-store" });
       }
     }
-    if (url.pathname === "/status") {  // 全系統資料健康端點（五站紅黃綠；新資料規範 schema:1 首例）
+    if (url.pathname === "/status") {  // 全系統資料健康端點（六站紅黃綠；新資料規範 schema:1 首例）
       // cf 快取 5 分鐘：cacheKey 用獨立 path（同 /cards/data 慣例——caches.default 丟棄
       // query string，獨立 path 可避免與其他路由互踩；/status 本身無參數，固定一鍵）。
       const cache = caches.default;

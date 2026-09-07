@@ -164,15 +164,55 @@
   仍是渲染端實際生效的防線，不可因「上游已有測試」而拿掉**。
 - 測試：`node test/morningcards.mjs`（含 `fxSplitQuote` 的分句與截斷案例）。
 
-## /status 全系統資料健康端點（2026-08-11，新資料規範 schema:1 首例）
+## /status 全系統資料健康端點（2026-08-11；2026-09-07 改六站＋時間感知判級）
 
-`GET /status` 回五站（live／flows／news／brief／postmkt）的 `data_date`／`updated_at`／
-紅黃綠 `level`（`export async function buildStatus`，cf 快取 5 分）。來源：live 讀本站 KV
-`fi:<date>` frame 索引；flows 抓 `taiwan-flows/data/status.json`（小檔）；news／brief 抓
-`taiwan-stock-news` 的 `news.json`／`daily-brief-card.json`；postmkt 因 `postmkt.json` 逾
-1.6MB，以 **Range 只取檔頭** regex 撈 date/generated_at。判級為純函式（`gradeMarket`／
-`gradeNews`／`gradeBrief`，台北時區、**國定假日不處理**）；單站失敗只染紅該站不垮端點。
-測試 `node test/status.mjs`。
+`GET /status` 回**六站**（live／flows／news／brief／postmkt／backtest）的 `data_date`／
+`updated_at`／紅黃綠 `level`（`export async function buildStatus`，cf 快取 5 分）。
+**schema 形狀與欄位名不動**（`schema:1`，入口站 shihpc.github.io 與 claude-harness
+`tools/freshness_watchdog.py` 共用這個資料面）；新站一律**附加在既有五站之後**，不改順序。
+判級全是可測純函式、台北時區、**國定假日不處理**；單站失敗只染紅該站、不垮端點
+（`Promise.allSettled`）。測試 `node test/status.mjs`。
+
+**來源**：live 讀本站 KV `fi:<date>` frame 索引；flows 抓 `taiwan-flows/data/status.json`
+（小檔）；news／brief 抓 `taiwan-stock-news` 的 `news.json`／`daily-brief-card.json`；
+postmkt 因 `postmkt.json` 逾 1.6MB，以 **Range 只取檔頭**（`bytes=0-N`）regex 撈
+date/generated_at；backtest 抓 `taiwan-backtest/walkforward/ledger.csv`，**是 CSV 不是 JSON
+且逐日追加會一直長**，以 **Range 只取檔尾**（後綴範圍 `bytes=-4096`，`async function
+fetchStatusTail`；2026-09-07 curl 實測 raw.githubusercontent.com 回 206＋
+`content-range: bytes 55-174/175`，確認支援後綴範圍）再由 `export function extractTailDate`
+由後往前取第一列 `YYYY-MM-DD,`。CDN 若忽略 Range 回 200 全檔，兩支都有串流回退、不整包載入。
+
+**時間感知判級（2026-09-07）**：舊 `gradeMarket` 不看時間、平日一律期待「今日」資料，但各站
+盤後管線是晚上才跑——**postmkt 每個平日從 00:00 到當晚產出為止都是 yellow（約 21/24 小時）**，
+那顆燈沒有資訊量（2026-09-07 18:12 線上實測：`/status` 報 postmkt `data_date=2026-09-04`
+`level=yellow`，postmkt 站自己的頂列同時顯示「正常」；同日 22:03 自然轉綠）。修法＝
+`export const STATUS_DUE_HOUR` 給每站一個「預期發布時點」，
+`export function lastExpectedTradingDate(tp, dueHour)` 在平日未到該時點時把預期資料日退成
+前一個交易日，`export function gradeMarket(dataDate, tp, dueHour)` 據此判級。
+**只有 `level` 會從假黃轉綠，`data_date`／`updated_at` 語意一律不動**；階梯只是整段前移一格，
+落後 1 格仍 yellow、2 格仍 red（`dueHour` 省略＝舊行為，保留給回歸比對）。三個時點
+**取各站前端現行判準的同一個值，不另創口徑**：
+
+| 站 | dueHour | 出處（實查） |
+|----|---------|------|
+| live | 9 | 本站 `index.html` 的 `function liveDataDate`：09:00 為盤前／盤中分水嶺 |
+| flows | 20 | `taiwan-flows/index.html` 的 `function lastDueTradingDay`（平日 `hour>=20` 才期待今日），同後端 `src/run_daily.py` 的 `PUBLISH_DEADLINE_HOUR = 20` |
+| postmkt | 22.5 | `postmkt/index.html` 的 `function pmStatus`：資料日為上一交易日且 `hm < "22:30"` 仍判「正常」 |
+
+news／brief 不受影響（`gradeNews` 本來就看 `generated_at` 距今時數、`gradeBrief` 本來就是每日晨報口徑）。
+
+**backtest 判級**（`export function gradeBacktest`＋`export function backtestRefClock`）：該站
+每交易日兩班（台北 21:07 主班／23:07 兜底，見 `taiwan-backtest/.github/workflows/walkforward.yml`，
+該檔自述 GitHub cron 常態延遲 1~2 小時），所以不能用 dueHour 那套。**逐項對齊該站前端
+`taiwan-backtest/index.html` 的 `function ledgerStatus`**：先把台北時鐘回推 12 小時得參考班次日
+（同 `walkforward_daily.py` 的 `target=(now-12h)`），再看參考時鐘 —— `<09:07`（台北 21:07 前）
+班次尚未排定＝green、`09:07~13:07`（台北 21:07~隔日 01:07）等待窗＝yellow、`>=13:07` 兩班加
+緩衝均過＝red；落後一個交易日以上一律 red，週末看參考日的上一個平日。帳冊無產出時刻欄位，
+`updated_at` 固定 `null`（不臆造）。
+
+**入口站尚未接上**：shihpc.github.io 的「策略回測」卡沒有 `statusId`（見該 repo CLAUDE.md
+「五張卡」表），所以 Hub 上還不會顯示這顆點——要顯示需在該 repo 的 `PROJECTS` 那筆加
+`statusId:"backtest"`，屬另一個 repo 的改動。
 
 ## 資料是姊妹站上游（跨站變更）
 
