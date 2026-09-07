@@ -224,7 +224,7 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 **FinMind**，不是自家字面量；`script-src 'unsafe-inline'` 之下 CSP 對 `<img onerror>` 完全無效。
 姊妹站 taiwan-flows 同型問題已於 2026-09-06 實證會執行（見該 repo CLAUDE.md 注入面表 `innerHTML` 列）。
 
-**修正：補 29 處 `escI()`（新增 35 個呼叫）**，行號為 2026-09-07 當時：
+**修正：改動 30 行、新增 35 個 `escI()` 呼叫**（下表 13 個區塊；2026-09-07 驗收實測 `grep -o 'escI(' | wc -l` 由 49 → 84。注意用 `grep -c` 會得到 40 → 69，那是**行數**不是出現次數），行號為 2026-09-07 當時：
 
 | 區塊 | 位置 | 被逃逸的值 | 來源 |
 |------|------|-----------|------|
@@ -233,7 +233,7 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 | `sumRow()` | `:375` | 合計列的類股／次產業名 | classify |
 | `mkStockRow`／`flowStockRow`／`ovRadarStocks`／`renderOvTable` 成分股 | `:377`／`:426`／`:2218`／`:2116` | 股名 `info.n` | FinMind `stock_name` |
 | `renderFlow()` | `:507`／`:517`／`:533` | `flow.frames["10"/"30"]`、`baseline_date`、次產業名、下鑽標題 | Worker `/live` |
-| `ovHeadline()` | `:2011`／`:2019`／`:2031`／`:2036` | 次產業名 ×4、領頭股名 | classify |
+| `ovHeadline()` | `:2011`／`:2025`／`:2031`／`:2036` | 次產業名 ×4、領頭股名 | classify |
 | `ovDivergingBar()` | `:2077` | 三視角（次產業／產業鏈／個股）共用出口的 `r.name` | classify |
 | `renderOvTable()` | `:2103`／`:2109`／`:2118` | 次產業名、領頭股欄、下鑽標題 | classify |
 | `ovRadarHtml()` | `:2261` | 佔比升溫次產業名 | classify |
