@@ -35,21 +35,21 @@
 
 台股盤中即時資金流向監控站，同時是「股市雷達」四站家族的**資料中樞**
 （見 `PROJECT_SUMMARY.md`「一句話說明」段）。線上 https://shihpc.github.io/taiwan-flow-live-v2/ 。
-前端是單檔 `index.html`（184KB，2026-09-06 實測 188,281 bytes），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
+前端是單檔 `index.html`（191KB，2026-09-07 實測 195,343 bytes），7 個 tab：即時一覽／產業別／產業鏈／成交佔比／
 資金湧入／資金退出＋摘要分析（`index.html` 的 `<div class="tabs" id="tabs">` 區塊，
 一個 tab 一個 `data-tab` 值）。
 **`PROJECT_SUMMARY.md`（143KB，2026-09-06 實測 146,133 bytes）是本專案主記憶，接手先讀它**（「快速接手」段有未解問題）。
 前端有兩組跨站同步碼：**三站逐字同步**的 `callClaude`／`mdToHtml`／`linkifyStocks`／
 `ghSaveAnalysis`／`sumCtx*` 與費用估算 `insightCostText`／`INSIGHT_PRICES`／`USD_TWD`
-（`index.html:727-749`）；**四站同步但非逐字**的 `loadSiteVer()`＋footer `#siteVer`
-（`index.html:172`、`:2539`，本站 sessionStorage key `tf2_site_ver`，打
+（`index.html:793-812`）；**四站同步但非逐字**的 `loadSiteVer()`＋footer `#siteVer`
+（`index.html:181`、`:2606`，本站 sessionStorage key `tf2_site_ver`，打
 `api.github.com/repos/shihpc/taiwan-flow-live-v2/commits/main`，免金鑰、限 60 req/hr/IP，
 失敗靜默隱藏）。清單正本在 `postmkt/CLAUDE.md`「不可破壞的約定」第 2 條。
 
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 21 支 `.mjs`）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 22 支 `.mjs`）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
   （**14 支**＝帶 cron 10 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
@@ -202,7 +202,7 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 
 | 面向 | 現況 | CSP 對應 |
 |------|------|---------|
-| 內嵌 script | 只有 1 個 `<script>` 區塊（`index.html:179` 起） | `script-src 'self' 'unsafe-inline'`（不為 CSP 重構、不搬外部檔） |
+| 內嵌 script | 只有 1 個 `<script>` 區塊（`index.html:183` 起） | `script-src 'self' 'unsafe-inline'`（不為 CSP 重構、不搬外部檔） |
 | 內嵌事件屬性 | **零**（`on*=` 屬性 grep 無命中；事件全走 `addEventListener`／`el.onclick=` 指派） | — |
 | 外連 script／`<link>`／`<img>`／`<iframe>`／`<object>`／`<form>`／`<base>`／`@import`／`url()`／`javascript:`／`eval`／`document.write` | 皆無 | `img-src 'self' data:`（預留）、`object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、不需 `'unsafe-eval'` |
 | `style=` 屬性 | 52 處（表格內距、連結色等） | `style-src 'self' 'unsafe-inline'` |
@@ -210,9 +210,9 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 | 純導覽外連 | Yahoo（`yahoo()`／摘要 `link`）、`shihpc.github.io/postmkt/`；皆 `target="_blank" rel="noopener"` | 不受 CSP 限制（無 `navigate-to`） |
 | localStorage | `anthropic_key`／`gh_token`／`insight_model`／`tflive2_auto`（金鑰只送 Authorization header，不進 DOM） | — |
 
-**`innerHTML` 拼字串（grep 14 行）**：股名／產業名／次產業名來自自家 `classify.json` 與 Worker `/live`（信任邊界＝自家管線產出），
+**`innerHTML` 拼字串（grep 15 行）**：股名／產業名／次產業名來自自家 `classify.json` 與 Worker `/live`（信任邊界＝自家管線產出），
 數值欄走 `toFixed`／`Math.round`；含使用者可影響或第三方字串的路徑（回放錯誤訊息 `OV_REPLAY_ERR`、定格資料日、雲端歷史 meta）
-用 `escI()`（43 處）。LLM 輸出走三站同步的 `mdToHtml`（`esc2` 逃 `&<>`）＋`linkifyStocks`（href 只由 regex 命中的代號組成）。
+用 `escI()`（49 處）。LLM 輸出走三站同步的 `mdToHtml`（`esc2` 逃 `&<>`）＋`linkifyStocks`（href 只由 regex 命中的代號組成）。
 **未做逐處稽核**（2026-09-06 只做盤點）：若日後改讀第三方 JSON 進 innerHTML，要補 `escI()`。
 
 驗證（2026-09-06 實測，Playwright 本機 http.server＋`/live` route mock 凍結檔 `data/live.json`）：7 tab console 無 `Refused to`、
@@ -245,7 +245,7 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 20 支要個別跑（離線、免 token；2026-09-06 實查 worker/test/ 共 21 支）
+node test/sentinel.mjs              # 其餘 21 支要個別跑（離線、免 token；2026-09-07 實查 worker/test/ 共 22 支，含 swr.mjs）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 
