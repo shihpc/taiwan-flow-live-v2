@@ -145,12 +145,8 @@ async function buildLive(env) {
   // P3：資金湧入（frames + baseline；任何失敗不影響 /live 主體）
   try {
     const baseline = await fetchJSON(`${base}/baseline.json`, 3600);
-    const ts = String(live.ts || "");
-    const frames = env.FLOW_KV
-      ? await pickFrames(env, ts.slice(0, 10), hm2min(ts.slice(11, 16)), [10, 30])
-      : {};
-    const items = Object.entries(live.stocks).map(([code, a]) => ({ code, amt: a[1], close: a[2] }));
-    const { flow, per } = computeFlow(cl, items, baseline, frames, ts);
+    // 窗計算吃 snap_ts（原始快照時戳），不吃對外的 ts——見 computeLiveFlow 上方註解
+    const { flow, per } = await computeLiveFlow(env, live, cl, baseline);
     const blst = baseline.stocks || {};
     for (const code in live.stocks) {
       const s = per[code] || [null, null, null, null, null];
@@ -173,13 +169,23 @@ async function buildLive(env) {
 
   // 分鐘動能序列（即時一覽 tab 第二期 sparkline）：1 次 get，附近 60 分；失敗不影響 /live 主體
   try {
-    const ts = String(live.ts || "");
-    const sd = ts.slice(0, 10);
+    // series:<date> 是 storeFrame 以**台北牆鐘日**寫的 KV key，取日期同樣走 snap_ts
+    // （原始快照日），不吃對外 ts——ts 改語意後日期可能不再等於這份快照的日子。
+    const sd = snapTs(live).slice(0, 10);
     const arr = env.FLOW_KV && sd ? await env.FLOW_KV.get(`series:${sd}`, "json") : null;
     live.series = seriesTail(arr);
   } catch (e) {
     live.series = [];
   }
+  // snap_ts 是**純內部欄位**，回傳前拿掉，讓 /live 對外 JSON 逐位元不變、不變成公開契約。
+  // 為什麼可以拿掉（實查 serveLive／liveRebuild 的資料流）：snap_ts 的消費者
+  // （computeLiveFlow、上面的 series 取日期）都在**這個記憶體物件**上、在 delete 之前跑完；
+  // serveLive 只是把 buildLive 的回傳值 JSON.stringify 成 Response 存進 cf 快取，快取命中時
+  // 原封回吐 bytes，**不會解析回來重跑任何消費者**。故 snap_ts 無須存活過序列化。
+  // ⚠ 唯一在 buildLive 回傳「之後」才拿到這個物件的是 scheduled 的 storeFlowLast → flowLastPayload，
+  // 它刻意只讀對外 `ts`（理由見 flowLastPayload 上方註解）。日後若要讓它改吃 snap_ts，
+  // 必須先把這個 delete 往後挪（或改成回傳兩份），不能只改那邊。
+  delete live.snap_ts;
   return live;
 }
 
@@ -242,8 +248,17 @@ export function aggregate(cl, rows, limits, lw) {
     market[k] = { amt_yi: r1(v.amt / 1e8), lw_amt_yi: r1(num(lwtot[LW_KEY[k]]) / 1e8),
       up: v.up, down: v.down, flat: v.flat, n: v.n, up_lim: v.ul, down_lim: v.dl };
   }
+  // ts / snap_ts 拆分（2026-09-07）：兩者現階段**值完全相同**，拆的是「語意」不是「值」。
+  //   ts      ＝**對外**欄位（/live 的「資料時間」）。C 案裁示後只會改這一個的取值方式
+  //             （見 PROJECT_SUMMARY.md「/live 資料時間改取 max(date)」段）。
+  //   snap_ts ＝**內部**原始快照時戳＝本函式算出的「有分類、非指數個股 max(date)」，
+  //             語意固定為「這份 FinMind 快照本身走到哪一刻」，**不隨 ts 改語意**。
+  // 為什麼非拆不可：`pickFrames` 用它定位 KV frame、`framesDegenerate` 用它判收盤殘影
+  // （門檻 CLOSE_MIN=13:30）。ts 一旦改成 13:30/13:33，窗目標會退到 13:2x → 殘影判定由
+  // true 翻成 false → flow_last 不附、且該窗 Δ 混入 14:30 盤後定價 → 假 flow。
+  // snap_ts **刻意不進 /live 對外 JSON**（buildLive 回傳前 delete，理由見該處註解）。
   return {
-    ts, generated_at: new Date().toISOString(),
+    ts, snap_ts: ts, generated_at: new Date().toISOString(),
     stock_cols: ["chg", "amt", "close", "vol", "bv", "sv", "pts", "dp", "lim", "lw"],
     index: { tse: idxOut(idxrow["001"]), otc: idxOut(idxrow["101"]) },
     market, exchange: finalize(ex), chain: finalize(ch),
@@ -689,6 +704,24 @@ export function computeFlow(cl, items, baseline, frames, nowTs) {
   return { flow, per: stockFlow };
 }
 
+// ---- 內部消費者的「原始快照時戳」取值點（2026-09-07 ts/snap_ts 拆分）----
+// 凡是「拿時戳去定位 KV frame／判斷收盤殘影」的路徑，一律經過這裡讀 snap_ts，**不得讀 live.ts**。
+// 現階段 snap_ts === ts，行為完全中性；C 案改 ts 語意時，這條線自動免疫（見 aggregate 內註解）。
+export const snapTs = (live) => String((live && live.snap_ts) || "");
+// 窗計算單元（pickFrames → computeFlow → framesDegenerate 一整條）。抽成具名 export 有兩個用途：
+//   ① 讓「內部只吃 snap_ts」成為單一取值點，不散落在 buildLive 內；
+//   ② 供 test/snapts.mjs 直接做突變測試——把 live.ts 設成明顯錯值，這裡的產出必須逐字不動；
+//      反之把 live.snap_ts 設錯，產出必須改變（證明真的在讀 snap_ts，而非兩個都沒讀到的假綠）。
+// 只搬移取值來源，窗長 [10, 30]、items 形狀、computeFlow 參數順序全部照舊。
+export async function computeLiveFlow(env, live, cl, baseline) {
+  const sts = snapTs(live);
+  const frames = env.FLOW_KV
+    ? await pickFrames(env, sts.slice(0, 10), hm2min(sts.slice(11, 16)), [10, 30])
+    : {};
+  const items = Object.entries(live.stocks).map(([code, a]) => ({ code, amt: a[1], close: a[2] }));
+  return computeFlow(cl, items, baseline, frames, sts);
+}
+
 // ---- 案三（2026-07-19）：收盤前定格 flow:last ——盤外/週末即時一覽「象限圖＋treemap 角標」fallback ----
 // 動機：flow 盤外為 null、frame TTL 2 天 → 盤外沒有短窗資料可退回；收盤前把最後一份可用 flow
 //   定格存 KV，/live 於 flow 為 null 或收盤殘影時附頂層 flow_last（標註資料日）。
@@ -715,6 +748,15 @@ export function inFlowLastWindow(tp) {
 // （it/fi/y1/y2/ints/nl 是 baseline 直出、不受 flow=null 影響、永遠可從 sval(c) 取得，
 // 不需要在這裡重複存一份）。stocks 比照 f30 的省空間做法，只收 f10>0 的個股。
 // 純 additive：既有 mkt/f30 欄位與寫入路徑/頻率/窗口完全不變（案三驗收不得退化）。
+//
+// **ts/snap_ts 拆分（2026-09-07）：這裡刻意維持讀 `live.ts`，不改讀 snap_ts。**
+// 理由：`date`／`ts` 在這份 payload 裡是**對外標籤**，不是拿去定位 frame 的游標——
+// 前端唯一的消費點是「資料日 fallback」與「MM-DD 收盤定格」徽章（`index.html` 的
+// `live.flow_last.date`），語意就是「本站對外宣稱的資料日」，理應跟著對外 `ts` 走，
+// 否則同一份回應裡 `ts` 與 `flow_last.date` 會出現兩套資料日口徑。
+// ⚠ 已知風險（PROJECT_SUMMARY 已記）：C 案若採指數列，而指數列在寫入窗 13:25–13:40
+// 尚未更新，`flow_last.date` 可能被寫成昨日並由 TTL 保留 7 天——那是**改 ts 那一步**要
+// 一併裁決的事（屆時重看這條註解），不在本次行為中性的拆分範圍。
 export function flowLastPayload(live) {
   const fl = live && live.flow;
   if (!fl || !fl.mkt || fl.mkt.d30_yi == null) return null;

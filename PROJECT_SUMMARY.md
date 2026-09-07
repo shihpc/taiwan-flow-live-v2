@@ -1010,6 +1010,7 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
       盤後定價 1802 筆 → **假 flow**。另 `fi:` TTL 5 天 vs `f:` TTL 2 天，**週六**會因此新長出假 flow
       （現行因 `ts` 日期是週六、`fi:週六` 不存在而自然為 null）。
       → **`snap_ts` 拆分（對外 `ts` 改語意、內部另存原 `max(date)`）是三案共同的必要前置，不是可選優化。**
+      **✅ 已完成（2026-09-07，行為中性）**：`export function aggregate` 產出加 `snap_ts`（值＝現行 `ts` 的算法原封不動），內部窗計算改走 `export async function computeLiveFlow`／`export const snapTs`（`pickFrames`／`computeFlow` 的 `nowTs`／`series:<date>` 三處），`flowLastPayload` 刻意維持吃對外 `ts`；`snap_ts` **不進 `/live` 對外 JSON**（消費者全在 `buildLive` 的記憶體物件上跑完，`serveLive` 只序列化後快取、不會解析回來重跑，故回傳前 delete，對外 payload 逐位元不變），隔離證明見 `worker/test/snapts.mjs`（正反兩向突變）。
 
       **其他直接從 `ts` 切日期的地方**（改前必看）：Worker `export function flowLastPayload` 的
       `date: live.ts.slice(0,10)`（寫入窗 13:25–13:40——**乙若指數列只在收盤寫一次，會把

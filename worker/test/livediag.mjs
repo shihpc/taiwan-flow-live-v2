@@ -144,10 +144,13 @@ const row = (code, date, extra = {}) => ({ stock_id: code, date, close: 100, tot
   chk("tsDiag 不 mutate rows", JSON.stringify(rows) === before);
   delete a1.generated_at; delete a2.generated_at;
   chk("tsDiag 前後 aggregate 輸出一致", eq(a1, a2));
+  // snap_ts（2026-09-07 拆分）＝內部原始快照時戳，由 aggregate 產出、buildLive 回傳前 delete。
+  // 這條守的是 aggregate 的產出鍵集合；「/live 對外 JSON 不含 snap_ts」由下方路由整合區塊守。
   chk("aggregate 頂層欄位集合未變（/live 契約）",
     eq(Object.keys(a1).sort(), ["chain", "chain_coverage", "exchange", "generated_at", "index",
-      "market", "stock_cols", "stocks", "ts"].filter((k) => k !== "generated_at").sort()),
+      "market", "snap_ts", "stock_cols", "stocks", "ts"].filter((k) => k !== "generated_at").sort()),
     JSON.stringify(Object.keys(a1).sort()));
+  chk("aggregate 的 snap_ts 與 ts 同值（拆語意不拆值）", a1.snap_ts === a1.ts, `${a1.snap_ts} / ${a1.ts}`);
 }
 
 // ---- 路由整合：/livediag 與 /live 互不污染（mock fetch / caches / KV）----
@@ -194,6 +197,9 @@ const row = (code, date, extra = {}) => ({ stock_id: code, date, close: 100, tot
       "latest", "window", "rows_total", "unclassified", "dates"]
       .some((k) => k in live1), Object.keys(live1).join(","));
   chk("路由 /live 的 ts 仍是原口徑 max(date)", live1.ts === "2026-09-04 15:00:00.000000", live1.ts);
+  // snap_ts 是純內部欄位（buildLive 回傳前 delete）：對外 JSON 不得出現，否則就成了公開契約
+  chk("路由 /live 對外 JSON 不含 snap_ts（純內部欄位）", !("snap_ts" in live1),
+    Object.keys(live1).join(","));
   const norm = (o) => { const c = { ...o }; delete c.generated_at; return JSON.stringify(c); };
   chk("路由 打過 /livediag 後 /live 回傳零改動", norm(live1) === norm(live2));
   chk("路由 /livediag 沒污染 /live 的 cf 快取 key", ![...store.keys()].some((k) => k.includes("livediag")),
