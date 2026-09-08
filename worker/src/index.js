@@ -3786,14 +3786,20 @@ export function gradeBrief(dataDate, tp) {
 }
 // backtest 判級（taiwan-backtest 的 walkforward 前推對帳帳冊）：該站每交易日兩班
 // （台北 21:07 主班／23:07 兜底，見 taiwan-backtest/.github/workflows/walkforward.yml），
-// 且該 workflow 頂端自述「GitHub cron 常態延遲 1~2 小時」，所以 21:07 一到就要求今日資料存在會誤報。
+// 而 GitHub cron 的實測延遲遠大於該 workflow 原本自述的「1~2 小時」，所以 21:07 一到就要求今日資料存在會誤報。
 // **判準逐項對齊該站前端 index.html 的 `function ledgerStatus`，不另創口徑**：先把台北時鐘回推
 // 12 小時得「參考班次日」refDay（同 walkforward_daily.py 的 target=(now-12h)，避免跨午夜滾成隔日），
 // 再看參考時鐘 HH:MM 的兩個門檻——
 //   < 09:07（台北 21:07 前）             ：今日班次尚未排定執行，帳冊停在上一交易日＝正常 → green
-//   09:07~13:07（台北 21:07 ~ 隔日 01:07）：主班＋兜底＋延遲窗內＝等待資料發布 → yellow
-//   >= 13:07（台北隔日 01:07 後）        ：兩班加緩衝都過了仍缺＝資料缺漏 → red
-//   （13:07 ＝ 兜底 23:07 ＋ 上述自述延遲上限 2 小時，與該站前端註解同一個推導。）
+//   09:07~19:07（台北 21:07 ~ 隔日 07:07）：主班＋兜底＋實測延遲窗內＝等待資料發布 → yellow
+//   >= 19:07（台北隔日 07:07 後）        ：兩班加緩衝都過了仍缺＝資料缺漏 → red
+// 19:07（＝主班 21:07 ＋10 小時）的依據（2026-09-07 實測樣本，使用者裁定；三處門檻同步改）：
+//   取本帳號 taiwan-flows／postmkt／taiwan-flow-live-v2 三個 repo 共 **120 筆** event:schedule run，
+//   以 created_at 減 cron 排定時刻算延遲——中位數 3h02m、p90 6h09m、最大 9h45m；>4h 佔 26.7%
+//   （＝舊門檻 13:07＝主班+4h 的常態誤報率，2026-09-07 就誤報過一次），**>10h 為 0 筆**。
+//   另一側天花板是該腳本自己的硬期限：walkforward_daily.py 的 target=(now−12h) 在主班+14h53m
+//   （台北隔日 12:00）後把參考日滾成隔天、該日永久漏記，19:07 距它仍有近 5 小時餘裕。
+//   舊值 13:07 推自 walkforward.yml 檔頭「常態延遲 1~2 小時」那句，該句無實測支撐、已同批更正。
 // 落後一個交易日以上一律 red；週末看 refDay 的上一個平日（該站的「休市定格」對應本端點 green，
 // 與 gradeMarket 週末看上週五同一立場）。無法解析的日期 → red（端點無 unknown 級，見 CLAUDE.md）。
 // 國定假日不處理，與其餘各站同立場。
@@ -3811,7 +3817,7 @@ export function gradeBacktest(lastDate, tp) {
   if (dow === 0 || dow === 6) return lastDate >= prevExpectedTradingDate(day) ? "green" : "red";
   if (lastDate >= day) return "green";
   if (lastDate < prevExpectedTradingDate(day)) return "red";   // 落後一個交易日以上
-  return hm < "09:07" ? "green" : hm < "13:07" ? "yellow" : "red";
+  return hm < "09:07" ? "green" : hm < "19:07" ? "yellow" : "red";
 }
 // epoch ms → ISO8601 +08:00（秒級）
 export function isoTaipei(ms) {

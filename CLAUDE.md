@@ -203,12 +203,17 @@ news／brief 不受影響（`gradeNews` 本來就看 `generated_at` 距今時數
 
 **backtest 判級**（`export function gradeBacktest`＋`export function backtestRefClock`）：該站
 每交易日兩班（台北 21:07 主班／23:07 兜底，見 `taiwan-backtest/.github/workflows/walkforward.yml`，
-該檔自述 GitHub cron 常態延遲 1~2 小時），所以不能用 dueHour 那套。**逐項對齊該站前端
+GitHub cron 實測延遲中位數 3h02m／p90 6h09m／最大 9h45m），所以不能用 dueHour 那套。**逐項對齊該站前端
 `taiwan-backtest/index.html` 的 `function ledgerStatus`**：先把台北時鐘回推 12 小時得參考班次日
 （同 `walkforward_daily.py` 的 `target=(now-12h)`），再看參考時鐘 —— `<09:07`（台北 21:07 前）
-班次尚未排定＝green、`09:07~13:07`（台北 21:07~隔日 01:07）等待窗＝yellow、`>=13:07` 兩班加
+班次尚未排定＝green、`09:07~19:07`（台北 21:07~隔日 07:07）等待窗＝yellow、`>=19:07` 兩班加
 緩衝均過＝red；落後一個交易日以上一律 red，週末看參考日的上一個平日。帳冊無產出時刻欄位，
 `updated_at` 固定 `null`（不臆造）。
+**紅線 19:07＝主班 +10 小時（2026-09-07 使用者裁定，原 13:07＝主班+4h）**：依 120 筆
+`event:schedule` run 延遲實測，>4h 佔 26.7%（舊門檻誤報率，09-07 誤報過一次）、**>10h 為 0 筆**；
+上限受 `walkforward_daily.py` 硬期限 `target=(now−12h)`（主班 +14h53m）約束，19:07 仍有近 5 小時餘裕。
+**同一門檻有三份實作**（本檔 `gradeBacktest`、該站 `ledgerStatus`、
+`claude-harness/tools/freshness_watchdog.py` 的 `BACKTEST_MISSING_FROM`），**改一處要改三處**。
 
 **入口站已接上（2026-09-07，commit `be4877a`）**：shihpc.github.io 的「策略回測」卡已在 `PROJECTS`
 那筆補上 `statusId:"backtest"`（見該 repo CLAUDE.md「五張卡」表），Hub 上會顯示這顆點。

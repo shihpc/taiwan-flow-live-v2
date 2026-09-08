@@ -137,7 +137,9 @@ const SUN = { date: "2026-08-09", dow: 0, hour: 12, minute: 0 };
 }
 
 // ---- backtest 判級（對齊 taiwan-backtest/index.html 的 ledgerStatus）----
-// 參考時鐘＝台北時鐘 −12h；門檻 09:07（台北 21:07）／13:07（台北隔日 01:07）。
+// 參考時鐘＝台北時鐘 −12h；門檻 09:07（台北 21:07 主班）／19:07（台北隔日 07:07＝主班 +10h）。
+// 19:07 於 2026-09-07 由 13:07（主班 +4h）放寬，依 120 筆 event:schedule run 的延遲實測
+// （中位數 3h02m／p90 6h09m／最大 9h45m、>4h 佔 26.7%、>10h 為 0 筆）；三站門檻須同步。
 {
   const tp = (date, dow, hour, minute = 0) => ({ date, dow, hour, minute });
   // 曆日對照（實查）：2026-09-07 週一、09-08 週二、09-09 週三、09-11 週五、09-12 週六
@@ -154,17 +156,24 @@ const SUN = { date: "2026-08-09", dow: 0, hour: 12, minute: 0 };
   chk("backtest 帳冊已記到參考交易日 → green（不論時點）",
     gradeBacktest("2026-09-08", tp("2026-09-08", 2, 23, 0)) === "green"
     && gradeBacktest("2026-09-08", tp("2026-09-09", 3, 2, 0)) === "green");
-  // 落後：台北 21:07~隔日 01:07 之間＝等待
+  // 落後：台北 21:07~隔日 07:07 之間＝等待
   chk("backtest 台北 21:07（門檻整點）→ yellow",
     gradeBacktest("2026-09-07", tp("2026-09-08", 2, 21, 7)) === "yellow");
   chk("backtest 台北 21:06（門檻前一分）→ green",
     gradeBacktest("2026-09-07", tp("2026-09-08", 2, 21, 6)) === "green");
   chk("backtest 台北 23:30（兩班之間）→ yellow",
     gradeBacktest("2026-09-07", tp("2026-09-08", 2, 23, 30)) === "yellow");
-  chk("backtest 台北隔日 01:07（緩衝用盡）→ red",
-    gradeBacktest("2026-09-07", tp("2026-09-09", 3, 1, 7)) === "red");
-  chk("backtest 台北隔日 01:06（緩衝內）→ yellow",
-    gradeBacktest("2026-09-07", tp("2026-09-09", 3, 1, 6)) === "yellow");
+  chk("backtest 台北隔日 07:07（主班+10h 用盡）→ red",
+    gradeBacktest("2026-09-07", tp("2026-09-09", 3, 7, 7)) === "red");
+  chk("backtest 台北隔日 07:06（緩衝內）→ yellow",
+    gradeBacktest("2026-09-07", tp("2026-09-09", 3, 7, 6)) === "yellow");
+  // 2026-09-07 放寬的那一段：舊門檻（台北隔日 01:07~07:06）原本 red，現在一律 yellow
+  chk("backtest 舊門檻區間（台北隔日 01:07／03:00／07:06）→ 全部 yellow",
+    [[1, 7], [3, 0], [7, 6]].every(([h, m]) =>
+      gradeBacktest("2026-09-07", tp("2026-09-09", 3, h, m)) === "yellow"));
+  // 2026-09-07 的實際誤報情境：台北 09-08 01:36、帳冊停在 09-04（09-07 那班延遲到 02:13 才落地）
+  chk("backtest 2026-09-07 誤報情境 → yellow（舊門檻為 red）",
+    gradeBacktest("2026-09-04", tp("2026-09-08", 2, 1, 36)) === "yellow");
   // 落後一個交易日以上：任何時點都 red
   chk("backtest 落後 2 交易日 → red（即使班次尚未排定）",
     gradeBacktest("2026-09-04", tp("2026-09-08", 2, 18, 0)) === "red");
@@ -179,8 +188,8 @@ const SUN = { date: "2026-08-09", dow: 0, hour: 12, minute: 0 };
     && gradeBacktest("", tp("2026-09-08", 2, 18, 0)) === "red"
     && gradeBacktest("2026/09/07", tp("2026-09-08", 2, 18, 0)) === "red");
   // 國定假日不處理的已知誤報方向
-  chk("backtest 國定假日：過 13:07 門檻誤報 red（方向偏保守，與各站同立場）",
-    gradeBacktest("2026-09-07", tp("2026-09-09", 3, 3, 0)) === "red");
+  chk("backtest 國定假日：過 19:07 門檻誤報 red（方向偏保守，與各站同立場）",
+    gradeBacktest("2026-09-07", tp("2026-09-09", 3, 9, 0)) === "red");
 }
 
 // ---- extractTailDate（CSV 檔尾）----
