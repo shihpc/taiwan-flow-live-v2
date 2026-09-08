@@ -348,7 +348,22 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 
 **可見文案一律稱「指數時間」，不得再寫「最後成交」**（2026-09-08 改，四處：`renderTopline` 資料日 tooltip、
 `liveStatus` 收盤定格／盤中兩個 tooltip、`insightHtml` 摘要分析 crumb）。`ts` 為 `null` 時經共用函式
-`function idxTsText` 降級為「—」，**不得印出字面 `null`**；資料日 tooltip 改顯「無指數時間（上游未提供加權／櫃買指數列）」。
+`function idxTsText` 降級為「—」，**不得印出字面 `null`**。
+
+資料日 tooltip 由 `function dataDateTitle` 產生，**三種狀態不可合併成一個三元**（2026-09-08 首版就是
+`live&&live.ts ? A : B`，讓「沒拿到 payload」與「拿到了但 `ts` 為 null」共用否定分支，於是 `/live` 掛掉時
+也顯示「上游未提供指數列」——**斷言了我方並不知道的成因**，且與同列右側狀態欄「`/live` 載入失敗，
+無法判斷資料狀態」直接矛盾，覆驗退回）：
+
+| 狀態 | tooltip |
+|------|---------|
+| `live` 為 null（含 boot 兩次失敗） | **空字串**＝不掛 tooltip、不臆測成因 |
+| 有 payload 但 `ts` 為 null | `無指數時間（上游未提供加權／櫃買指數列）` |
+| 有 `ts` | `指數時間 <ts> —— 加權指數（缺則櫃買指數）更新時刻，` ＋ 依 `function dataDateFromTs`（＝`ts` 時分 ≥09:00）接「資料日即取自此」或「但其時分早於 09:00，資料日改由後備來源推得」 |
+
+兩點刻意的精確性：①措辭寫「加權指數（**缺則櫃買指數**）」——Worker 是 `001 || 101`，`ts` 可能來自櫃買指數；
+②「資料日即取自此」是**有條件**的斷言，由 `dataDateFromTs` 與 `liveDataDate` 共用 `TS_RE`／`function tsParts`
+保證判準一致，**改一邊要改另一邊**，否則又會回到「敘述與程式不符」。
 
 本站更新＝`generated_at`（Worker 牆鐘 UTC Z）轉台北到分。狀態五值（台北時區、交易日只排週末）：**查詢失敗（未知）**＝boot 兩次
 都拿不到可用 payload（後續自動刷新失敗沿用上一份、不改狀態）；**延遲**＝`generated_at` 距今 >3 分（沿用舊門檻）；**休市定格**＝

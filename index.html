@@ -306,8 +306,28 @@ function prevWeekday(d){   // YYYY-MM-DD → 前一個平日（僅排週末）
 // 不是「個股最後一筆成交時間」——畫面用字一律稱「指數時間」，不得再寫「最後成交」。
 // 兩列指數皆缺時 ts 為 null，此處統一降級為「—」，**不得讓字面 null 進到畫面**。
 function idxTsText(live){ const t=live&&live.ts?String(live.ts):""; return t||"—"; }
+// ts 的「日期 時分」解析：liveDataDate 與 dataDateFromTs 共用同一條正則與 09:00 門檻，
+// 兩者判準必須永遠一致（tooltip 能不能斷言「資料日即取自此」就靠它），故抽成一處、不重寫第二份。
+const TS_RE=/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/;
+const tsParts=live=>TS_RE.exec(String((live&&live.ts)||""));
+// 資料日是否**真的**取自 ts（＝liveDataDate 走第①分支）。false ＝走了 flow_last／prevWeekday 後備，
+// 此時 tooltip 不可再無條件說「資料日即取自此」（該後備目前是死碼，但保留就是為了它可能被走到）。
+const dataDateFromTs=live=>{const m=tsParts(live);return !!(m&&m[2]>="09:00");};
+// 資料日 tooltip 的三種狀態，**刻意不合併成一個三元**——2026-09-08 覆驗退回的正是這個：
+// `live&&live.ts ? A : B` 讓「根本沒拿到 payload」與「拿到了但 ts 為 null」共用否定分支，
+// 於是 /live 掛掉時也顯示「上游未提供指數列」，**斷言了我方並不知道的成因**，
+// 且與同列右側狀態欄「/live 載入失敗，無法判斷資料狀態」直接矛盾。
+//   ① 沒拿到 payload（live 為 null，含 boot 兩次失敗）→ 空字串＝不掛 tooltip、不臆測成因（同舊行為）
+//   ② 拿到 payload 但 ts 為 null（兩列指數皆缺）→ 只陳述「沒有指數時間」這個已知事實
+//   ③ 有 ts → 說明它是什麼，並依 dataDateFromTs 決定能否斷言「資料日即取自此」
+function dataDateTitle(live){
+  if(!live)return "";
+  if(!live.ts)return "無指數時間（上游未提供加權／櫃買指數列）";
+  return `指數時間 ${live.ts} —— 加權指數（缺則櫃買指數）更新時刻，`
+    +(dataDateFromTs(live)?"資料日即取自此":"但其時分早於 09:00，資料日改由後備來源推得");
+}
 function liveDataDate(live){
-  const m=/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/.exec(String((live&&live.ts)||""));
+  const m=tsParts(live);
   const fl=(live&&live.flow_last&&/^\d{4}-\d{2}-\d{2}$/.test(String(live.flow_last.date||"")))?live.flow_last.date:null;
   if(!m)return fl;
   if(m[2]>="09:00")return m[1];
@@ -334,9 +354,8 @@ function renderTopline(){
   const live=state.live, st=liveStatus(live,!!state.liveErr);
   const d=live?(liveDataDate(live)||"—"):"—", gen=live?fmtTaipeiMin(live.generated_at):"—";
   const src=CFG.worker?"":isLocal?"（本機）":"（靜態快照）";
-  // 資料日 tooltip：新語意下 ts 的日期部分**就是**資料日依據（舊文案「非資料日依據」已自我矛盾，2026-09-08 改）
-  el.innerHTML=`資料日 <b title="${escI(live&&live.ts?"指數時間 "+live.ts+"（加權指數更新時刻，資料日即取自此）"
-                                                :"無指數時間（上游未提供加權／櫃買指數列）")}">${escI(d)}</b>`
+  // 資料日 tooltip 三態見 dataDateTitle（不可退回成單一三元，理由寫在該函式上方）
+  el.innerHTML=`資料日 <b title="${escI(dataDateTitle(live))}">${escI(d)}</b>`
     +`<span class="tb-sep">｜</span>本站更新 <b>${escI(gen)}</b>${escI(src)}`
     +`<span class="tb-sep">｜</span>狀態 <b class="${st.cls}" title="${escI(st.title)}">${escI(st.txt)}</b>`
     +(autoTimer?`<span class="tb-mut"> · ⏱自動</span>`:"");
