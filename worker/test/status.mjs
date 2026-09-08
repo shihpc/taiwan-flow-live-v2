@@ -1,6 +1,7 @@
 // /status 全系統資料健康端點離線單元測試（2026-08-11）
 // 無需 token、不打真實網路——fetch 全用 mock。執行：cd worker && node test/status.mjs
-import { addDaysISO, lastExpectedTradingDate, prevExpectedTradingDate, gradeMarket,
+import { addDaysISO, lastExpectedTradingDate, lastExpectedDailyDate, dueReached,
+  prevExpectedTradingDate, gradeMarket,
   gradeNews, gradeBrief, isoTaipei, extractHeadFields, buildStatus,
   STATUS_DUE_HOUR, backtestRefClock, gradeBacktest, extractTailDate } from "../src/index.js";
 
@@ -48,15 +49,68 @@ const SUN = { date: "2026-08-09", dow: 0, hour: 12, minute: 0 };
   chk("news：無法解析 → red", gradeNews(null, now) === "red" && gradeNews("bogus", now) === "red");
 }
 
-// ---- brief 判級 ----
+// ---- brief 判級（dueHour 省略＝舊的「不看時間、一律期待今日」行為，保留給回歸比對）----
 {
   chk("brief：date＝今天(平日) → green", gradeBrief("2026-08-11", TUE) === "green");
   chk("brief：date＝昨天(平日) → yellow", gradeBrief("2026-08-10", TUE) === "yellow");
   chk("brief：更舊 → red", gradeBrief("2026-08-07", TUE) === "red");
-  chk("brief：週六看週五版 → yellow", gradeBrief("2026-08-07", SAT) === "yellow");
-  chk("brief：週日仍是週五版 → yellow", gradeBrief("2026-08-07", SUN) === "yellow");
-  chk("brief：週末但版太舊 → red", gradeBrief("2026-08-06", SAT) === "red");
   chk("brief：無日期 → red", gradeBrief(null, TUE) === "red");
+  // 週末：晨報**每日出刊**（實證＝taiwan-stock-news 的 daily-brief-card.json commit 歷史，
+  // 2026-08-11~09-08 共 29 期期號連號、含每個週六日），所以週末與平日同一把尺，
+  // 不再有「週末最多 yellow」的舊分支（那分支預設週末不出刊，與實證不符）。
+  chk("brief：週六 12:00 看週五版（落後 1 天）→ yellow", gradeBrief("2026-08-07", SAT) === "yellow");
+  chk("brief：週日 12:00 仍是週五版（落後 2 天，已漏兩期）→ red",
+    gradeBrief("2026-08-07", SUN) === "red");
+  chk("brief：週六看當日版 → green", gradeBrief("2026-08-08", SAT) === "green");
+  chk("brief：週末但版太舊 → red", gradeBrief("2026-08-06", SAT) === "red");
+}
+
+// ---- brief 時間感知判級（2026-09-08）：晨報台北 07:30 產製，dueHour=8 ----
+// 舊版平日一律期待「今日」，於是每天 00:00~07:30 必然 yellow（線上實打：台北 2026-09-09 00:29
+// 打 /status 得 brief data_date=2026-09-08、level=yellow），與 postmkt 那顆假黃同型。
+// 8 這個值取 claude-harness/tools/freshness_watchdog.py 的 DAILY_CUTOFF = time(8, 0)
+// （judge_brief／daily_target：08:00 後 date 應＝今日），不另創口徑。
+{
+  const DUE = STATUS_DUE_HOUR.brief;
+  const tue = (h, m = 0) => ({ date: "2026-08-11", dow: 2, hour: h, minute: m });
+  const sun = (h, m = 0) => ({ date: "2026-08-09", dow: 0, hour: h, minute: m });
+  chk("STATUS_DUE_HOUR.brief === 8（＝看門狗 DAILY_CUTOFF）", DUE === 8, JSON.stringify(STATUS_DUE_HOUR));
+  chk("dueReached：8 點前未到、8 點整已到",
+    dueReached(tue(7, 59), 8) === false && dueReached(tue(8, 0), 8) === true);
+  // 預期日曆日本身：日曆日不跳週末（與 lastExpectedTradingDate 的差別）
+  chk("預期日曆日：平日 08:00 前＝昨日、08:00 後＝今日",
+    lastExpectedDailyDate(tue(7, 59), 8) === "2026-08-10"
+    && lastExpectedDailyDate(tue(8, 0), 8) === "2026-08-11");
+  chk("預期日曆日：週日 08:00 前退到週六（不跳成週五）",
+    lastExpectedDailyDate(sun(6), 8) === "2026-08-08" && lastExpectedDailyDate(sun(9), 8) === "2026-08-09");
+  chk("預期日曆日：dueHour 省略＝一律今日", lastExpectedDailyDate(tue(0)) === "2026-08-11");
+  // ① 00:00~08:00 之間、brief 為前一日 → green（晨報還沒產，舊版是假黃）
+  chk("brief 00:29 停在昨日 → green（07:30 還沒產，舊版此處假黃）",
+    gradeBrief("2026-08-10", tue(0, 29), DUE) === "green");
+  chk("brief 07:59 停在昨日 → green（邊界內）",
+    gradeBrief("2026-08-10", tue(7, 59), DUE) === "green");
+  // ② 08:00 之後仍為前一日 → yellow
+  chk("brief 08:00 仍停在昨日 → yellow（該產而未產）",
+    gradeBrief("2026-08-10", tue(8, 0), DUE) === "yellow");
+  chk("brief 12:00 仍停在昨日 → yellow", gradeBrief("2026-08-10", tue(12), DUE) === "yellow");
+  chk("brief 08:00 後有今日版 → green", gradeBrief("2026-08-11", tue(8, 0), DUE) === "green");
+  // ③ 落後兩日 → red
+  chk("brief 08:00 後落後兩日 → red", gradeBrief("2026-08-09", tue(8, 0), DUE) === "red");
+  chk("brief 07:00 落後兩日（相對昨日仍落後一日以上）→ red",
+    gradeBrief("2026-08-08", tue(7), DUE) === "red");
+  chk("brief：無日期 → red（dueHour 不影響）", gradeBrief(null, tue(3), DUE) === "red");
+  // ④ dueHour 省略＝舊行為（平日：今日 green／昨日 yellow／更舊 red）
+  chk("brief：dueHour 省略＝舊行為（平日凌晨仍期待今日）",
+    gradeBrief("2026-08-10", tue(0, 29)) === "yellow"
+    && gradeBrief("2026-08-11", tue(0, 29)) === "green"
+    && gradeBrief("2026-08-09", tue(0, 29)) === "red");
+  // ⑤ 週末：同一把尺（每日出刊），dueHour 也一樣生效
+  chk("brief 週日 06:00 停在週六 → green（今日份 07:30 才產）",
+    gradeBrief("2026-08-08", sun(6), DUE) === "green");
+  chk("brief 週日 09:00 停在週六 → yellow", gradeBrief("2026-08-08", sun(9), DUE) === "yellow");
+  chk("brief 週日 09:00 停在週五 → red（落後兩期；舊版寬待成 yellow，與看門狗 judge_brief 判 STALE 不一致）",
+    gradeBrief("2026-08-07", sun(9), DUE) === "red");
+  chk("brief 週日 09:00 有當日版 → green", gradeBrief("2026-08-09", sun(9), DUE) === "green");
 }
 
 // ---- 時間感知判級（2026-09-07）：dueHour 前預期資料日退成前一交易日 ----

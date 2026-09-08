@@ -190,16 +190,48 @@ fetchStatusTail`；2026-09-07 curl 實測 raw.githubusercontent.com 回 206＋
 `export function lastExpectedTradingDate(tp, dueHour)` 在平日未到該時點時把預期資料日退成
 前一個交易日，`export function gradeMarket(dataDate, tp, dueHour)` 據此判級。
 **只有 `level` 會從假黃轉綠，`data_date`／`updated_at` 語意一律不動**；階梯只是整段前移一格，
-落後 1 格仍 yellow、2 格仍 red（`dueHour` 省略＝舊行為，保留給回歸比對）。三個時點
-**取各站前端現行判準的同一個值，不另創口徑**：
+落後 1 格仍 yellow、2 格仍 red（`dueHour` 省略＝舊行為，保留給回歸比對）。四個時點
+**取各站現行判準的同一個值，不另創口徑**：
 
 | 站 | dueHour | 出處（實查） |
 |----|---------|------|
 | live | 9 | 本站 `index.html` 的 `function liveStatus`：`if(hm<"09:00")` 的**牆鐘**分水嶺（**不是** `liveDataDate` 的 `ts>="09:00"`，那個比的是成交時戳；2026-09-07 驗收更正） |
 | flows | 20 | `taiwan-flows/index.html` 的 `function lastDueTradingDay`（平日 `hour>=20` 才期待今日），同後端 `src/run_daily.py` 的 `PUBLISH_DEADLINE_HOUR = 20` |
 | postmkt | 22.5 | `postmkt/index.html` 的 `function pmStatus`：資料日為上一交易日且 `hm < "22:30"` 仍判「正常」 |
+| brief | 8 | `claude-harness/tools/freshness_watchdog.py` 的 `DAILY_CUTOFF = time(8, 0)`＋`daily_target()`／`judge_brief()`（「08:00 後 date 應＝今日；08:00 前應＝昨日」）。**2026-09-08 補上**，見下段 |
 
-news／brief 不受影響（`gradeNews` 本來就看 `generated_at` 距今時數、`gradeBrief` 本來就是每日晨報口徑）。
+`gradeNews` 不受影響（本來就看 `generated_at` 距今時數）。
+
+**brief 也有假黃，2026-09-08 已修（更正 09-07 那批寫的「news／brief 不受影響」——那句對 brief
+是錯的）**：晨報由雲端排程 session 台北 **07:30** 產製，但舊 `gradeBrief` 平日一律期待「今日」，
+於是每天 **00:00~07:30 必然 yellow**（線上實打：台北 2026-09-09 00:29 打 `/status` 得 brief
+`data_date=2026-09-08`、`level=yellow`），與 postmkt 那顆同型、同樣沒有資訊量。修法沿用同一套
+機制：`STATUS_DUE_HOUR.brief = 8`，`export function gradeBrief(dataDate, tp, dueHour)` 與
+`gradeMarket` 共用 `dueReached()`（時點判斷）與同一個階梯（達預期日 green／落後 1 格 yellow／
+更舊 red），**只有「往前一格」不同**——brief 走日曆日 `export function lastExpectedDailyDate`，
+市場類走交易日 `lastExpectedTradingDate`。`data_date`／`updated_at` 語意與 `schema` 形狀不動。
+
+**brief 是「每日」不是「交易日」（實證，連帶更正舊的週末分支）**：舊 `gradeBrief` 的週末分支讓
+週末最多只能 yellow，預設週末不出刊——**與實證不符**。實查 `shihpc/taiwan-stock-news` 的
+`daily-brief-card.json` commit 歷史（2026-08-11 第 5 期 ~ 2026-09-08 第 33 期，**29 期期號連號
+無缺，含每一個週六與週日**，commit 時間皆為台北隔日 07:5x~08:0x），晨報每個日曆日都出刊。
+`claude-harness/tools/freshness_watchdog.py` 的 `judge_brief` 早就是不分平日週末的日曆日口徑
+（`tests/test_freshness_watchdog.py` 有「週日 09:00 拿到週六版＝OK、拿到週五版＝STALE」的案例）。
+故本次把週末分支拿掉、週末與平日同一把尺。**這一項會讓「週日 08:00 後還停在週五版」由 yellow
+變 red（新舊對跑：週末 288 組 yellow→red）——那是原本過度寬待的修正，不是本次階梯前移造成的**；
+平日側則零新增 red（下段）。
+
+**新舊對跑（2026-09-08，臨時腳本、不進 repo）**：網格＝61 天 × 24 小時 × {00,30} 分 × 資料日
+偏移 −4..+1 共 17,568 組。**平日（假黃修正的正題）**：`yellow→green` 688 組（00:00~07:30 停在
+昨日，正是要修的假黃）、`red→yellow` 688 組（階梯整段前移一格的必然結果，同 09-07 那批）、
+**零新增 red**。**週末**：`yellow→green` 1,152、`red→yellow` 144、`yellow→red` 288（上段的
+週末口徑更正）。另有 `red→green` 2,064 組全部落在「資料日在未來」（off=+1）——舊版用 `===`
+比對、新版比照 `gradeMarket` 用 `>=`，該情境現實不會發生。
+
+**同一判準有兩份實作**（本檔 `gradeBrief`、`claude-harness/tools/freshness_watchdog.py` 的
+`judge_brief`＋`DAILY_CUTOFF`），**改一處要改兩處**；`taiwan-stock-news` 前端**沒有**晨報新鮮度
+判級（2026-09-08 grep 實查：`index.html` 無頂列狀態／紅黃綠，「每日晨報」tab 只是 iframe 載
+`daily-brief.html`），入口站 `shihpc.github.io` 只消費 `/status` 的 `level`、不自行判級。
 
 **backtest 判級**（`export function gradeBacktest`＋`export function backtestRefClock`）：該站
 每交易日兩班（台北 21:07 主班／23:07 兜底，見 `taiwan-backtest/.github/workflows/walkforward.yml`，

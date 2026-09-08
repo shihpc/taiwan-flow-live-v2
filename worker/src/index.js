@@ -3725,16 +3725,31 @@ async function syncKey(code) {
 // 「今日」資料，於是 postmkt 從 00:00 到當晚產出為止都是 yellow（約 21/24 小時），那顆燈沒有
 // 資訊量（2026-09-07 18:12 線上實測：/status 報 postmkt yellow，postmkt 站自己的頂列同時報
 // 「正常」；同日 22:03 自然轉綠）。修法＝每站帶一個「預期發布時點」dueHour，平日未到該時點時
-// 預期資料日退成前一個交易日。三個時點**取各站前端現行判準的同一個值，不另創口徑**：
+// 預期資料日退成前一個交易日。四個時點**取各站現行判準的同一個值，不另創口徑**：
 //   live    9    —— 本站 index.html 的 `function liveStatus`：`if(hm<"09:00")` 的牆鐘分水嶺
 //                    （注意不是 `liveDataDate` 的 `ts>="09:00"`，那個比的是成交時戳不是牆鐘）
 //   flows   20   —— taiwan-flows/index.html 的 `function lastDueTradingDay`（平日 hour>=20 才
 //                   期待今日），同後端 src/run_daily.py 的 PUBLISH_DEADLINE_HOUR = 20
 //   postmkt 22.5 —— postmkt/index.html 的 `function pmStatus`：資料日為上一交易日且 hm < "22:30"
 //                   仍判「正常」（盤後 build 21:53 起跑、含延遲約 22:10 完成）
+//   brief   8    —— claude-harness/tools/freshness_watchdog.py 的 `DAILY_CUTOFF = time(8, 0)`
+//                   ＋`daily_target()`／`judge_brief()`：「**08:00 後** date 應＝今日；08:00 前
+//                   應＝昨日」。晨報由雲端排程 session 台北 07:30 產製，08:00 是既有的既定判準。
+// **brief 的假黃（2026-09-08 補修）**：晨報 07:30 才產製，舊 gradeBrief 平日一律期待「今日」，
+// 於是每天 00:00~07:30 必然 yellow（線上實打：台北 2026-09-09 00:29 打 /status 得 brief
+// data_date=2026-09-08、level=yellow），與 postmkt 那顆同型、同樣沒有資訊量。**2026-09-07 那批
+// 在 CLAUDE.md 寫的「news／brief 不受影響」是錯的**，本次一併納入 dueHour 機制。
+// **brief 是「每日」不是「交易日」**（實證：shihpc/taiwan-stock-news 的 daily-brief-card.json
+// commit 歷史，2026-08-11~09-08 共 29 期、期號連號無缺，含每個週六與週日；claude-harness 的
+// judge_brief 也是不分平日週末的日曆日口徑）。所以 brief 的階梯走**日曆日**
+// （lastExpectedDailyDate），不像 live/flows/postmkt 走交易日（lastExpectedTradingDate）——
+// 兩者共用同一個 dueReached 時點判斷與同一個 gradeLadder 階梯，只差「往前一格」怎麼走。
+// 連帶更正舊 gradeBrief 的週末分支（週末永遠最多 yellow）：那分支預設週末不出刊，與實證不符，
+// 會讓「週日還停在週五版」（已漏兩期）被寬待成 yellow——claude-harness 的 judge_brief 對同一
+// 情境早就判 STALE（tests/test_freshness_watchdog.py 有此案例）。修正後週末與平日同一把尺。
 // 只有 level 會因此從假 yellow 轉 green；data_date／updated_at 的欄位語意一律不動，schema 形狀不變。
 // 國定假日仍不處理（維持全家族既有立場，repo 無行事曆來源）：假日晚間會誤報一次落後，屬已知可接受。
-export const STATUS_DUE_HOUR = { live: 9, flows: 20, postmkt: 22.5 };
+export const STATUS_DUE_HOUR = { live: 9, flows: 20, postmkt: 22.5, brief: 8 };
 
 // 日期加減（YYYY-MM-DD 字串運算，不碰本地時區）
 export function addDaysISO(dateISO, days) {
@@ -3742,15 +3757,26 @@ export function addDaysISO(dateISO, days) {
   t.setUTCDate(t.getUTCDate() + days);
   return t.toISOString().slice(0, 10);
 }
+// 是否已過該站的預期發布時點（台北牆鐘；dueHour 可含小數，22.5 ＝ 22:30）。
+// 交易日口徑與日曆日口徑共用這一個時點判斷，避免兩邊各寫一次而漂移。
+export function dueReached(tp, dueHour = 0) {
+  return tp.hour + (tp.minute || 0) / 60 >= dueHour;
+}
 // 最近預期交易日：平日＝今天（但**未到該站的發布時點 dueHour 前退成前一個交易日**）、
 // 週末＝上週五。dueHour 為台北小時、可含小數（22.5 ＝ 22:30），預設 0 ＝不看時間、一律
 // 期待今日——那是 2026-09-07 之前的舊行為，只保留給回歸比對用，buildStatus 每站都明確給值。
 // 國定假日不處理（簡化：連假日仍以平日計，假日當天會誤判 yellow/red，屬已知可接受誤差）。
 export function lastExpectedTradingDate(tp, dueHour = 0) {
   if (tp.dow >= 1 && tp.dow <= 5) {
-    return tp.hour + (tp.minute || 0) / 60 >= dueHour ? tp.date : prevExpectedTradingDate(tp.date);
+    return dueReached(tp, dueHour) ? tp.date : prevExpectedTradingDate(tp.date);
   }
   return addDaysISO(tp.date, tp.dow === 6 ? -1 : -2);   // 週六退1天、週日退2天到週五
+}
+// 最近預期「日曆日」（brief 用）：不分平日週末，dueHour 後＝今日、之前＝昨日。
+// 與 lastExpectedTradingDate 共用同一個 dueReached 時點判斷，差別只在往前一格是日曆日不是交易日
+// ——因為晨報每日出刊（含週末，見段首實證），交易日口徑會把週六日的當期誤判成「不該有」。
+export function lastExpectedDailyDate(tp, dueHour = 0) {
+  return dueReached(tp, dueHour) ? tp.date : addDaysISO(tp.date, -1);
 }
 // 往前一個預期交易日（跳過週末；同樣不處理國定假日）
 export function prevExpectedTradingDate(dateISO) {
@@ -3762,10 +3788,14 @@ export function prevExpectedTradingDate(dateISO) {
 // 落後 1 個交易日 → yellow；更舊或無日期 → red。
 // dueHour＝該站的預期發布時點（見段首 STATUS_DUE_HOUR）；省略＝舊的「不看時間」行為。
 export function gradeMarket(dataDate, tp, dueHour = 0) {
+  return gradeLadder(dataDate, lastExpectedTradingDate(tp, dueHour), prevExpectedTradingDate);
+}
+// 共用階梯：達預期日 → green；落後 1 格 → yellow；更舊或無日期 → red。
+// 「往前一格」由呼叫端給（市場類＝前一交易日、brief＝前一日曆日），階梯本身只有這一套。
+function gradeLadder(dataDate, exp, prevOf) {
   if (!dataDate) return "red";
-  const exp = lastExpectedTradingDate(tp, dueHour);
   if (dataDate >= exp) return "green";
-  if (dataDate >= prevExpectedTradingDate(exp)) return "yellow";
+  if (dataDate >= prevOf(exp)) return "yellow";
   return "red";
 }
 // news 判級：generated_at 距今 ≤3 小時 green、≤24 小時 yellow、否則（含無法解析）red
@@ -3775,14 +3805,12 @@ export function gradeNews(generatedAt, nowMs) {
   const hours = (nowMs - t) / 3600e3;
   return hours <= 3 ? "green" : hours <= 24 ? "yellow" : "red";
 }
-// brief 判級：date＝今天（平日）→ green；date＝昨天、或今天是週末（date 不舊於上週五）→ yellow；
-// 更舊 → red。
-export function gradeBrief(dataDate, tp) {
-  if (!dataDate) return "red";
-  const weekday = tp.dow >= 1 && tp.dow <= 5;
-  if (!weekday) return dataDate >= lastExpectedTradingDate(tp) ? "yellow" : "red";
-  if (dataDate === tp.date) return "green";
-  return dataDate === addDaysISO(tp.date, -1) ? "yellow" : "red";
+// brief 判級（2026-09-08 起時間感知，見段首「brief 的假黃」）：晨報每日出刊、台北 07:30 產製，
+// 故走**日曆日**階梯——date ≥ 最近預期日曆日（dueHour 後＝今日、之前＝昨日）→ green；
+// 落後 1 天 → yellow；更舊或無日期 → red。dueHour 省略＝不看時間、一律期待今日（舊的平日行為，
+// 保留給回歸比對）；週末不再另開分支（舊版週末最多 yellow，與「週末照常出刊」的實證不符）。
+export function gradeBrief(dataDate, tp, dueHour = 0) {
+  return gradeLadder(dataDate, lastExpectedDailyDate(tp, dueHour), (d) => addDaysISO(d, -1));
 }
 // backtest 判級（taiwan-backtest 的 walkforward 前推對帳帳冊）：該站每交易日兩班
 // （台北 21:07 主班／23:07 兜底，見 taiwan-backtest/.github/workflows/walkforward.yml），
@@ -3935,7 +3963,7 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
       return { data_date: days[days.length - 1] || (j.generated_at || "").slice(0, 10) || null,
         updated_at: j.generated_at || null, note: `${j.total_news || 0} 則新聞` };
     } },
-    { id: "brief", name: "每日晨報", grade: "brief", run: async () => {
+    { id: "brief", name: "每日晨報", grade: "brief", due: STATUS_DUE_HOUR.brief, run: async () => {
       const j = await fetchStatusJson(fetchFn, BRIEF_URL);   // ~4KB 小檔
       return { data_date: j.date || null, updated_at: j.generated_at || null,
         note: j.edition ? `第 ${j.edition} 版` : "" };
@@ -3960,7 +3988,7 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
     }
     const v = r.value;
     const level = d.grade === "news" ? gradeNews(v.updated_at, nowMs)
-      : d.grade === "brief" ? gradeBrief(v.data_date, tp)
+      : d.grade === "brief" ? gradeBrief(v.data_date, tp, d.due)
       : d.grade === "backtest" ? gradeBacktest(v.data_date, tp)
       : gradeMarket(v.data_date, tp, d.due);
     return { id: d.id, name: d.name, data_date: v.data_date, updated_at: v.updated_at, level, note: v.note || "" };
