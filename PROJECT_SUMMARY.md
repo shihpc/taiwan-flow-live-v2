@@ -979,8 +979,8 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
       **順帶消掉丙案最後一絲理由**：盤中指數列與個股 max 只差 4–5 秒，落差要到收盤才擴大到
       2.5–3 分鐘——混合案要處理的「切換往回跳」幾乎全部發生在收盤那一刻，而甲案根本不需要切換。
 
-      **✅ 已實作（2026-09-08，commit `__COMMIT__`，`worker-deploy` run `__RUN__` success，
-      部署 version `__VERSION__`）**
+      **✅ 已實作（2026-09-08，commit `7f58829`，`worker-deploy` run `34242689680` success，
+      部署 version `aba39e9e`）**
 
       落點＝`worker/src/index.js` 的 `export function aggregate`。**新語意（使用者裁示原文照做）**：
 
@@ -1016,6 +1016,21 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
         | 前端 `function liveDataDate`（`index.html`，**本批未改**）| **新語意下行為正確**。非交易日 `ts` ＝前一交易日 `13:33`（≥09:00）→ 直接走第一分支取其日期＝正解；`hm<09:00` 的 `flow_last`／`prevWeekday` 後備如預期**變成死碼**（無害，留作 `ts` 形狀劣化時的降級）。`ts === null` → 正則不匹配 → 回 `flow_last.date` 或 `null`，`renderTopline` 顯「—」、`liveStatus` 走「休市定格」，**不拋錯**。**留給前端那批的兩個文案問題**：`liveStatus` 的 tooltip 仍寫「最後成交 ${live.ts}」（新語意是指數收盤結算時戳，不是最後成交），且 `ts` 為 `null` 時該 tooltip 會印出字面 `null`（僅當 `flow_last.date` ＝今日才可能同時成立）|
       - **`/status` 零衝擊（實查）**：`async function statusSiteLive` 走 KV `fi:<date>`，不讀 `ts`。
         `worker/test/parity.mjs` 也不檢查 `ts`（且其反推列把指數列與個股列設成同一個 `date`）。
+      - **線上實查（2026-09-08 23:08 台北，部署後 40 秒；`x-swr: miss`＝真的重建過，非快取殘影）**：
+
+        | 檢查項 | 結果 |
+        |---|---|
+        | `/live` 的 `ts` | **`2026-09-08 13:33:00`** ＝當日指數列時戳（舊語意此刻應為 `15:00:00`）|
+        | `/livediag` 的 `ts_current` | **`2026-09-08 15:00:00.000000`** ＝仍是舊口徑 max(date)，診斷對照組未受影響 |
+        | 同次 `/livediag` 的 `ts_index` | `twse`／`tpex` 皆 `2026-09-08 13:33:00` ＝與 `/live` 的 `ts` **逐字相同**（A/B 直證）|
+        | `snap_ts` 是否外洩 | **否**。頂層鍵＝`chain, chain_coverage, exchange, flow, flow_last, futures, generated_at, index, market, series, stock_cols, stocks, ts, vix` |
+        | `flow` | 正常物件，`mkt.d10_yi/d30_yi` 有值、`baseline_date=2026-09-08` |
+        | `flow.degenerate` | **`true`**（如預期）。`frames` 為 `{10:"13:35", 30:"13:35"}`——**這是 `pickFrames` 仍吃 `snap_ts`（15:00）的直接證據**：若它改吃了新 `ts`（13:33），窗目標會退到 13:2x、選不到 13:35 格 |
+        | `flow_last` | `date=2026-09-08`（正確）。其 `ts=2026-09-08 13:35:08.707000` 是**今日 13:25–13:40 由舊版程式寫入 KV 的**（本次部署在台北 23:07，晚於寫入窗），TTL 7 天；**下一個交易日的寫入才會是新語意的指數列時戳** |
+        | 指數列本身 | `index.tse`／`index.otc` 皆有值，`stocks` 2787 檔 |
+
+        `/livediag` 該次的 `classified` ＝ `{n:2787, pre_open:1, regular:710, late:2076}`，
+        與樣本 6（同日 21:01）同形，可佐證這不是異常快照。
 
       **`/livediag` 的 `classified` 只看時分、不看日期（讀數時要記得）**：盤中 10:30 竟有
       `late`＝106（時戳 >13:30），那是**今天尚未成交、還握著昨日盤後時戳**的股票，
