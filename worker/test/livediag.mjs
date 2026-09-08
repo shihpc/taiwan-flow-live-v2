@@ -150,7 +150,16 @@ const row = (code, date, extra = {}) => ({ stock_id: code, date, close: 100, tot
     eq(Object.keys(a1).sort(), ["chain", "chain_coverage", "exchange", "generated_at", "index",
       "market", "snap_ts", "stock_cols", "stocks", "ts"].filter((k) => k !== "generated_at").sort()),
     JSON.stringify(Object.keys(a1).sort()));
-  chk("aggregate 的 snap_ts 與 ts 同值（拆語意不拆值）", a1.snap_ts === a1.ts, `${a1.snap_ts} / ${a1.ts}`);
+  // 2026-09-08 C 案落地：ts 與 snap_ts **語意分家、值不再相同**，原「同值」那條已無意義並汰換成
+  // 兩條各自釘住一個口徑（不是放寬，是把一條弱斷言換成兩條強斷言）：
+  //   snap_ts 必須**維持原算法**＝有分類非指數個股 max(date)（本例 2330 的 15:00，非 001 的 13:30）；
+  //   對外 ts 必須改成指數列 001 的 date（本例 13:30）。
+  chk("aggregate 的 snap_ts 仍是原口徑 max(date)（C 案不得動到它）",
+    a1.snap_ts === "2026-09-04 15:00:00.000000", a1.snap_ts);
+  chk("aggregate 的對外 ts ＝指數列 001 的 date（C 案新語意）",
+    a1.ts === "2026-09-04 13:30:00.000000", a1.ts);
+  chk("aggregate 的 ts 與 snap_ts 確實已分家（釘住語意分岔本身）", a1.ts !== a1.snap_ts,
+    `${a1.ts} / ${a1.snap_ts}`);
 }
 
 // ---- 路由整合：/livediag 與 /live 互不污染（mock fetch / caches / KV）----
@@ -196,7 +205,15 @@ const row = (code, date, extra = {}) => ({ stock_id: code, date, close: 100, tot
     !["schema", "hist", "ts_regular", "ts_le_close", "ts_index", "ts_current", "classified",
       "latest", "window", "rows_total", "unclassified", "dates"]
       .some((k) => k in live1), Object.keys(live1).join(","));
-  chk("路由 /live 的 ts 仍是原口徑 max(date)", live1.ts === "2026-09-04 15:00:00.000000", live1.ts);
+  // 這條原本釘的是「/live 的 ts ＝ max(date)」＝舊語意。C 案落地後改釘新語意：
+  // ts ＝指數列 001 的 date（13:30），且**明確不是** max(date)（2330 的 15:00）。
+  chk("路由 /live 的 ts ＝指數列 001 的 date（C 案新語意）",
+    live1.ts === "2026-09-04 13:30:00.000000", live1.ts);
+  chk("路由 /live 的 ts 已**不是** max(date)（舊語意確實被換掉）",
+    live1.ts !== "2026-09-04 15:00:00.000000", live1.ts);
+  // /livediag 的 ts_current 是診斷用的**對照組**，語意固定為舊口徑 max(date)，不隨 /live 改。
+  chk("/livediag 的 ts_current 仍是 max(date)（對照組不受 C 案影響）",
+    diag.ts_current === "2026-09-04 15:00:00.000000", diag.ts_current);
   // snap_ts 是純內部欄位（buildLive 回傳前 delete）：對外 JSON 不得出現，否則就成了公開契約
   chk("路由 /live 對外 JSON 不含 snap_ts（純內部欄位）", !("snap_ts" in live1),
     Object.keys(live1).join(","));

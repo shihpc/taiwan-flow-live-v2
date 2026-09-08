@@ -232,11 +232,17 @@ news／brief 不受影響（`gradeNews` 本來就看 `generated_at` 距今時數
 非台股型若混入，`grab_holding` 因無台股持股會落 `errors` 自動排除。**這是 postmkt 的上游，改口徑＝跨站變更。**
 
 **日期／時戳欄位語意一律查 `postmkt/docs/date-semantics.md`**（跨五站的唯一對照表）。
-其中 Worker `/live` 的 **`ts` 不是「資料時間」也不是產出時刻**，而是「全體有分類個股中最後一筆
-成交的時戳」——FinMind 原字串、**無時區標記**、收盤後會被盤後定盤/零股推進到 14:30–15:00、
-非交易日可能是當日盤前殘留值（日期與內容資料日不符），**不可拿它的日期部分當資料日**；
-同 payload 的 `generated_at` 才是我方產出時刻（`toISOString()`＝**UTC `Z`**，非台北）。
-改 `ts` 語意＝改 `/live` 回傳值，屬待裁決的 C 案（見 `PROJECT_SUMMARY.md` 該條目），勿逕自動手。
+其中 Worker `/live` 的 **`ts` ＝指數列時戳**（2026-09-08 C 案落地後的新語意，取代舊的
+「全體有分類個股 max(date)」）：取指數列 `001`（加權指數）的 `date`，`001` 取不到退 `101`
+（櫃買指數），兩者皆取不到回 `null`，**`001` 與 `101` 不一致時取 `001`**。FinMind 原字串、
+**無時區標記**（`YYYY-MM-DD HH:MM:SS.ffffff`）。**它的日期部分現在可以當資料日**——非交易日
+給出正確的前一交易日（實測兩次）、收盤後鎖在當日 13:33 不漂（實測五次）、盤中隨盤跳動
+（僅落後個股 max 4–5 秒，實測兩次）。同 payload 的 `generated_at` 才是我方產出時刻
+（`toISOString()`＝**UTC `Z`**，非台北）。
+**內部另有 `snap_ts`＝舊口徑 max(date)**，語意固定為「這份快照本身走到哪一刻」，供
+`pickFrames`／`computeFlow` 的 `nowTs`／`series:<date>` 使用，**刻意不進 `/live` 對外 JSON**
+（`buildLive` 回傳前 delete）。改 `ts` 或 `snap_ts` 任一者＝改 `/live` 語意，屬跨站變更，
+先讀 `PROJECT_SUMMARY.md`「/live 資料時間改取 max(date)」段。
 
 ## CSP 與注入面（2026-09-06）
 
@@ -395,18 +401,31 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    08-02 與 08-07 兩次驗收通過**（見同段上方的「✅ 已結案：CF cron dow 慣例錯誤」段）。
 4. 版控曾發生 force-push 誤刪 98 commit 事故並救回
    （見 `PROJECT_SUMMARY.md`「三、關鍵技術決策與踩過的雷」表「版控」列）。
-5. **`/live` 的 `ts` 日期不可當資料日**（2026-08-30 實打再證）：週日 08-30 打線上 `/live` 得
-   `ts="2026-08-29 08:30:00.000000"`（**週六**），內容卻是**週五 08-28** 收盤——日期部分
-   既非內容資料日也非當日；收盤後 `ts` 又會被盤後定盤/零股推進到 14:30–15:00。
-   使用者已裁定要改（C 案），2026-09-05 已鋪好前置條件、**但 `ts` 語意本身仍未改**：
-   - **量測管道**：`GET /livediag`（唯讀診斷，`worker/src/index.js` 的 `export function tsDiag`）
-     吐逐列時戳 `HH:MM` 分桶直方圖＋現行 `max(date)`＋正規盤時窗（09:00–13:30）max
-     ＋指數列 `001`/`101` 的 date。**刻意不列進根路徑 `endpoints` 清單**；
+5. **`/live` 的 `ts` ＝指數列時戳，日期部分可當資料日（✅ C 案已落地，2026-09-08）**——
+   本條原為「`ts` 日期不可當資料日」的坑，語意改造後坑已填掉，保留為變更紀錄：
+   - **舊語意（已作廢）**：`ts`＝有分類非指數個股 `max(date)`。三種雜訊會把它推離收盤——
+     ETN/權證（`e` 為 `ETN`／`所有證券`）、興櫃（交易到 15:00）、上市櫃盤後定價交易
+     （14:30 撮合）；非交易日更會是**盤前殘留**（2026-08-30 週日實打得
+     `ts="2026-08-29 08:30:00.000000"`，**週六**，內容卻是週五 08-28 收盤——日期部分
+     既非內容資料日也非當日）。
+   - **新語意（現行）**：`ts` ＝指數列 `001` 的 `date`；`001` 取不到退 `101`；兩者皆缺回
+     `null`；`001`≠`101` 時取 `001`（理由：前端頂列與 `/status` 的 live 都是加權指數口徑）。
+     指數列不參與個股盤後交易，結構上免疫於「資料列被盤後成交覆寫」機制。
+     落點＝`worker/src/index.js` 的 `export function aggregate`；測試 `worker/test/livets.mjs`。
+   - **`snap_ts` 是拆分後的內部欄位**（前置 commit `24bd59a`／`af52687`）：值＝**舊口徑
+     max(date)**、算法逐字未動，供 `pickFrames`／`computeFlow` 的 `nowTs`／`series:<date>`
+     使用，**不進對外 JSON**。所以改 `ts` **不會**動到 frame 定位、收盤殘影判定
+     （`framesDegenerate`，門檻 `CLOSE_MIN`=13:30）、上游停滯守門。
+     隔離證明 `worker/test/snapts.mjs`（正反雙向突變，改 `ts` 那批不得修改該檔）。
+   - **`ts` 可能為 `null`**（兩列指數皆缺）：前端閘門已於 2026-09-05 放寬——`state.live`
+     賦值改看 `j.stocks` 非空（不再看 `j.ts`），`ts` 缺失只讓「顯示時間」降級，
+     全站不會停在「載入中」。下游 `flowLastPayload` 有 `String(live.ts || "")` 守門不拋錯。
+   - **量測管道仍在**：`GET /livediag`（`export function tsDiag`）的 `ts_current` 是
+     **診斷對照組、語意固定為舊口徑 max(date)**，不隨 `/live` 改；另吐逐列時戳分桶直方圖、
+     正規盤時窗 max、指數列 `001`/`101` 的 date。**刻意不列進根路徑 `endpoints` 清單**；
      節流 30 秒/次、每 isolate 每台北日 60 次、**不寫 KV、不碰 `/live` 的 cf 快取**。
-   - **前端閘門已放寬**：`state.live` 賦值改看 `j.stocks`（不再看 `j.ts`），`ts` 為 null
-     只讓「顯示時間」降級，全站不再停在「載入中」——原本的硬阻斷已解除。
-   **動 `aggregate` 的 `ts` 前先讀** `PROJECT_SUMMARY.md`「/live 資料時間改取 max(date)」段的
-   「量測管道已建好：`/livediag`」條——那裡有**要觀察什麼／觀察到什麼才能決定 (甲)(乙) 改法**的表格。
+   七筆觀測、三案並列評估與使用者裁示全文見 `PROJECT_SUMMARY.md`
+   「/live 資料時間改取 max(date)」段。
 6. **`/live` 的 stale-while-revalidate：去重已做（2026-09-06），TTL 待量測後定**：
    原問題——`rebuild` 每次被呼叫都各自跑一次 `buildLive`，stale 區（`FRESH_MS` ≤ age <
    `LIVE_STALE_MS`）的並發請求各自觸發一次重建、互不合併；且前端 `index.html` 的

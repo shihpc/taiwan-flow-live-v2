@@ -248,17 +248,30 @@ export function aggregate(cl, rows, limits, lw) {
     market[k] = { amt_yi: r1(v.amt / 1e8), lw_amt_yi: r1(num(lwtot[LW_KEY[k]]) / 1e8),
       up: v.up, down: v.down, flat: v.flat, n: v.n, up_lim: v.ul, down_lim: v.dl };
   }
-  // ts / snap_ts 拆分（2026-09-07）：兩者現階段**值完全相同**，拆的是「語意」不是「值」。
-  //   ts      ＝**對外**欄位（/live 的「資料時間」）。C 案裁示後只會改這一個的取值方式
-  //             （見 PROJECT_SUMMARY.md「/live 資料時間改取 max(date)」段）。
-  //   snap_ts ＝**內部**原始快照時戳＝本函式算出的「有分類、非指數個股 max(date)」，
-  //             語意固定為「這份 FinMind 快照本身走到哪一刻」，**不隨 ts 改語意**。
-  // 為什麼非拆不可：`pickFrames` 用它定位 KV frame、`framesDegenerate` 用它判收盤殘影
-  // （門檻 CLOSE_MIN=13:30）。ts 一旦改成 13:30/13:33，窗目標會退到 13:2x → 殘影判定由
+  // ts / snap_ts 語意分家（2026-09-08 起，C 案落地；拆分前置見 2026-09-07 的 snap_ts 註記）：
+  //   ts      ＝**對外**欄位（/live 的「資料時間」）＝**指數列的 date**（見下方 idxTs）。
+  //   snap_ts ＝**內部**原始快照時戳＝上面迴圈算出的「有分類、非指數個股 max(date)」，
+  //             語意固定為「這份 FinMind 快照本身走到哪一刻」，**不隨 ts 改語意**、算法不得更動。
+  // 為什麼非拆不可：`pickFrames` 用 snap_ts 定位 KV frame、`framesDegenerate` 用它判收盤殘影
+  // （門檻 CLOSE_MIN=13:30）。ts 改成 13:33 後，若窗計算跟著退到 13:2x → 殘影判定由
   // true 翻成 false → flow_last 不附、且該窗 Δ 混入 14:30 盤後定價 → 假 flow。
   // snap_ts **刻意不進 /live 對外 JSON**（buildLive 回傳前 delete，理由見該處註解）。
+  //
+  // 【對外 ts 的取值規則】（2026-09-07 使用者裁示採「候選二＝指數列」，
+  //  依據＝PROJECT_SUMMARY.md「/live 資料時間改取 max(date)」段的七筆 /livediag 觀測）：
+  //    ts ＝ 指數列 `001`（加權指數）的 date；`001` 取不到退 `101`（櫃買指數）；
+  //    兩者皆取不到回 `null`；**`001` 與 `101` 不一致時一律取 `001`**
+  //    （前端頂列與 /status 的 live 都是加權指數口徑，不因兩者偶然不同而換基準）。
+  // 為什麼是指數列而非個股 max(date)：個股 max 會被三種雜訊推離收盤——ETN／權證（`e` 為
+  // ETN／所有證券）、興櫃（交易到 15:00）、上市櫃盤後定價交易（14:30 撮合）；非交易日更會是
+  // 盤前殘留（08:30，日期甚至不是內容資料日）。指數列不參與個股盤後交易，結構上免疫於
+  // 「資料列被盤後成交覆寫」機制：實測五次收盤後取樣皆為 13:33:00 不漂、兩次非交易日取樣皆
+  // 給出正確的**前一交易日** 13:33、兩次盤中取樣隨盤跳動（僅落後個股 max 4–5 秒）。
+  // 註：`001`／`101` 只要 date 不可用（列缺席或該列無 date）就往下退，退無可退才 null——
+  // 「有列但無 date」對取值而言與缺席等價，不另立分支。
+  const idxTs = idxDate(idxrow["001"]) || idxDate(idxrow["101"]) || null;
   return {
-    ts, snap_ts: ts, generated_at: new Date().toISOString(),
+    ts: idxTs, snap_ts: ts, generated_at: new Date().toISOString(),
     stock_cols: ["chg", "amt", "close", "vol", "bv", "sv", "pts", "dp", "lim", "lw"],
     index: { tse: idxOut(idxrow["001"]), otc: idxOut(idxrow["101"]) },
     market, exchange: finalize(ex), chain: finalize(ch),
@@ -267,6 +280,9 @@ export function aggregate(cl, rows, limits, lw) {
   };
 }
 const mkZero = () => ({ amt: 0, up: 0, down: 0, flat: 0, n: 0, ul: 0, dl: 0 });
+// 取指數列的 date 當對外 ts 用（規則與理由見 aggregate 內「對外 ts 的取值規則」註解）。
+// 列缺席、date 缺欄或為空字串一律回 null，讓呼叫端往下一個候選退。
+const idxDate = (r) => (r && r.date ? String(r.date) : null);
 
 // ---- /livediag 唯讀診斷（2026-09-05，為 `/live` 的 `ts` 語意改造（C 案）提供量測管道）----
 // 背景見 PROJECT_SUMMARY.md「/live 資料時間改取 max(date)」段。要決定 (甲) 收盤後語意漂移與
@@ -754,9 +770,15 @@ export function inFlowLastWindow(tp) {
 // 前端唯一的消費點是「資料日 fallback」與「MM-DD 收盤定格」徽章（`index.html` 的
 // `live.flow_last.date`），語意就是「本站對外宣稱的資料日」，理應跟著對外 `ts` 走，
 // 否則同一份回應裡 `ts` 與 `flow_last.date` 會出現兩套資料日口徑。
-// ⚠ 已知風險（PROJECT_SUMMARY 已記）：C 案若採指數列，而指數列在寫入窗 13:25–13:40
-// 尚未更新，`flow_last.date` 可能被寫成昨日並由 TTL 保留 7 天——那是**改 ts 那一步**要
-// 一併裁決的事（屆時重看這條註解），不在本次行為中性的拆分範圍。
+// **✅ 原「C 案若採指數列可能寫成昨日」的風險已解除（2026-09-08 C 案落地時複查）**：
+// 該風險的前提是「指數列只在收盤結算時寫一次、盤中不動」，已被 09-08 盤中兩筆 /livediag
+// 實測證偽——指數列隨盤跳動、僅落後個股 max 4–5 秒（10:30:45／11:31:15）。寫入窗
+// 13:25–13:40 落在盤中／收盤直後，`ts` 必為**當日**值（09-07 13:35 實測 ts_index 已是當日
+// 13:33:00），故 `flow_last.date` 不會被寫成昨日。
+// ⚠ 殘留（非本次引入，形狀改變）：`ts` 為 null（`001`／`101` 兩列都缺）時本函式**不會拋錯**
+// （`String(live.ts || "")` 已守），但 `date` 會是空字串並被 TTL 保留 7 天。此形狀需整份快照
+// 缺兩列指數，屬上游嚴重劣化；前端 liveDataDate 對非 `YYYY-MM-DD` 的 flow_last.date 已有
+// 正則守門（視同無 fallback），不會誤顯。
 export function flowLastPayload(live) {
   const fl = live && live.flow;
   if (!fl || !fl.mkt || fl.mkt.d30_yi == null) return null;
