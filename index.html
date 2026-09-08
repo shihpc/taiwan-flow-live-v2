@@ -280,10 +280,13 @@ function renderMarket(){
 //   「資料列被盤後成交覆寫」，因此：非交易日給出正確的前一交易日（非盤前殘留）、收盤後鎖在當日 13:33 不漂、
 //   盤中隨盤跳動（僅落後個股 max 4–5 秒，實測）。舊語意的 max(date) 已拆成 Worker 內部欄位 snap_ts（不進對外 JSON）。
 //   取值分支（順序同 liveDataDate）：
-//   ① ts 時分 ≥ 09:00 → 日期部分即資料日。**新語意下這是唯一會走到的分支**（指數時戳只會是 09:00 後的盤中／收盤值）。
+//   ① ts 時分 ≥ 09:00 → 日期部分即資料日。**ts 為合法時戳時實務上只走這條**——但這是「指數時戳只會是
+//      09:00 後的盤中／收盤值」的推論，**非官方保證**（09:00 分水嶺的由來見 CLAUDE.md「頂列」節）。
 //   ② ts 時分 < 09:00／③ ts 為 null → 先取 flow_last.date（Worker 於交易日 13:25–13:40 定格時寫入、必為真實交易日），
-//      再退「ts 日期的前一平日」，都沒有就顯「—」。**②的兩條後備在新語意下已是死碼，刻意保留不刪**：
-//      這是 ts 形狀劣化（上游指數列缺漏／退回舊形狀）時的降級路徑，程式不因「目前走不到」而拿掉。
+//      再退「ts 日期的前一平日」，都沒有就顯「—」。**這條後備是活路徑，不是死碼**（2026-09-08 覆驗更正）：
+//      ③（ts 為 null，兩列指數皆缺）實測會走到，並由 flow_last.date 推出資料日；只有②（ts 存在但 <09:00）
+//      在新語意下走不到，**而那同樣是推論、不是保證**。保留理由照舊：ts 形狀劣化（上游指數列缺漏／
+//      退回舊形狀）時的降級路徑，程式不因「某個子情形目前走不到」而拿掉。
 //      已知失效模式：定格班漏寫時 flow_last.date 會比真實資料日更舊（TTL 7 天內殘留）；國定假日不處理。
 //   本站更新：generated_at（Worker 產出牆鐘，UTC Z）轉台北到分。
 //   狀態（台北時區，交易日只排週末）：
@@ -311,7 +314,9 @@ function idxTsText(live){ const t=live&&live.ts?String(live.ts):""; return t||"�
 const TS_RE=/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/;
 const tsParts=live=>TS_RE.exec(String((live&&live.ts)||""));
 // 資料日是否**真的**取自 ts（＝liveDataDate 走第①分支）。false ＝走了 flow_last／prevWeekday 後備，
-// 此時 tooltip 不可再無條件說「資料日即取自此」（該後備目前是死碼，但保留就是為了它可能被走到）。
+// 此時 tooltip 不可再說「資料日即取自此」。**false 是活路徑，不是死碼**（2026-09-08 覆驗更正）：
+// ts 為 null 時就落在這裡並由 flow_last.date 推出資料日（實測有樣本）；只有「ts 存在但時分 <09:00」
+// 這個子情形在新語意下走不到，而那是推論、不是保證。
 const dataDateFromTs=live=>{const m=tsParts(live);return !!(m&&m[2]>="09:00");};
 // 資料日 tooltip 的三種狀態，**刻意不合併成一個三元**——2026-09-08 覆驗退回的正是這個：
 // `live&&live.ts ? A : B` 讓「根本沒拿到 payload」與「拿到了但 ts 為 null」共用否定分支，
@@ -323,8 +328,10 @@ const dataDateFromTs=live=>{const m=tsParts(live);return !!(m&&m[2]>="09:00");};
 function dataDateTitle(live){
   if(!live)return "";
   if(!live.ts)return "無指數時間（上游未提供加權／櫃買指數列）";
+  // 否定側涵蓋**兩種**情形：ts 時分 <09:00、以及 ts 為 truthy 但格式不合（TS_RE 解析不成功）。
+  // 後者根本沒做過任何時間比較，所以措辭**不得提「早於 09:00」**——那會是同一型的「斷言未知」。
   return `指數時間 ${live.ts} —— 加權指數（缺則櫃買指數）更新時刻，`
-    +(dataDateFromTs(live)?"資料日即取自此":"但其時分早於 09:00，資料日改由後備來源推得");
+    +(dataDateFromTs(live)?"資料日即取自此":"但資料日未取自它，改由後備來源推得");
 }
 function liveDataDate(live){
   const m=tsParts(live);
