@@ -203,15 +203,29 @@ news／brief 不受影響（`gradeNews` 本來就看 `generated_at` 距今時數
 
 **backtest 判級**（`export function gradeBacktest`＋`export function backtestRefClock`）：該站
 每交易日兩班（台北 21:07 主班／23:07 兜底，見 `taiwan-backtest/.github/workflows/walkforward.yml`，
-GitHub cron 實測延遲中位數 3h02m／p90 6h09m／最大 9h45m），所以不能用 dueHour 那套。**逐項對齊該站前端
+GitHub cron 延遲實測 2026-09-08 重算後為中位數 2h01m／p90 4h44m／最大 12h23m，四支 workflow
+187 筆——**取代 09-07 那組「120 筆／中位數 3h02m／最大 9h45m」，那組整組是錯的**，樣本漏抽本 repo
+的 `daysummary.yml`），所以不能用 dueHour 那套。**逐項對齊該站前端
 `taiwan-backtest/index.html` 的 `function ledgerStatus`**：先把台北時鐘回推 12 小時得參考班次日
 （同 `walkforward_daily.py` 的 `target=(now-12h)`），再看參考時鐘 —— `<09:07`（台北 21:07 前）
 班次尚未排定＝green、`09:07~19:07`（台北 21:07~隔日 07:07）等待窗＝yellow、`>=19:07` 兩班加
 緩衝均過＝red；落後一個交易日以上一律 red，週末看參考日的上一個平日。帳冊無產出時刻欄位，
 `updated_at` 固定 `null`（不臆造）。
-**紅線 19:07＝主班 +10 小時（2026-09-07 使用者裁定，原 13:07＝主班+4h）**：依 120 筆
-`event:schedule` run 延遲實測，>4h 佔 26.7%（舊門檻誤報率，09-07 誤報過一次）、**>10h 為 0 筆**；
-上限受 `walkforward_daily.py` 硬期限 `target=(now−12h)`（主班 +14h53m）約束，19:07 仍有近 5 小時餘裕。
+**紅線 19:07＝主班 +10 小時（2026-09-07 使用者裁定，原 13:07＝主班+4h）**：**門檻值不變，但依據的
+統計數字已於 2026-09-08 重算更正**——09-07 寫的「120 筆／中位數 3h02m／p90 6h09m／最大 9h45m／
+>4h 佔 26.7%／>10h 為 0 筆」**整組是錯的**（樣本漏抽本 repo 的 `daysummary.yml`，那是家族內最早的
+slot）。更正後：四支 workflow（`taiwan-flows/daily.yml`／`postmkt/build.yml`／本 repo `daysummary.yml`／
+`taiwan-stock-news/build-news.yml`）2026-06-16~09-07 共 **187 筆** `event:schedule` run，中位數 2h01m／
+p90 4h44m／最大 **12h23m**；>4h 12.8%、>10h **2 筆(1.1%)**、>14h 0 筆。**結構性事實**：GitHub 的延遲是
+**絕對排空時刻**、不是相對 slot 的固定倍數（08-27／28 塞車時四支的 `created_at` 黏在同一段絕對時刻），
+同一次事故下 slot 愈早量到的「延遲」愈大，**「>10h 幾筆」取決於抽了哪些 workflow**——這正是上一輪
+出錯的機制。`taiwan-backtest/walkforward.yml` 自身只有 **4 筆**（09-03 才建檔），**N=4 無法自證尾端**。
+因此紅線的理由**不是**「>10h 從沒發生過」（該宣稱已被推翻），而是：三支 13:xx 班對 13:07Z 計延遲的
+**代理推估**（N=151，**推測、非直接觀測**）誤報率約 2%（3 筆全落在 08-27／28 單一次事故、
+9h51m~10h07m 正好騎在線上），換取距硬期限 **4h53m** 的補救餘裕；對照 +4h 代理誤報 16.6%、+8h 4.0%、
++12h 0% 但餘裕只剩 2h53m。上限受 `walkforward_daily.py` 硬期限 `target=(now−12h)`（主班 +14h53m）約束。
+**取樣限制**：GitHub 只保留 90 天 run 紀錄，尾端只看得到 08-27／28 這一次事故，「最大＝X」是這次事故
+的函數而非平台上界；家族內尚有約 10 支帶 cron 的 workflow 未抽，「>10h 2 筆」是下界不是全集。
 **同一門檻有三份實作**（本檔 `gradeBacktest`、該站 `ledgerStatus`、
 `claude-harness/tools/freshness_watchdog.py` 的 `BACKTEST_MISSING_FROM`），**改一處要改三處**。
 
