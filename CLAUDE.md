@@ -210,9 +210,9 @@ news／brief 不受影響（`gradeNews` 本來就看 `generated_at` 距今時數
 緩衝均過＝red；落後一個交易日以上一律 red，週末看參考日的上一個平日。帳冊無產出時刻欄位，
 `updated_at` 固定 `null`（不臆造）。
 
-**入口站尚未接上**：shihpc.github.io 的「策略回測」卡沒有 `statusId`（見該 repo CLAUDE.md
-「五張卡」表），所以 Hub 上還不會顯示這顆點——要顯示需在該 repo 的 `PROJECTS` 那筆加
-`statusId:"backtest"`，屬另一個 repo 的改動。
+**入口站已接上（2026-09-07，commit `be4877a`）**：shihpc.github.io 的「策略回測」卡已在 `PROJECTS`
+那筆補上 `statusId:"backtest"`（見該 repo CLAUDE.md「五張卡」表），Hub 上會顯示這顆點。
+本站 `/status` 的 backtest 站即為它的資料來源。
 
 ## 資料是姊妹站上游（跨站變更）
 
@@ -332,18 +332,23 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 pageerror 零；反向 `fetch("https://example.com/")` 被擋（`Failed to fetch`＋1 則 `Refused to connect`）；**304 要在無 `page.route` 的
 context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 route 時 reload 永遠 200。
 
-## 頂列「資料日｜本站更新｜狀態」（2026-09-06）
+## 頂列「資料日｜本站更新｜狀態」（2026-09-06 建立；2026-09-08 隨 `ts` 新語意改寫）
 
 `#tsline`（`index.html` 的 `function renderTopline`，判準在 `function liveStatus`／`function liveDataDate`，取值依據寫在其上方
-區塊註解）取代原「最後成交 ts · ⚠快照 N 分前」列，與 postmkt／taiwan-flows 頂列同款式。**資料日不取 `ts` 的日期部分**
-（見「已知限制」第 5 條與 `postmkt/docs/date-semantics.md`「Worker `/live`」段）；`/live` 沒有獨立資料日欄（`index` 由
-`idxOut` 產生、不含 date；`series` 只有 HH:MM），取值規則：
+區塊註解）取代原「最後成交 ts · ⚠快照 N 分前」列，與 postmkt／taiwan-flows 頂列同款式。**資料日就取 `ts` 的日期部分**
+——C 案落地後 `ts` ＝指數列時戳（`001`，退 `101`），已可當資料日（見「已知限制」第 5 條與
+`postmkt/docs/date-semantics.md`「Worker `/live`」段）；`/live` 仍沒有獨立資料日欄（`index` 由 `idxOut` 產生、不含 date；
+`series` 只有 HH:MM），取值規則：
 
 | 情況 | 資料日 | 依據 |
 |------|--------|------|
-| `ts` 時分 ≥ 09:00 | `ts` 的日期 | 該日確有成交（盤中＝當日；收盤後被盤後定盤/零股推到 14:30–15:00 仍同日） |
-| `ts` 時分 < 09:00（盤前殘留） | `flow_last.date`（須早於 `ts` 日期），無則 `ts` 日期的前一平日 | 兩次線上實打殘留時戳皆為 08:30（08-09／08-30），故以 09:00 為分水嶺——**依兩次觀測的推論，非官方保證**；`flow_last.date` 由 Worker 交易日 13:25–13:40 定格時切出、那時必為真實交易日，且只在 flow 為 null／殘影時附上（正是殘留時段）。已知失效：定格班漏寫時 `flow_last.date` 偏舊；國定假日不處理（前一平日會誤報，與 taiwan-flows 同立場） |
-| `ts` 為 null | `flow_last.date`，無則「—」 | C 案未來可能形狀 |
+| `ts` 時分 ≥ 09:00 | `ts` 的日期 | **新語意下唯一會走到的分支**。指數列不參與盤後定價／興櫃交易，非交易日給正確的前一交易日、收盤後鎖當日 13:33、盤中隨盤跳動（僅落後個股 max 4–5 秒，實測） |
+| `ts` 時分 < 09:00 | `flow_last.date`（須早於 `ts` 日期），無則 `ts` 日期的前一平日 | **已成死碼、刻意保留不刪**：舊語意（個股 max(date)）在非交易日會是 08:30 盤前殘留，才需要這條後備；新語意不會產出 <09:00 的時戳。留作 `ts` 形狀劣化（上游指數列缺漏／退回舊形狀）時的降級路徑 |
+| `ts` 為 null（`001`／`101` 兩列指數皆缺） | `flow_last.date`，無則「—」 | 上游嚴重劣化才會發生。已知失效：定格班漏寫時 `flow_last.date` 偏舊；國定假日不處理（前一平日會誤報，與 taiwan-flows 同立場） |
+
+**可見文案一律稱「指數時間」，不得再寫「最後成交」**（2026-09-08 改，四處：`renderTopline` 資料日 tooltip、
+`liveStatus` 收盤定格／盤中兩個 tooltip、`insightHtml` 摘要分析 crumb）。`ts` 為 `null` 時經共用函式
+`function idxTsText` 降級為「—」，**不得印出字面 `null`**；資料日 tooltip 改顯「無指數時間（上游未提供加權／櫃買指數列）」。
 
 本站更新＝`generated_at`（Worker 牆鐘 UTC Z）轉台北到分。狀態五值（台北時區、交易日只排週末）：**查詢失敗（未知）**＝boot 兩次
 都拿不到可用 payload（後續自動刷新失敗沿用上一份、不改狀態）；**延遲**＝`generated_at` 距今 >3 分（沿用舊門檻）；**休市定格**＝
