@@ -434,6 +434,26 @@ const okFetch = async (u, init) => {
   const post = await buildStatus({ FLOW_KV: kvFri }, { date: "2026-09-07", dow: 1, hour: 9, minute: 30 }, eodFetch, MON_NOW);
   chk("live 盤前 08:00 只有上一交易日 frame → green", pre.sites[0].level === "green" && pre.sites[0].data_date === "2026-09-04");
   chk("live 開盤後 09:30 仍只有上一交易日 frame → yellow", post.sites[0].level === "yellow");
+  // brief 的 dueHour=8 接線（比照上方 live 的同型測試）：同一份「晨報 date 停在昨日」的資料，
+  // 台北 07:00（07:30 產製前）是 green，09:00（過了 dueHour）轉 yellow。
+  // 這組是 buildStatus 層級的端到端案例——上面三組整合 fixture 的 brief.date 都等於 tp.date，
+  // 不論 due 給不給都是 green，擋不住「buildStatus 漏傳 d.due 給 gradeBrief」這種接線退化。
+  const staleBriefFetch = async (u, init) => {
+    if (String(u).endsWith("/daily-brief-card.json")) {
+      return { ok: true, status: 200, json: async () => ({ date: "2026-09-06", edition: 29, generated_at: "2026-09-06T07:30:00+08:00" }) };
+    }
+    return eodFetch(u, init);
+  };
+  const briefPre = await buildStatus({ FLOW_KV: kv }, { date: "2026-09-07", dow: 1, hour: 7, minute: 0 }, staleBriefFetch, MON_NOW);
+  const briefPost = await buildStatus({ FLOW_KV: kv }, { date: "2026-09-07", dow: 1, hour: 9, minute: 0 }, staleBriefFetch, MON_NOW);
+  const bPre = Object.fromEntries(briefPre.sites.map((x) => [x.id, x]));
+  const bPost = Object.fromEntries(briefPost.sites.map((x) => [x.id, x]));
+  chk("brief 產製前 07:00 date 停在昨日 → green（dueHour=8 已接線）",
+    bPre.brief.level === "green" && bPre.brief.data_date === "2026-09-06",
+    JSON.stringify(bPre.brief));
+  chk("brief 過 dueHour 09:00 date 仍停在昨日 → yellow（該報的照報）",
+    bPost.brief.level === "yellow" && bPost.brief.data_date === "2026-09-06",
+    JSON.stringify(bPost.brief));
 }
 {
   // ---- /status 完整回應形狀（schema:1 契約；入口站與 harness 看門狗共用資料面）----
