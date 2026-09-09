@@ -67,9 +67,12 @@ crons = [
   #   要回答的三個未知：日盤收盤段（time∈[13:44,14:00)）最早幾點拿得到／夜盤段是否先落地／
   #   單日 payload 位元組數與 fetch+parse 耗時。**上午也必須有樣本**（否則第二個未知驗不到），
   #   所以窗從台北 09:00 起，132 次/交易日。
-  #   與 frame（* 1-5）、35 5、5 6、40 6、10 7、35 10、0 11 等既有 cron 同分撞點：各帶自己的
-  #   event.cron，dispatchRoleForCron 以 TICK_CRON 精確比對**先攔截**（不可落到 scheduledRole，
-  #   否則 09:00-13:59 會被判成 frame 而重複寫格）。dow 同樣是 Quartz 慣例，2-6＝週一~五。
+  #   與既有 cron 同分撞點共 9 條（逐分鐘展開比對，非目測）：frame（* 1-5）60 撞點、
+  #   哨兵（*/5 9-14）36 撞點、35 5／5 6／40 6／10 7／35 10／0 11 各 1、晨間健檢（30 1）1。
+  #   各帶自己的 event.cron，dispatchRoleForCron 以 TICK_CRON 精確比對**先攔截**。
+  #   不可落到 scheduledRole——否則 132 slot 會變成：96 個落 frame（台北 09:00-16:55，其中
+  #   09:00-13:59 的 60 個還與 frame cron 自己搶同一把 f:<date>:<HH:MM>）＋ 36 個落 sentinel
+  #   （台北 17:00-19:55，每 5 分多跑一次 runSentinel）。dow 同樣是 Quartz 慣例，2-6＝週一~五。
   "*/5 1-11 * * 2-6",        # 20) tick 量測班（台北 09:00-19:55 每 5 分；※ 需與 src/index.js 的 TICK_CRON 完全一致）
 ]
 

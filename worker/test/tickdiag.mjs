@@ -3,8 +3,8 @@
 // 執行：cd worker && node test/tickdiag.mjs
 import { readFileSync } from "node:fs";
 import worker, { summarizeTickRows, tickSampleSlots, tickSampleKey, TICK_SAMPLE_TTL,
-  TICK_CRON, TICK_START_HOUR, TICK_END_HOUR, runTickSample, dispatchRoleForCron,
-  scheduledRole, taipeiParts } from "../src/index.js";
+  TICK_CRON, TICK_START_HOUR, TICK_END_HOUR, TICK_MAX_PARSE_BYTES, maskTickErr,
+  runTickSample, dispatchRoleForCron, scheduledRole, taipeiParts } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -196,6 +196,101 @@ const SRC = readFileSync(new URL("../src/index.js", import.meta.url), "utf-8");
   chk("HTTP 402 記 st=402（不是 0）", val.st === 402, String(val.st));
   chk("無 data 欄 → n:0 且不拋錯", val.n === 0 && !("err" in val), JSON.stringify(val));
   chk("非 200 仍寫一筆", puts.length === 1);
+}
+
+// ---- 鐵律 1：例外訊息**絕不可**把 FINMIND_TOKEN 帶進 KV（樣本活 7 天、/tickdiag 無認證對外）----
+// 測試一律用明顯的假值，真 token 不進 repo。
+const FAKE = "FAKE_TOKEN_FOR_TEST_abcdef0123456789";
+{
+  // maskTickErr 純函式層
+  chk("遮罩：訊息含 token 字面量 → 不得殘留",
+    !maskTickErr(`fetch failed: https://api.finmindtrade.com/api/v4/data?dataset=X&token=${FAKE}`, FAKE)
+      .includes(FAKE));
+  chk("遮罩：token= 之後的內容一律遮掉（即使 token 參數對不上，例如百分比編碼後）",
+    !maskTickErr("Network connection lost: https://a.b/c?d=1&token=%41%42%43xyz&e=2", "ZZZZZZZZ")
+      .includes("%41%42%43xyz"));
+  chk("遮罩：token= 後面接 & 時只吃到分隔符為止（其餘參數保留，訊息仍可讀）",
+    maskTickErr("https://a.b/c?dataset=TaiwanFuturesTick&token=abcdef&start_date=2026-09-09", "abcdef")
+      .includes("start_date=2026-09-09"));
+  // ★ token 為空／undefined／過短時不得走 split 路徑（"".split("") 會把訊息炸成逐字元）
+  for (const [name, tk] of [["undefined", undefined], ["null", null], ["空字串", ""], ["過短", "ab"]]) {
+    const out = maskTickErr("boom happened", tk);
+    chk(`遮罩：token 為 ${name} 時訊息不得被毀`, out === "boom happened", JSON.stringify(out));
+  }
+  chk("遮罩：非字串輸入不拋錯", maskTickErr(null, FAKE) === "" && maskTickErr(undefined, FAKE) === "");
+  chk("遮罩：超長訊息截到 300 字元", maskTickErr("x".repeat(5000), FAKE).length === 300);
+
+  // 端到端：注入一個 message 內含假 token 的例外，斷言**寫進 KV 的值**不含該字串
+  const puts = [];
+  const env = { FINMIND_TOKEN: FAKE, FLOW_KV: { put: async (k, v, o) => { puts.push([k, v, o]); } } };
+  const tp = taipeiParts(tpe("2026-09-09T11:00:00"));
+  const val = await runTickSample(env, tp, async (u) => {
+    // 模擬 workerd 的 fetch 例外會帶上請求 URL（cloudflare/workerd #1957）
+    throw new TypeError(`Network connection lost while fetching ${u}`);
+  });
+  chk("端到端：確實寫了一筆", puts.length === 1 && puts[0][0] === "tick:20260909:1100",
+    JSON.stringify(puts.map((p) => p[0])));
+  chk("★ 寫進 KV 的整串字串不含 token", !puts[0][1].includes(FAKE),
+    puts[0][1].slice(0, 200));
+  chk("★ 回傳值的 err 不含 token", !String(val.err).includes(FAKE), String(val.err));
+  chk("遮罩後仍看得出是哪一類例外（err 保留可讀訊息）",
+    val.err.includes("Network connection lost") && val.err.includes("<token>"), String(val.err));
+  chk("ern 記例外類別名", val.ern === "TypeError", String(val.ern));
+  chk("fetch 例外仍 st=0", val.st === 0, String(val.st));
+}
+
+// ---- 尺寸閘門：payload 過大時跳過 JSON.parse（量測班不能把 Worker 打爆）----
+{
+  chk("TICK_MAX_PARSE_BYTES = 20e6", TICK_MAX_PARSE_BYTES === 20e6, String(TICK_MAX_PARSE_BYTES));
+  const puts = [];
+  const env = { FINMIND_TOKEN: FAKE, FLOW_KV: { put: async (k, v, o) => { puts.push([k, v, o]); } } };
+  const tp = taipeiParts(tpe("2026-09-09T14:00:00"));
+  let parsed = false;
+  const big = "x".repeat(TICK_MAX_PARSE_BYTES + 1);   // 刻意不是合法 JSON：真的 parse 就會拋錯
+  const val = await runTickSample(env, tp, async () => {
+    parsed = true;
+    return new Response(big, { headers: { "content-length": String(TICK_MAX_PARSE_BYTES + 1) } });
+  });
+  chk("超過門檻：不 JSON.parse（餵不合法 JSON 也不進 catch → 無 err）", !("err" in val),
+    JSON.stringify(val).slice(0, 200));
+  chk("超過門檻：skip='too-large'", val.skip === "too-large", String(val.skip));
+  chk("★ 超過門檻：n 為 null（＝未知列數，不是 0＝真的沒列）", val.n === null, String(val.n));
+  chk("超過門檻：bytes 照記", val.bytes === TICK_MAX_PARSE_BYTES + 1, String(val.bytes));
+  chk("超過門檻：clen 照記", val.clen === TICK_MAX_PARSE_BYTES + 1, String(val.clen));
+  chk("超過門檻：仍寫一筆 KV", puts.length === 1 && parsed);
+  const w = JSON.parse(puts[0][1]);
+  chk("超過門檻：KV 值的 n 也是 null", w.n === null && w.skip === "too-large", JSON.stringify(w));
+  // 對照組：未超過門檻就照常 parse（證明上面的 skip 是門檻造成的，不是這條路徑本來就不 parse）
+  const okVal = await runTickSample({ FINMIND_TOKEN: FAKE, FLOW_KV: { put: async () => {} } }, tp,
+    async () => new Response(JSON.stringify({ data: [{ time: "13:50:00" }] })));
+  chk("未超過門檻：照常 parse（n 為數字、無 skip）", okVal.n === 1 && !("skip" in okVal),
+    JSON.stringify(okVal));
+}
+
+// ---- clen：有 content-length 才記，沒有一律 null（不臆造）----
+{
+  const env = { FINMIND_TOKEN: FAKE, FLOW_KV: { put: async () => {} } };
+  const tp = taipeiParts(tpe("2026-09-09T15:00:00"));
+  const body = JSON.stringify({ data: [{ time: "13:50:00" }] });
+  const a = await runTickSample(env, tp, async () =>
+    new Response(body, { headers: { "content-length": String(body.length) } }));
+  chk("clen 有標頭就轉數字", a.clen === body.length, String(a.clen));
+  chk("全 ASCII 時 clen === bytes（假設成立的驗證方式）", a.clen === a.bytes, `${a.clen}/${a.bytes}`);
+  const b = await runTickSample(env, tp, async () => {
+    const r = new Response(body);
+    r.headers.delete("content-length");
+    return r;
+  });
+  chk("無 content-length → clen 為 null（不臆造）", b.clen === null, String(b.clen));
+  const c = await runTickSample(env, tp, async () =>
+    new Response(body, { headers: { "content-length": "not-a-number" } }));
+  chk("content-length 不是數字 → clen 為 null", c.clen === null, String(c.clen));
+  // 非 ASCII：bytes（UTF-16 字元數）會低估真實位元組數——註解那條「假設」的反證
+  const zh = JSON.stringify({ msg: "額度不足，請稍後再試", data: [] });
+  const d = await runTickSample(env, tp, async () => new Response(zh, { status: 402 }));
+  chk("非 ASCII 時 bytes 是字元數、確實小於 UTF-8 位元組數",
+    d.bytes === zh.length && d.bytes < new TextEncoder().encode(zh).length,
+    `${d.bytes} < ${new TextEncoder().encode(zh).length}`);
 }
 
 // ---- runTickSample：程式端二次守門（週末／時窗外／缺 token 或 KV 一律不採樣、不寫 KV）----
