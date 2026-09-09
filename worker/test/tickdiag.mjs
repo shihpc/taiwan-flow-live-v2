@@ -217,6 +217,13 @@ const FAKE = "FAKE_TOKEN_FOR_TEST_abcdef0123456789";
     const out = maskTickErr("boom happened", tk);
     chk(`遮罩：token 為 ${name} 時訊息不得被毀`, out === "boom happened", JSON.stringify(out));
   }
+  // 迴歸：2026-09-09 覆驗構造出的半遮反例——token 同時含「會被百分比編碼的字元」（使 ① 失效）
+  // 與「原本被當成停止字元的 ' 或 )」（使 ② 提前停下）。停止字元收窄到 &/空白後全部遮乾淨。
+  for (const t of ["ab)cd/ef_TAIL", "ab'cd/ef_TAIL", "ab(cd)ef/gh_TAIL"]) {
+    const url = `https://api.x/v4/data?dataset=T&token=${encodeURIComponent(t)}&start_date=2026-09-09`;
+    chk(`★ 遮罩反例（token 含 ')' 或 "'" ＋需編碼字元）：${t}`,
+      !maskTickErr(`fetch failed: ${url}`, t).includes("TAIL"), maskTickErr(`fetch failed: ${url}`, t));
+  }
   chk("遮罩：非字串輸入不拋錯", maskTickErr(null, FAKE) === "" && maskTickErr(undefined, FAKE) === "");
   chk("遮罩：超長訊息截到 300 字元", maskTickErr("x".repeat(5000), FAKE).length === 300);
 
@@ -245,21 +252,51 @@ const FAKE = "FAKE_TOKEN_FOR_TEST_abcdef0123456789";
   const puts = [];
   const env = { FINMIND_TOKEN: FAKE, FLOW_KV: { put: async (k, v, o) => { puts.push([k, v, o]); } } };
   const tp = taipeiParts(tpe("2026-09-09T14:00:00"));
-  let parsed = false;
-  const big = "x".repeat(TICK_MAX_PARSE_BYTES + 1);   // 刻意不是合法 JSON：真的 parse 就會拋錯
-  const val = await runTickSample(env, tp, async () => {
-    parsed = true;
-    return new Response(big, { headers: { "content-length": String(TICK_MAX_PARSE_BYTES + 1) } });
-  });
-  chk("超過門檻：不 JSON.parse（餵不合法 JSON 也不進 catch → 無 err）", !("err" in val),
+  // ── 第一關：上游有給 content-length，**在讀 body 之前**就短路 ──
+  // 這一關才是真的擋 OOM 的那道：真會打爆 isolate 的檔在 `.text()` 當下就爆了，
+  // 事後用 text.length 判等於沒判。所以這裡要斷言「body 從頭到尾沒被讀過」。
+  let bodyRead = false;
+  const bigRes = () => {
+    const r = new Response("x".repeat(1000), {
+      headers: { "content-length": String(TICK_MAX_PARSE_BYTES + 1) },
+    });
+    const orig = r.text.bind(r);
+    r.text = async () => { bodyRead = true; return orig(); };
+    return r;
+  };
+  const val = await runTickSample(env, tp, async () => bigRes());
+  chk("★ clen 閘門：body 從未被讀取", bodyRead === false, String(bodyRead));
+  chk("clen 閘門：skip='too-large:clen'", val.skip === "too-large:clen", String(val.skip));
+  chk("★ clen 閘門：bytes 為 null（＝沒量到，不是 0＝回應是空的）", val.bytes === null, String(val.bytes));
+  chk("clen 閘門：clen 照記", val.clen === TICK_MAX_PARSE_BYTES + 1, String(val.clen));
+  chk("★ clen 閘門：n 為 null（＝未知列數，不是 0＝真的沒列）", val.n === null, String(val.n));
+  chk("★ clen 閘門不是錯誤：不得寫 err／ern", !("err" in val) && !("ern" in val),
     JSON.stringify(val).slice(0, 200));
-  chk("超過門檻：skip='too-large'", val.skip === "too-large", String(val.skip));
-  chk("★ 超過門檻：n 為 null（＝未知列數，不是 0＝真的沒列）", val.n === null, String(val.n));
-  chk("超過門檻：bytes 照記", val.bytes === TICK_MAX_PARSE_BYTES + 1, String(val.bytes));
-  chk("超過門檻：clen 照記", val.clen === TICK_MAX_PARSE_BYTES + 1, String(val.clen));
-  chk("超過門檻：仍寫一筆 KV", puts.length === 1 && parsed);
-  const w = JSON.parse(puts[0][1]);
-  chk("超過門檻：KV 值的 n 也是 null", w.n === null && w.skip === "too-large", JSON.stringify(w));
+  chk("clen 閘門：st 仍是真實 HTTP status", val.st === 200, String(val.st));
+  chk("clen 閘門：仍寫一筆 KV", puts.length === 1);
+  chk("clen 閘門：KV 值同樣 n=null／bytes=null", (() => {
+    const w = JSON.parse(puts[0][1]);
+    return w.n === null && w.bytes === null && w.skip === "too-large:clen";
+  })(), puts[0][1].slice(0, 200));
+
+  // ── 第二關：上游沒給 content-length（chunked／被中介改寫）時的後備 ──
+  const puts2 = [];
+  const env2 = { FINMIND_TOKEN: FAKE, FLOW_KV: { put: async (k, v) => { puts2.push([k, v]); } } };
+  const big = "x".repeat(TICK_MAX_PARSE_BYTES + 1);   // 刻意不是合法 JSON：真的 parse 就會拋錯
+  const val2 = await runTickSample(env2, tp, async () => {
+    const r = new Response(big);
+    r.headers.delete("content-length");
+    return r;
+  });
+  chk("text 閘門：clen 為 null（上游沒給）", val2.clen === null, String(val2.clen));
+  chk("text 閘門：skip='too-large:text'", val2.skip === "too-large:text", String(val2.skip));
+  chk("text 閘門：不 JSON.parse（餵不合法 JSON 也不進 catch → 無 err）", !("err" in val2),
+    JSON.stringify(val2).slice(0, 200));
+  chk("★ text 閘門：bytes 照記（body 已讀進來了，這關擋的是 parse）",
+    val2.bytes === TICK_MAX_PARSE_BYTES + 1, String(val2.bytes));
+  chk("★ text 閘門：n 為 null", val2.n === null, String(val2.n));
+  chk("text 閘門：仍寫一筆 KV", puts2.length === 1);
+
   // 對照組：未超過門檻就照常 parse（證明上面的 skip 是門檻造成的，不是這條路徑本來就不 parse）
   const okVal = await runTickSample({ FINMIND_TOKEN: FAKE, FLOW_KV: { put: async () => {} } }, tp,
     async () => new Response(JSON.stringify({ data: [{ time: "13:50:00" }] })));

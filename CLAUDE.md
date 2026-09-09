@@ -156,23 +156,38 @@
   （＝「日盤收盤段」的直接量測值）、`mn`/`mx`＝原始時間字串字典序極值、`tk`＝實際偵到的時間欄位名、
   `bytes`/`clen`/`ms`＝payload 大小與耗時、`st`＝HTTP status（`0`＝fetch 本身例外）。
   **讀樣本前先看 `tk`**：`tk` 為 `null` 時三段一律 0 但 `n` 仍是全部列數，那是「有列但量不到時間」、
-  **不是**「當下真的沒有列」；`skip:"too-large"` 時 `n` 為 `null`（未知）而非 0。
+  **不是**「當下真的沒有列」。**`n:0` 也不等於「真的沒有列」**——fetch 例外與 JSON 壞掉時
+  `n` 同樣是 0，判讀順序是**先看 `err`／`skip`，都沒有時 `n:0` 才是真的沒列**；
+  `skip` 非空時 `n` 為 `null`（未知）而非 0，`bytes` 在 `too-large:clen` 那關也是 `null`
+  （body 從未讀取＝沒量到，**不是 0＝回應是空的**）。
   四種「`seg` 總和 < `n`」的成因逐條寫在 `summarizeTickRows` 上方註解。
 - **鐵律 1 相關**：請求 URL 含 `token=<FINMIND_TOKEN>`，而 workerd 的 fetch 例外訊息**會帶 URL**
-  （cloudflare/workerd #1957），樣本又活 7 天且由**無認證**的 `/tickdiag` 對外吐出。
+  （`TypeError: Fetch API cannot load: <url>` 是常見形狀——**這是推測、我方未實測**；
+  原本引 cloudflare/workerd #1957 是**引錯了**，那張 issue 講的是前導空白 URL 的解析不一致），
+  樣本又活 7 天且由**無認證**的 `/tickdiag` 對外吐出。
   故例外訊息一律過 `export function maskTickErr` 雙重遮罩（token 字面量替換＋`token=` 後綴遮罩；
   token 為空／過短時**跳過**字面量替換，否則 `split("")` 會把訊息炸成逐字元）後才寫 KV。
+  **不可宣稱「兩道任一失效另一道必定有效」**——2026-09-09 覆驗構造出反例：token 同時含
+  需百分比編碼的字元（使第一道失效）與 `'`／`)`（原本被當停止字元，使第二道提前停下）就會半遮。
+  停止字元已收窄到只剩 `&` 與空白（寧可多遮）；對現行 JWT 形狀的 token 兩道都成立，
+  但那是**目前的**事實不是結構保證，上游換發別種形狀要回來重看。
   **改這段前先跑 `node test/tickdiag.mjs`**，那裡有「注入含假 token 的例外、斷言 KV 值不含它」的測試。
-- **尺寸閘門** `export const TICK_MAX_PARSE_BYTES`（20e6）：回應字串超過就跳過 `JSON.parse`
-  （`bytes`／`clen` 照記、`n:null`＋`skip:"too-large"`）——量測班不能把 Worker 打爆，
-  而「大到不敢 parse」本身就是要量的答案之一。
+- **尺寸閘門** `export const TICK_MAX_PARSE_BYTES`（20e6）**分兩關，順序是重點**：
+  ①`skip:"too-large:clen"`——上游有給 `content-length` 且超標時，**在讀 body 之前**就短路
+  （`bytes` 為 `null`＝從未讀取）。**這關才是真的擋 OOM 的那道**：真會打爆 isolate 的檔在
+  `.text()` 當下就爆了，事後拿 `text.length` 判等於沒判（2026-09-09 覆驗退回的正是這點）。
+  ②`skip:"too-large:text"`——上游沒給 `content-length`（chunked／被中介改寫）時的後備，
+  body 已讀進來所以 `bytes` 有值，擋掉的是「字串與解析後物件同時常駐」那一半峰值。
+  兩關都不寫 `err`（**太大所以沒讀 ≠ 抓失敗**），`n` 一律 `null`。
+  量測班不能把 Worker 打爆，而「大到不敢 parse」本身就是要量的答案之一。
 - **`GET /tickdiag`**（唯讀樣本讀回）：`?date=YYYY-MM-DD`（非法值靜默退回台北今日）。
   三個性質與 `/livediag` 同一套——①**唯讀**，本路徑一個 put 都沒有；②**零 KV list**，
   key 由 `export function tickSampleSlots()` 依 cron 決定性重建（KV list 額度曾爆過，見已知限制 1；
   全檔 `.list(` 零命中有靜態測試守著，**連註解都不要寫出那個字面形式**）；
   ③**刻意不列進根路徑 `endpoints` 清單**。節流沿用 `/livediag` 那組 in-isolate 計數（兩者共用額度）。
   132 把 key 一次 get 完——額度歸屬是 **internal services 子請求上限（Free 1,000／Paid 預設 10,000）**，
-  不是對外 fetch 那條（Free 50／Paid 1,000）。
+  不是對外 fetch 那條（Free 50／**Paid 10,000，可調到 10M**）。KV get 另算進「同時 6 條等待回應」
+  上限，132 把會**排隊**分批完成而非失敗，延遲未實測。
 - **⚠ 這是暫時班，拆除條件（量到就回來動手）**：以下三個未知都拿到**跨多個交易日**的穩定分布後，
   這班就該收窄或整段移除，不要讓它長住——
   1. **日盤收盤段最早幾點拿得到**：`d13` 首次為正的時點在多日之間穩定下來；

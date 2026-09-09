@@ -47,7 +47,8 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
     ／既有 19 條 cron 一個字；量測班不 dispatch、不接哨兵、不寫 `/live` 的 cf 快取。
     **判準定案是另一批工作**，這批只負責把分布量出來。
   - **兩個安全性設計**（複審時挑出、已修）：①請求 URL 含 `token=`，而 workerd 的 fetch 例外訊息
-    **會帶 URL**（cloudflare/workerd #1957），樣本又活 7 天且由**無認證**的 `/tickdiag` 對外吐出
+    **很可能帶 URL**（`TypeError: Fetch API cannot load: <url>` 是常見形狀；**推測、未實測**，
+    原引的 cloudflare/workerd #1957 是引錯的出處），樣本又活 7 天且由**無認證**的 `/tickdiag` 對外吐出
     → 例外訊息一律過 `maskTickErr` 遮罩才寫 KV（有注入假 token 的回歸測試）；
     ②`text()`＋`JSON.parse` 峰值記憶體約 `.json()` 的 2 倍，而「檔多大」正是未知 (3)
     → 加 `TICK_MAX_PARSE_BYTES`（20e6）尺寸閘門，超過就不 parse、記 `n:null`＋`skip:"too-large"`。

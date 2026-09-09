@@ -425,13 +425,25 @@ export const TICK_TIME_KEYS = ["time", "Time", "datetime", "Datetime"];
 // 20e6 是保守值：JS 字串內部為 UTF-16，20e6 字元約 40 MB，加上 parse 後的物件仍在 128 MB 內留有餘裕。
 // 這個門檻**只影響要不要 parse**，不影響 `bytes`／`clen` 的記錄，所以量測資料不會因為設了它而缺角。
 export const TICK_MAX_PARSE_BYTES = 20e6;
+// 閘門觸發時丟出的哨兵物件（不是錯誤）：讓 clen 那一關能跳出 try 的其餘步驟，
+// 又不會被下方 catch 當成「抓失敗」寫進 err——「太大所以沒讀」和「抓失敗」不可混講。
+const TICK_SKIP = Symbol("tick-skip");
 const tickPad2 = (n) => String(n).padStart(2, "0");
 
 // 例外訊息去識別化（鐵律 1）。**這不是防禦性補強，是必要的一道**：
-//   本班請求的 URL 內含 `token=<FINMIND_TOKEN>`，而 workerd 的 fetch 例外訊息**會帶上請求 URL**
-//   （cloudflare/workerd issue #1957）；樣本又會**持久化 7 天**並由**無認證**的 `/tickdiag` 對外吐出。
+//   本班請求的 URL 內含 `token=<FINMIND_TOKEN>`，而 workerd 的 fetch 例外訊息**很可能帶上請求 URL**
+//   （`TypeError: Fetch API cannot load: <url>` 是常見形狀）——**這是推測、不是已驗證事實**，
+//   我方沒有實測過該訊息形狀（原本引 cloudflare/workerd #1957 當出處是**引錯了**，那張 issue
+//   講的是前導空白 URL 的解析不一致，只在內文順帶出現該錯誤字串）。
+//   樣本又會**持久化 7 天**並由**無認證**的 `/tickdiag` 對外吐出。
 //   機率低，但「持久化 ＋ 公開端點」的組合不允許用機率當理由。
-// 兩道獨立的遮罩，任一道失效另一道仍有效：
+// 兩道遮罩。**不可宣稱「任一道失效另一道必定有效」**（2026-09-09 覆驗構造出反例）：
+// ① 失效（token 被百分比編碼）而 ② 的字元類又在 token 內部提前停下時，會只遮掉一半。
+// 修法＝把 ② 的停止字元收窄到只剩 `&` 與空白（原本還把 `"'`)]}"` 當停止字元，而
+// `encodeURIComponent` **不轉義 `'` 與 `)`**，token 含這兩者就會被切斷）。代價是像
+// `(見 ...?token=abc)` 這種訊息會連結尾的 `)` 一起遮掉——**寧可多遮，不可少遮**。
+// 對現行 FinMind token（JWT 形狀，字元集 `A-Za-z0-9-_.`）兩道都成立，但那是**目前的**事實，
+// 不是結構保證；上游換發別種形狀的 token 時要回來重看這裡。
 //   ① 精確替換 token 字面量——**token 為空／undefined／過短時必須跳過**：`"abc".split("")` 會把訊息
 //      炸成逐字元陣列、再以 `<token>` 串回，等於整段訊息被毀（空字串是 `split` 的特例，不是理論風險）；
 //   ② 不論 ① 有沒有生效，一律把 `token=` 之後到下一個分隔符為止的內容遮掉——涵蓋 token 被
@@ -440,7 +452,7 @@ const tickPad2 = (n) => String(n).padStart(2, "0");
 export function maskTickErr(msg, token) {
   let s = String(msg == null ? "" : msg);
   if (typeof token === "string" && token.length >= 4) s = s.split(token).join("<token>");
-  return s.replace(/token=[^&\s"')\]}]*/gi, "token=<token>").slice(0, 300);
+  return s.replace(/token=[^&\s]*/gi, "token=<token>").slice(0, 300);
 }
 
 // 本班會採樣的台北時點（HHMM），**與 cron `*/5 1-11 * * 2-6` 決定性一致**：09:00–19:55 每 5 分，共 132 個。
@@ -533,7 +545,11 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
   if (!env.FINMIND_TOKEN || !env.FLOW_KV) return null;
   const hm = `${tickPad2(tp.hour)}${tickPad2(tp.minute)}`;
   const t0 = Date.now();
-  let st = 0, bytes = 0, clen = null, rows = null, err = null, ern = null, skip = null;
+  // bytes 初始值是 **null 不是 0**（2026-09-09 覆驗時發現的自打嘴巴）：fetch 例外或 clen 閘門
+  // 短路時 body 從未被讀取，那是「沒量到」；寫成 0 會被讀成「回應是空的」——正是本專案
+  // 反覆踩到的「缺資料被呈現成別的東西」。同理 st 的 0 是**刻意**的哨兵值（fetch 本身例外），
+  // 語意在 catch 那裡寫明，不與 HTTP status 混用。
+  let st = 0, bytes = null, clen = null, rows = null, err = null, ern = null, skip = null;
   try {
     const url = `${FIN_BASE}?dataset=TaiwanFuturesTick&data_id=TX&start_date=${tp.date}`
       + `&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
@@ -543,6 +559,16 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
     // chunked 傳輸、或被中介改寫都會沒有）。它與下面的 bytes 是兩個獨立的量，關係見 bytes 註解。
     const cl = r.headers && r.headers.get ? r.headers.get("content-length") : null;
     clen = cl != null && cl !== "" && Number.isFinite(Number(cl)) ? Number(cl) : null;
+    // ★ 閘門第一關**必須在讀 body 之前**（2026-09-09 覆驗退回）：原本只用 `text.length` 判，
+    // 而那是**整份回應已經被讀成字串之後**——真正會 OOM 的情境（單日檔大到上百 MB）在
+    // `.text()` 當下就把 isolate 打爆，樣本一樣寫不進去，正是這道閘門說要避免的結果。
+    // 上游有給 content-length 就先用它短路；此時 body 從未讀取，`bytes` 維持 **null**
+    // ＝「沒量到」而不是 0（0 會被讀成「回應是空的」，兩者不可混講）。
+    if (clen != null && clen > TICK_MAX_PARSE_BYTES) {
+      skip = "too-large:clen";
+      if (r.body && r.body.cancel) { try { await r.body.cancel(); } catch { /* 取消失敗無妨 */ } }
+      throw TICK_SKIP;                   // 跳出 try 的其餘步驟，由下方 catch 認出這個哨兵物件
+    }
     const text = await r.text();
     // bytes ＝ `text.length`＝UTF-16 **字元數**。把它當位元組數是一個**假設**：前提是回應為
     // 全 ASCII（FinMind 的 tick JSON 欄位與值都是數字與 `YYYY-MM-DD HH:MM:SS` 這類 ASCII 字串）。
@@ -553,22 +579,30 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
     // 對照 `st`／`n` 一起看）；`clen` 為 null 時只剩 bytes 這個下界可用。
     bytes = text.length;
     if (text.length > TICK_MAX_PARSE_BYTES) {
-      skip = "too-large";                // 尺寸閘門（見 TICK_MAX_PARSE_BYTES）：不 parse，rows 維持 null
+      // 第二關：上游沒給 content-length（chunked／被中介改寫）時的後備。body 已經讀進來了，
+      // 所以 `bytes` 有值、只是不 parse；擋掉的是「字串與解析後物件同時常駐」那一半峰值。
+      skip = "too-large:text";
     } else {
       const j = JSON.parse(text);
       rows = j && j.data;
     }
   } catch (e) {
+    if (e === TICK_SKIP) {
+      // clen 閘門的正常路徑，不是錯誤：st 已記、bytes 刻意維持 null，不寫 err
+    } else {
     // st 維持 0 ＝ **fetch 本身**就例外（與「HTTP 非 200」分得開）。
     // **訊息一律過 maskTickErr**：例外訊息可能帶著含 token 的 URL，而這裡寫進去的東西會活 7 天
     // 並由無認證的 `/tickdiag` 對外吐出（見 maskTickErr 上方註解）。另存 `ern`＝例外類別名，
     // 類別名不含使用者資料，是遮罩之後仍然可靠的分類依據。
     err = maskTickErr((e && e.message) || e, env.FINMIND_TOKEN);
     ern = String((e && e.name) || "Error");
+    }
   }
   const val = { at: t0, st, ms: Date.now() - t0, bytes, clen, ...summarizeTickRows(rows) };
-  // 尺寸閘門觸發時 `n` 覆寫成 **null**（不是 0）：0 代表「解析過、真的沒有列」，
-  // null 代表「大到沒去解析、列數未知」，兩者不可混講（seg／d13 同理，全 0 只是沒解析過）。
+  // 尺寸閘門觸發時 `n` 覆寫成 **null**（不是 0）：null 代表「大到沒去解析、列數未知」。
+  // **但 `n === 0` 不等於「解析過、真的沒有列」**（2026-09-09 覆驗更正這句原本的無條件敘述）：
+  // fetch 例外與 JSON 壞掉時 rows 也是 null → `n` 同樣是 0，那兩種根本沒解析成功。
+  // 判讀順序：先看 `err`／`skip`，都沒有時 `n:0` 才是「真的沒有列」。
   if (skip) { val.skip = skip; val.n = null; }
   if (err) { val.err = err; val.ern = ern; }
   // 例外／空樣本**照樣寫一筆**：「那天沒樣本」和「那天抓失敗」不可混講
@@ -4588,7 +4622,9 @@ export default {
         const slots = tickSampleSlots();
         // 132 把獨立 key 一次 get 完。額度歸屬要講對（Cloudflare 官方 Worker limits）：
         // KV 走的是 **internal services** 那條子請求上限——**Free 1,000／Paid 預設 10,000**
-        // （不是對外 fetch 那條的 Free 50／Paid 1,000）。本處固定 132 次，兩種方案都遠低於上限。
+        // （不是對外 fetch 那條：Free 50／**Paid 10,000（可調到 10M）**）。本處固定 132 次，
+        // 兩種方案都遠低於上限。另註：KV get 算進「同時 6 條等待回應」的上限，132 把會**排隊**
+        // 分批完成而非失敗，延遲未實測。
         // 單把讀失敗只讓該時點缺席，不整包失敗
         const got = await Promise.all(slots.map((hm) =>
           Promise.resolve(env.FLOW_KV.get(tickSampleKey(date, hm), "json")).catch(() => null)));
