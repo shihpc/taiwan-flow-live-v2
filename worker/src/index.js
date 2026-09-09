@@ -383,6 +383,136 @@ export function diagThrottle(now, tpDate, st = diagQuota, gap = DIAG_MIN_GAP_MS,
   return { ok: true, used: st.used, cap };
 }
 
+
+// ---- 台指期 tick 量測班（2026-09-09；**暫時性**，量到答案就回來收窄或整段移除）----
+// 目的：只量測、只記錄，**這批不下任何落地判準**。定時對 FinMind `TaiwanFuturesTick`(TX)
+// 打與 `/live` 的 `finFuturesVix` **同形狀**的請求，把「這一刻拿到的東西長什麼樣」原樣寫成
+// 一把獨立 KV key，事後由唯讀端點 `/tickdiag` 讀回來看分布。
+//
+// 為什麼不能用「非空即落地」判準（本班存在的理由）：
+//   FinMind 日曆日 D 的 TX tick 檔**同時含三段**——D 的 00:00–05:00 夜盤（前一日夜盤的延續）、
+//   08:45–13:45 日盤、15:00–24:00 當日夜盤。所以
+//     ① `rows.length > 0` 早在台北 09:00 就為真（夜盤段先在檔裡）→ naive 判準必假陽性；
+//     ② 連 `max(time) >= "13:44"` 也不安全——15:00 之後的當日夜盤列同樣滿足它。
+//   要分辨「日盤真的收完了」只能看**分段**的列數與時間邊界，而那個分布現在**沒有人量過**
+//   （既有觀測只有台北 16:54 的一筆，N=1）。所以本班先蒐集原始分布，判準留待有資料再定。
+//
+// 為什麼三段時間分布是關鍵：三個未知裡有兩個只有分段量得出來——
+//   (1) 日盤收盤段（time 落在 [13:44,14:00) 的列，即 `d13`）最早幾點拿得到？
+//   (2) 夜盤段是否先落地？（`seg.a`/`seg.c` 相對 `seg.b` 的出現順序；**必須有上午的樣本**才驗得到，
+//       這也是 cron 從台北 09:00 就開始跑、而不是只跑傍晚的原因）
+//   (3) 單日 payload 位元組數與 Worker 端 fetch+parse 耗時（`bytes`／`ms`）。
+//
+// 為什麼一次採樣一把獨立 key：`tick:<YYYYMMDD>:<HHMM>` 每個時點各自一把，
+//   ① 天生免疫 KV「同一把 key 每秒至多 1 次寫入」的限制；
+//   ② 不必做「讀出當日索引→append→寫回」的讀-改-寫（那會在並發時互相覆蓋、也讓端點無法唯讀）；
+//   ③ 讀回時 key 名可由 `tickSampleSlots()` **決定性重建**，所以 `/tickdiag` 完全不需要 KV list
+//      （全檔零 KV list 呼叫，有測試靜態守著——KV list 免費額度曾經爆掉，見 CLAUDE.md 已知限制 1；
+//       也因為守門是字面比對，本檔註解一律不寫出那個呼叫的字面形式）。
+export const TICK_START_HOUR = 9;         // 台北 09:00 起（要涵蓋上午才驗得到「夜盤是否先落地」）
+export const TICK_END_HOUR = 20;          // 台北 20:00 前（19:55 為最後一輪）
+export const TICK_SAMPLE_TTL = 7 * 86400; // 樣本保留 7 天（量測用，過期自動清）
+export const tickSampleKey = (dateISO, hm) => `tick:${dateISO.replaceAll("-", "")}:${hm}`;
+// 時間欄位名不靠印象：依序試這四個，量到哪個就記哪個（`tk`）。
+export const TICK_TIME_KEYS = ["time", "Time", "datetime", "Datetime"];
+const tickPad2 = (n) => String(n).padStart(2, "0");
+
+// 本班會採樣的台北時點（HHMM），**與 cron `*/5 1-11 * * 2-6` 決定性一致**：09:00–19:55 每 5 分，共 132 個。
+// `/tickdiag` 用它重建 key 清單，因此改 cron 就要改這裡（兩邊都以 TICK_START_HOUR/TICK_END_HOUR 為準）。
+export function tickSampleSlots() {
+  const out = [];
+  for (let h = TICK_START_HOUR; h < TICK_END_HOUR; h += 1)
+    for (let m = 0; m < 60; m += 5) out.push(`${tickPad2(h)}${tickPad2(m)}`);
+  return out;
+}
+
+// 從一列裡抓出時間字串（欄位名不定，見 TICK_TIME_KEYS）
+function tickTimeKeyOf(rows) {
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    for (const k of TICK_TIME_KEYS) {
+      const v = r[k];
+      if (v != null && String(v) !== "") return k;
+    }
+  }
+  return null;
+}
+// 取 HH:MM 供分段比較：容忍 "08:45:00.123000" 與 "2026-09-09 08:45:00" 兩種形狀
+// （日期部分無冒號，第一個 HH:MM 必為時間）。抓不到回 null＝該列不計入任何段。
+const TICK_HM_RE = /(\d{2}):(\d{2})/;
+function tickHm(v) {
+  const m = TICK_HM_RE.exec(String(v == null ? "" : v));
+  return m ? `${m[1]}:${m[2]}` : null;
+}
+
+// 純函式（無 I/O，可離線測）：把一批 tick 列摘要成一個樣本。
+// 分段門檻**刻意固定寫死**並在此註記語意，之後要改判準時才有對照基準：
+//   seg.a  time < "08:00"                 → 凌晨夜盤段（前一日夜盤延續，00:00–05:00）
+//   seg.b  "08:00" ≤ time < "14:00"       → 日盤段（08:45–13:45）
+//   seg.c  time ≥ "14:00"                 → 當日夜盤段（15:00–24:00）
+//   d13    "13:44" ≤ time < "14:00"       → **日盤收盤段**，未知 (1) 的直接量測值
+// mn/mx 記**原始字串**的字典序 min/max（順便看得到上游真正的時間格式）。
+// 空／非陣列輸入回 n:0 其餘 null/0，**不得拋錯**（採樣班不能因為一次壞回應就整班掛掉）。
+export function summarizeTickRows(rows) {
+  const empty = { n: 0, mn: null, mx: null, seg: { a: 0, b: 0, c: 0 }, d13: 0, ct: 0, dates: [], tk: null };
+  if (!Array.isArray(rows) || rows.length === 0) return empty;
+  const tk = tickTimeKeyOf(rows);
+  const contracts = new Set();
+  const dates = new Set();
+  let mn = null, mx = null, a = 0, b = 0, c = 0, d13 = 0;
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    if (r.contract_date != null && String(r.contract_date) !== "") contracts.add(String(r.contract_date));
+    if (r.date != null && String(r.date) !== "") dates.add(String(r.date));
+    if (!tk) continue;
+    const raw = r[tk];
+    if (raw == null || String(raw) === "") continue;
+    const s = String(raw);
+    if (mn === null || s < mn) mn = s;
+    if (mx === null || s > mx) mx = s;
+    const hm = tickHm(s);
+    if (hm === null) continue;                       // 解不出時間的列不計入任何段（seg 總和可 < n）
+    if (hm < "08:00") a += 1;
+    else if (hm < "14:00") { b += 1; if (hm >= "13:44") d13 += 1; }
+    else c += 1;
+  }
+  return { n: rows.length, mn, mx, seg: { a, b, c }, d13, ct: contracts.size,
+    dates: [...dates].sort().slice(0, 5), tk };
+}
+
+// 採樣一次並寫一把 KV。失敗一律吞掉（回傳值僅供測試與 log），絕不影響同時醒來的其他班。
+// URL 形狀**與 `/live` 的 finFuturesVix 相同**，量到的才會是「未來哨兵／`/live` 會看到的東西」。
+// **不污染 `/live` 的 cf 快取**：本請求不設 `cf.cacheEverything`／`cacheTtl`，不寫入快取。
+// 誠實記一筆殘留風險：本請求的 URL 與 finFuturesVix 完全相同，**有可能讀到 `/live` 留下的
+// ≤15 秒 cf 快取**（`cacheTtl:15`）——對 5 分鐘解析度可忽略，但不是「絕對即時」。
+export async function runTickSample(env, tp, fetchFn = fetch) {
+  // 程式端二次守門（沿用本 repo「cron ＋ 程式二次守門」慣例）：非台北平日／不在 09:00–19:55 一律不採樣
+  const weekday = tp.dow >= 1 && tp.dow <= 5;
+  if (!weekday || tp.hour < TICK_START_HOUR || tp.hour >= TICK_END_HOUR) return null;
+  // 缺 token／KV binding 直接 return，**刻意不告警**：量測班不值得占用當日告警去重額度
+  if (!env.FINMIND_TOKEN || !env.FLOW_KV) return null;
+  const hm = `${tickPad2(tp.hour)}${tickPad2(tp.minute)}`;
+  const t0 = Date.now();
+  let st = 0, bytes = 0, rows = null, err = null;
+  try {
+    const url = `${FIN_BASE}?dataset=TaiwanFuturesTick&data_id=TX&start_date=${tp.date}`
+      + `&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
+    const r = await fetchFn(url);
+    st = r.status;                       // 拿到回應就記真實 status；後續解析失敗不改寫它
+    const text = await r.text();
+    bytes = text.length;                 // FinMind 回的是全 ASCII JSON，字元數即位元組數
+    const j = JSON.parse(text);
+    rows = j && j.data;
+  } catch (e) {
+    err = String((e && e.message) || e); // st 維持 0 ＝ **fetch 本身**就例外（與「HTTP 非 200」分得開）
+  }
+  const val = { at: t0, st, ms: Date.now() - t0, bytes, ...summarizeTickRows(rows) };
+  if (err) val.err = err;
+  // 例外／空樣本**照樣寫一筆**：「那天沒樣本」和「那天抓失敗」不可混講
+  await env.FLOW_KV.put(tickSampleKey(tp.date, hm), JSON.stringify(val), { expirationTtl: TICK_SAMPLE_TTL });
+  return val;
+}
+
 // ---- 盤中分鐘 frame（Cron 每分鐘寫入 KV，資金湧入的時間序列）----
 // key = f:<台北日期>:<HH:MM>——2026-07-18 起取「喚醒時間」event.scheduledTime 的台北牆鐘。
 //   舊制取 FinMind 快照自身時戳，07-16/17 上游時戳停滯時同 key 被反覆覆寫、當日格數塌縮
@@ -1097,9 +1227,17 @@ export const HEALTH_CRONS = {
   "50 15 * * 2-6": "eve",    // 台北 23:50——晚場協調班窗（-23:55）尾聲，所有 GH 兜底 cron（-22:55）也都過了
   "30 1 * * 2-6":  "morn",   // 台北 09:30——morning/us/summary-am 全部窗口（-08:50）之後
 };
+// 台指期 tick 量測班（2026-09-09，**暫時**；見 summarizeTickRows 上方的長註解）。
+// 台北 09:00–19:55 每 5 分、週一~五（dow 為 Quartz 慣例，2-6＝週一~五）。
+// ★ 這條**必須在 dispatchRoleForCron 就被攔下並 return**，絕不可落到 scheduledRole：
+//   它的時窗與盤中 frame cron（`* 1-5 * * 2-6`）在台北 09:00–13:59 完全重疊，
+//   落到 scheduledRole 會被判成 `frame` → 每 5 分多寫一次同一格 frame（重複寫入、
+//   且與 frame cron 自己的那次搶同一把 key）。event.cron 精確比對即可分辨兩者。
+export const TICK_CRON = "*/5 1-11 * * 2-6";   // 需與 wrangler.toml crons 內該條完全一致
 // 統一路由（scheduled handler 最先判，先於 scheduledRole——晚場/am 窗的台北時刻落在
 // 哨兵窗（17-23 時 %5 分）與 :47/:07 分流範圍，不先攔截會誤入 sentinel/news/idle）
 export function dispatchRoleForCron(cron) {
+  if (cron === TICK_CRON) return { kind: "ticksample" };
   if (BACKUP_CRONS[cron]) return { kind: "backup", name: BACKUP_CRONS[cron] };
   if (HEALTH_CRONS[cron]) return { kind: "health", slot: HEALTH_CRONS[cron] };
   const role = DISPATCH_ROLES[cron];
@@ -4101,6 +4239,10 @@ export default {
       } else if (droute.kind === "health") {
         // 健檢班：不 dispatch、只盤點產物，缺件告警（失敗只 log，絕不影響其他班）
         ctx.waitUntil(runHealthCheck(env, tp, droute.slot).catch((e) => console.log("health:", e && e.message)));
+      } else if (droute.kind === "ticksample") {
+        // 台指期 tick 量測班（暫時）：只抓一次、寫一把獨立 KV key，不 dispatch 任何東西、
+        // 不接哨兵。失敗只 log，絕不影響同一分鐘醒來的其他班（各自獨立 waitUntil）
+        ctx.waitUntil(runTickSample(env, tp).catch((e) => console.log("ticksample:", e && e.message)));
       } else if (droute.kind === "summary-am") {
         ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
         // 晨間圖卡（AM slot，2026-08-10）：同窗並存的第二件事——08:05–08:15 dispatch 渲染、
@@ -4357,6 +4499,31 @@ export default {
         return json({ ...tsDiag(classifyJson.map, rows), swr: liveSwrStats() }, { "Cache-Control": "no-store" });
       } catch (e) {
         return json({ error: String(e && e.message || e), swr: liveSwrStats() }, { "Cache-Control": "no-store" });
+      }
+    }
+    if (url.pathname === "/tickdiag") {   // 唯讀 tick 量測樣本讀回（見 summarizeTickRows 上方註解）
+      // 三個「不侵入」的性質，與 /livediag 同一套：
+      //   ① **唯讀**——本路徑一個 put 都沒有（樣本只由 runTickSample 這個 cron 班寫入）；
+      //   ② **零 KV list 呼叫**——key 名由 tickSampleSlots() 依 cron 決定性重建（KV list 額度曾爆過）；
+      //   ③ 不列進根路徑 endpoints 清單（同 /livediag，低頻＋不張揚）。
+      // 節流沿用 /livediag 那組 in-isolate 計數（見 diagThrottle 上方註解，殘留風險已記載）。
+      const th = diagThrottle(Date.now(), taipeiParts().date);
+      if (!th.ok) return json({ error: "診斷路徑節流中", ...th }, { "Cache-Control": "no-store" });
+      const q = url.searchParams.get("date") || "";
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : taipeiParts().date;   // 非法值靜默退回台北今日
+      try {
+        if (!env.FLOW_KV) throw new Error("缺少 FLOW_KV binding");
+        const slots = tickSampleSlots();
+        // 132 把獨立 key 一次 get 完（Paid 方案子請求上限 1000，且 KV get 便宜）；
+        // 單把讀失敗只讓該時點缺席，不整包失敗
+        const got = await Promise.all(slots.map((hm) =>
+          Promise.resolve(env.FLOW_KV.get(tickSampleKey(date, hm), "json")).catch(() => null)));
+        const samples = [];
+        slots.forEach((hm, i) => { if (got[i]) samples.push({ hm, ...got[i] }); });
+        return json({ schema: 1, date, slots: slots.length, n: samples.length, samples },
+          { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ error: String((e && e.message) || e) }, { "Cache-Control": "no-store" });
       }
     }
     if (url.pathname !== "/live") {
