@@ -2481,6 +2481,17 @@ const FX_AETF_KINDS = [["new", "新"], ["add", "加"], ["cut", "減"], ["exit", 
 // （使用者 2026-09-10 裁示）：用淨額排序會讓「大買 A、大賣 B」的 ETF 正負相抵而排到
 // 後面，與「今天誰動作最大」的意圖相反。B 類卡，卡底標排序欄位（spec §3B.2）。
 // 刻意不放：跨 ETF 共識（C 類、零回測）、est_flow 推估值、含申贖背離判讀、任何形容詞。
+// **兩個必須在 note 揭露的口徑差異（2026-09-11 覆驗退回補上）**：
+//   ①`r2` 的新/加/減/清取自上游 `k` 欄，而 `k` 是**依原始股數 sh1 vs sh0** 分類
+//     （`src/build_aetf_diff.py` 內 `# 持股型態分類` 段，註解明寫「與主動純額無關」），
+//     `r` 卻是主動口徑；申贖日兩者會系統性打架（15 天 273 個 ETF-day 中 13 個 ratio≠1，
+//     實例 2026/08/04 00991A ratio=1.0618 → 淨額 −8.9 億卻是「加19/減8」，看起來像 bug）。
+//     上游只有 `n_buy`／`n_sell` 是主動口徑、四分類**只有 `k` 有**，故用 `k` 是必要取捨。
+//   ②主動淨額的「排除申贖」是**估算**：`ratio` 由 `_units_ratio` 產生，FinMind 無總單位數
+//     （實查 `data/aetf/latest.json` 各檔 `units` 皆為 null），一律落到「各持股今/昨股數比
+//     中位數」那條後備。
+// 另：`render_ranking` 的金色比例條長度比例化於 `row.r`（主值），與名次不同軸——全卡唯一
+// 沒被文字說明的視覺元素就是它，故 note 必須點明（2026-09-11 覆驗判定「中度、會誤讀」）。
 function fxCardAetf2(s) {
   const e = fxNeed(s.aetfDiff && s.aetfDiff.etfs, "aetfDiff.etfs");
   const stale = fxAetfStale(s);
@@ -2499,6 +2510,8 @@ function fxCardAetf2(s) {
       else { net += v; gross += Math.abs(v); }
       if (a && kn[a.k] !== undefined) kn[a.k]++;
     }
+    // 規模：優先集保口徑 twse_aum_yi；缺值退成分股 market_value 加總（`aum`，
+    // `src/build_aetf.py` 檔頭明寫「僅供估算」——**不是集保口徑**，故 note 分開標示）
     const aum = o && o.twse_aum_yi != null ? o.twse_aum_yi : (o && o.aum != null ? fxYi(o.aum) : null);
     list.push({ c, n: String((o && o.name) || c).replace(/^主動/, ""), net, gross, kn, aum });
   }
@@ -2517,8 +2530,11 @@ function fxCardAetf2(s) {
     `其中 ${acted} 檔有加減碼，列出前 ${rows.length}`,
     ...(nullVal ? [`${nullVal} 筆個股金額缺值，已以 0 計`] : [])].join("；");
   return { title: "主動ETF 動作總覽", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`, rows,
-    note: "依當日加減碼金額絕對值合計降序；右側數值為主動淨額（已排除申購贖回的等比效應），"
-      + "新/加/減/清＝新增、加碼、減碼、出清檔數，規模為集保口徑上市規模",
+    note: "排序依當日加減碼金額絕對值合計降序；長條長度比例化於右側數值、與名次不同軸。"
+      + "右側＝主動淨額（以估算申贖比扣除等比效應後的持股金額變動）。"
+      + "新/加/減/清＝新增、加碼、減碼、出清檔數，依原始股數增減分類，"
+      + "與主動淨額口徑不同，申贖日可能方向相反。"
+      + "規模＝集保口徑上市規模，缺值時退成分股市值加總（估算）。",
     foot };
 }
 function fxCardAetf4(s) {           // pm-aetf-4 主動ETF 加減碼明細（aetfDiff.stocks zh/val）

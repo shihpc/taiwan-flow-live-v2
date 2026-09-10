@@ -132,6 +132,10 @@ const FIX = () => ({
         sell: [{ c: "3481", n: "群創", zh: -300, val: -8e8, rzh: -300, rval: -8e8, k: "cut" }] },
       "00405A": { name: "主動統一台股增長", aum: null, twse_aum_yi: 380.5, est_flow: 0, n_buy: 0, n_sell: 1,
         buy: [], sell: [{ c: "6488", n: "環球晶", zh: -30, val: -2e8, rzh: -30, rval: -2e8, k: "exit" }] },
+      // 00982A：twse_aum_yi 為 null、aum 有值 → 唯一走「規模退 aum」分支的檔
+      // （2026-09-11 覆驗退回：原本沒有任何 fixture 走得到這條，突變拿掉它測試照樣全綠）
+      "00982A": { name: "主動群益台灣強棒", aum: 1.234e10, twse_aum_yi: null, est_flow: 0, n_buy: 1, n_sell: 0,
+        buy: [{ c: "6669", n: "緯穎", zh: 60, val: 3e8, rzh: 60, rval: 3e8, k: "add" }], sell: [] },
       "00406A": { name: "主動中信台灣收益", aum: null, twse_aum_yi: 100.0, est_flow: 0, n_buy: 0, n_sell: 0,
         buy: [], sell: [] },
     },
@@ -336,7 +340,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   // 排序鍵＝Σ|val|：00401A（net +1e8＝+1.0億、gross 1.7e9＝17.0億）必須壓過
   // 00400A（net 5e8＝+5.0億、gross 5e8）——若誤用淨額排序，00400A 會跑到第 1
   chk("aetf-2 依動作金額絕對值合計降序（正負不相抵）",
-    c && JSON.stringify(c.rows.map((r) => r.l)) === JSON.stringify(["00401A", "00400A", "00405A"]),
+    c && JSON.stringify(c.rows.map((r) => r.l)) === JSON.stringify(["00401A", "00400A", "00982A", "00405A"]),
     c && c.rows.map((r) => r.l).join(","));
   chk("aetf-2 主值＝主動淨額（00401A 為 +1.0億，非 gross 17.0億）",
     c && c.rows[0].r === "+1.0億" && c.rows[0].c === "up", c && JSON.stringify(c.rows[0]));
@@ -348,17 +352,32 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   // 四類計數＋規模（r2）
   chk("aetf-2 r2＝新/加/減/清＋規模", c && c.rows[0].r2 === "新0/加1/減1/清0・規模27.0億",
     c && c.rows[0].r2);
-  chk("aetf-2 規模缺 twse_aum_yi 時退 aum（00400A 顯 261.9億）",
+  chk("aetf-2 規模優先取 twse_aum_yi（00400A 顯 261.9億，aum 為 null）",
     c && /規模261\.9億/.test(c.rows[1].r2), c && c.rows[1].r2);
+  // 回退分支：00982A 的 twse_aum_yi 為 null、aum=1.234e10 元 → 123.4億
+  chk("aetf-2 twse_aum_yi 缺時退 aum（00982A 顯 123.4億）",
+    c && c.rows[2].l === "00982A" && /規模123\.4億$/.test(c.rows[2].r2), c && c.rows[2].r2);
   // 涵蓋率揭露：diff 4 檔、latest.errors 2 檔、有動作 3 檔、列出 3 列
-  chk("aetf-2 卡底揭露涵蓋率", c && c.foot.startsWith("納入 4 檔主動ETF，另 2 檔當日無揭露資料；其中 3 檔有加減碼，列出前 3"),
+  chk("aetf-2 卡底揭露涵蓋率", c && c.foot.startsWith("納入 5 檔主動ETF，另 2 檔當日無揭露資料；其中 4 檔有加減碼，列出前 4"),
     c && c.foot);
   chk("aetf-2 零動作的 ETF 不列（00406A 缺席）", c && !c.rows.some((r) => r.l === "00406A"),
     c && c.rows.map((r) => r.l).join(","));
   chk("aetf-2 note 標排序欄位（B 類要求）", c && /依當日加減碼金額絕對值合計降序/.test(c.note), c && c.note);
+  // 2026-09-11 覆驗退回：三個口徑差異必須揭露在卡面（鐵律 4／§3B.2）
+  chk("aetf-2 note 說明比例條與名次不同軸",
+    c && /長條長度比例化於右側數值、與名次不同軸/.test(c.note), c && c.note);
+  chk("aetf-2 note 不把估算申贖比講成已知值（含「估算」）",
+    c && /以估算申贖比扣除等比效應/.test(c.note) && !/已排除申購贖回的等比效應/.test(c.note), c && c.note);
+  chk("aetf-2 note 揭露四類計數與主值不同口徑",
+    c && /依原始股數增減分類/.test(c.note) && /與主動淨額口徑不同，申贖日可能方向相反/.test(c.note), c && c.note);
+  chk("aetf-2 note 規模回退不誤標成集保口徑",
+    c && /規模＝集保口徑上市規模，缺值時退成分股市值加總（估算）/.test(c.note), c && c.note);
   // 誠實原則：卡面零形容詞／零引導語（FX_FORBIDDEN 的 15 字擋不住「最積極」這類）
+  // 「連買／續買／轉買／主力／聰明錢」是 §3B.3 C 類的形狀：這張卡只要加一個「近 N 日」
+  // 維度就會自然寫出「連買」，先把黑名單釘住（2026-09-11 覆驗建議）
   const ADJ = ["最積極", "積極", "強度", "果斷", "強勢", "力道", "搶進", "領先", "看好",
-    "關注", "佈局", "布局", "大幅", "明顯", "共識", "同買", "同賣"];
+    "關注", "佈局", "布局", "大幅", "明顯", "共識", "同買", "同賣",
+    "連買", "連賣", "續買", "續賣", "轉買", "轉賣", "主力", "聰明錢"];
   const txt = c ? JSON.stringify([c.title, c.sub, c.rows, c.note, c.foot]) : "";
   chk("aetf-2 卡面零形容詞／零共識語", !ADJ.some((w) => txt.includes(w)),
     ADJ.filter((w) => txt.includes(w)).join(","));
@@ -372,7 +391,7 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     const out = buildDailyCards(fx);
     const c2 = out.cards.find((x) => x.id === "pm-aetf-2");
     chk("缺 aetfLatest → aetf-2 照發、卡底不提無揭露檔數",
-      c2 && !/無揭露/.test(c2.foot) && /納入 4 檔主動ETF；其中 3 檔有加減碼/.test(c2.foot),
+      c2 && !/無揭露/.test(c2.foot) && /納入 5 檔主動ETF；其中 4 檔有加減碼/.test(c2.foot),
       c2 && c2.foot);
     chk("缺 aetfLatest → 35 張全產出（不連坐）", out.cards.length === 35, `${out.cards.length}`); }
   // 規模兩欄皆缺 → 顯「—」但該列保留（規模不是排序鍵，不該讓一檔 ETF 消失）
