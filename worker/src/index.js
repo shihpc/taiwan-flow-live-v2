@@ -415,15 +415,24 @@ export const TICK_SAMPLE_TTL = 7 * 86400; // 樣本保留 7 天（量測用，�
 export const tickSampleKey = (dateISO, hm) => `tick:${dateISO.replaceAll("-", "")}:${hm}`;
 // 時間欄位名不靠印象：依序試這四個，量到哪個就記哪個（`tk`）。
 export const TICK_TIME_KEYS = ["time", "Time", "datetime", "Datetime"];
-// 尺寸閘門：回應字串長度超過此值就**跳過 `JSON.parse`**（樣本記 `n:null` ＋ `skip:"too-large"`，
-// `bytes`／`clen` 照記）。理由有二：
+// 尺寸閘門：分兩關，值都用這個門檻，但**擋的東西不同、樣本形狀也不同**（見 runTickSample）：
+//   `skip:"too-large:clen"`＝上游宣告的 content-length 超標 → **連 body 都不讀**，`bytes` 為 `null`；
+//   `skip:"too-large:text"`＝上游沒給 content-length、讀完才發現超標 → 只跳過 `JSON.parse`，`bytes` 有值。
+// 兩關的 `n` 都是 `null`。**沒有 `skip:"too-large"` 這個值**（2026-09-10 覆驗發現本註解區還在寫它）。
+// 理由有二：
 //   ① 現行寫法是 `await r.text()` → `JSON.parse`，字串與解析後的物件會**同時常駐**，記憶體峰值
 //      約為 `/live` 那種直接 `.json()` 的 2 倍；Cloudflare 官方文件記載 Worker 記憶體上限
 //      128 MB／isolate，**量測班自己不能把 Worker 打爆**（本班與 frame／哨兵同分醒，見 TICK_CRON）。
 //   ② 「單日 tick 檔到底多大」正是本班要量的未知 (3)——**「大到不敢 parse」本身就是那個未知的答案**，
-//      記成 `skip:"too-large"` ＋ `bytes`／`clen` 比讓 isolate OOM（連樣本都寫不進去）有用得多。
+//      記成 `skip` ＋ `clen`（第二關另有 `bytes`）比讓 isolate OOM（連樣本都寫不進去）有用得多。
 // 20e6 是保守值：JS 字串內部為 UTF-16，20e6 字元約 40 MB，加上 parse 後的物件仍在 128 MB 內留有餘裕。
-// 這個門檻**只影響要不要 parse**，不影響 `bytes`／`clen` 的記錄，所以量測資料不會因為設了它而缺角。
+// **本註解原本寫「只影響要不要 parse、不影響 bytes／clen 的記錄，量測資料不會缺角」——那是錯的**
+// （2026-09-10 覆驗指出，且與下方 runTickSample 內的註解直接矛盾）：第一關正是「連 body 都不讀」，
+// `bytes` 就是缺角（記 `null`＝沒量到）。第二關才是「只影響要不要 parse」。
+// **判讀陷阱（無測試可擋，讀樣本的人要自己知道）**：上游若**謊報一個很大的 content-length**，
+// 第一關會照樣短路，樣本長得與「檔案真的很大」**一模一樣**（`bytes:null` ＋ `clen` 很大 ＋
+// `skip:"too-large:clen"`），**樣本裡沒有任何欄位分辨得出來**。而「單日 payload 多大」正是本班
+// 要量的未知 (3)，所以看到第一關觸發時，`clen` 只能當作「上游宣告的值」、不能當作實際大小。
 export const TICK_MAX_PARSE_BYTES = 20e6;
 // 閘門觸發時丟出的哨兵物件（不是錯誤）：讓 clen 那一關能跳出 try 的其餘步驟，
 // 又不會被下方 catch 當成「抓失敗」寫進 err——「太大所以沒讀」和「抓失敗」不可混講。
@@ -504,7 +513,8 @@ function tickHm(v) {
 //     ④ 值存在但**不符 `\d{2}:\d{2}`**（`tickHm` 回 null，例如上游改成 epoch 秒數）→ 同 ③ 只跳該列，
 //        不過 `mn`／`mx` 仍會記到它的原始字串，所以 `mn`／`mx` 形狀怪異就是這一種的線索。
 //   另有第五種「三段全 0」但**不是**本函式造成的：`runTickSample` 的尺寸閘門跳過 `JSON.parse` 時
-//   （樣本帶 `skip:"too-large"`），根本沒有列進到這裡，該樣本的 `n` 會被覆寫成 `null` 以資區別。
+//   （樣本帶 `skip:"too-large:clen"` 或 `"too-large:text"`），根本沒有列進到這裡，
+//   該樣本的 `n` 會被覆寫成 `null` 以資區別。
 export function summarizeTickRows(rows) {
   const empty = { n: 0, mn: null, mx: null, seg: { a: 0, b: 0, c: 0 }, d13: 0, ct: 0, dates: [], tk: null };
   if (!Array.isArray(rows) || rows.length === 0) return empty;
@@ -558,7 +568,10 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
     // clen ＝上游宣告的 content-length：**有才記、沒有就 null，一律不臆造**（缺標頭、
     // chunked 傳輸、或被中介改寫都會沒有）。它與下面的 bytes 是兩個獨立的量，關係見 bytes 註解。
     const cl = r.headers && r.headers.get ? r.headers.get("content-length") : null;
-    clen = cl != null && cl !== "" && Number.isFinite(Number(cl)) ? Number(cl) : null;
+    // `>= 0` 這道（2026-09-10 覆驗的 nit）：HTTP content-length 只能是非負十進位整數，
+    // 收到 `-1` 之類的值就是上游壞掉，記成 `null`＝沒量到，不要把一個不可能的量測值當事實寫進樣本。
+    const clNum = cl != null && cl !== "" ? Number(cl) : NaN;
+    clen = Number.isFinite(clNum) && clNum >= 0 ? clNum : null;
     // ★ 閘門第一關**必須在讀 body 之前**（2026-09-09 覆驗退回）：原本只用 `text.length` 判，
     // 而那是**整份回應已經被讀成字串之後**——真正會 OOM 的情境（單日檔大到上百 MB）在
     // `.text()` 當下就把 isolate 打爆，樣本一樣寫不進去，正是這道閘門說要避免的結果。

@@ -255,17 +255,35 @@ const FAKE = "FAKE_TOKEN_FOR_TEST_abcdef0123456789";
   // ── 第一關：上游有給 content-length，**在讀 body 之前**就短路 ──
   // 這一關才是真的擋 OOM 的那道：真會打爆 isolate 的檔在 `.text()` 當下就爆了，
   // 事後用 text.length 判等於沒判。所以這裡要斷言「body 從頭到尾沒被讀過」。
-  let bodyRead = false;
+  // 偵測面必須涵蓋**所有**讀 body 的方法，不能只包 `r.text`（2026-09-10 覆驗發現的假通過：
+  // 舊版只包 text，於是把閘門改成先 `await r.arrayBuffer()`／`r.json()`／`r.clone().text()`
+  // ——也就是把這關要防的事原封做一遍——140 條測試照樣全綠。這條是被 ★ 標記、
+  // CLAUDE.md 稱為「才是真的擋 OOM 的那道」的核心斷言，卻沒有牙齒）。
+  // `r.body` 也要換掉：`getReader()` 同樣讀得到 body，只留 `cancel` 不記錄（那是本關該做的事）。
+  // 註：不可改用 ReadableStream 的 `pull` 當探針——Node/undici 在 `new Response(stream)` 當下
+  // 就會 pull，量到的是 mock 的假象、不是程式行為（覆驗實測）。
+  const bodyReads = [];
   const bigRes = () => {
     const r = new Response("x".repeat(1000), {
       headers: { "content-length": String(TICK_MAX_PARSE_BYTES + 1) },
     });
-    const orig = r.text.bind(r);
-    r.text = async () => { bodyRead = true; return orig(); };
+    for (const m of ["text", "json", "arrayBuffer", "blob", "bytes", "clone"]) {
+      if (typeof r[m] !== "function") continue;
+      const orig = r[m].bind(r);
+      r[m] = (...a) => { bodyReads.push(m); return orig(...a); };
+    }
+    Object.defineProperty(r, "body", {
+      configurable: true,
+      get: () => ({
+        cancel: async () => {},                                   // 本關該做的事，不計入
+        getReader: (...a) => { bodyReads.push("getReader"); return a; },
+      }),
+    });
     return r;
   };
   const val = await runTickSample(env, tp, async () => bigRes());
-  chk("★ clen 閘門：body 從未被讀取", bodyRead === false, String(bodyRead));
+  chk("★ clen 閘門：body 從未被讀取（text/json/arrayBuffer/blob/bytes/clone/getReader 全零）",
+    bodyReads.length === 0, JSON.stringify(bodyReads));
   chk("clen 閘門：skip='too-large:clen'", val.skip === "too-large:clen", String(val.skip));
   chk("★ clen 閘門：bytes 為 null（＝沒量到，不是 0＝回應是空的）", val.bytes === null, String(val.bytes));
   chk("clen 閘門：clen 照記", val.clen === TICK_MAX_PARSE_BYTES + 1, String(val.clen));

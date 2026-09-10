@@ -51,7 +51,7 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
     原引的 cloudflare/workerd #1957 是引錯的出處），樣本又活 7 天且由**無認證**的 `/tickdiag` 對外吐出
     → 例外訊息一律過 `maskTickErr` 遮罩才寫 KV（有注入假 token 的回歸測試）；
     ②`text()`＋`JSON.parse` 峰值記憶體約 `.json()` 的 2 倍，而「檔多大」正是未知 (3)
-    → 加 `TICK_MAX_PARSE_BYTES`（20e6）尺寸閘門，超過就不 parse、記 `n:null`＋`skip:"too-large"`。
+    → 加 `TICK_MAX_PARSE_BYTES`（20e6）尺寸閘門，超過就不 parse（兩關：`too-large:clen` 連 body 都不讀、`bytes` 為 `null`；`too-large:text` 讀完才擋、`bytes` 有值），兩關的 `n` 都記 `null`。
 
 - **✅ 盤後日頻 RRG 全案（第二、三階段）完成並上線（2026-08-12 凌晨）**：
   使用者最初需求（2026-08-09 影片）的另一半（盤中版見下方 08-09 上線與 08-10 實測兩條）。
