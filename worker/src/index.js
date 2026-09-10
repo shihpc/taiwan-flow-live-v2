@@ -568,8 +568,11 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
     // clen ＝上游宣告的 content-length：**有才記、沒有就 null，一律不臆造**（缺標頭、
     // chunked 傳輸、或被中介改寫都會沒有）。它與下面的 bytes 是兩個獨立的量，關係見 bytes 註解。
     const cl = r.headers && r.headers.get ? r.headers.get("content-length") : null;
-    // `>= 0` 這道（2026-09-10 覆驗的 nit）：HTTP content-length 只能是非負十進位整數，
-    // 收到 `-1` 之類的值就是上游壞掉，記成 `null`＝沒量到，不要把一個不可能的量測值當事實寫進樣本。
+    // `>= 0` 這道（2026-09-10 覆驗的 nit）：收到負值就是上游壞掉，記成 `null`＝沒量到，
+    // 不要把一個不可能的量測值當事實寫進樣本。
+    // **這道只擋負值與 NaN，不是「只收十進位整數」**（2026-09-11 覆驗更正初稿的過寬說法）：
+    // `Number()` 會把 `"1e3"`→1000、`"0x10"`→16、`"+7"`→7、`" 5 "`→5 都收下來。那些形狀同樣
+    // 代表上游壞掉，但值本身合理、記進樣本無害，所以刻意不再收緊——**只是敘述不能承諾得比程式多**。
     const clNum = cl != null && cl !== "" ? Number(cl) : NaN;
     clen = Number.isFinite(clNum) && clNum >= 0 ? clNum : null;
     // ★ 閘門第一關**必須在讀 body 之前**（2026-09-09 覆驗退回）：原本只用 `text.length` 判，
