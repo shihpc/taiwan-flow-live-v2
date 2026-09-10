@@ -128,6 +128,51 @@
   動機：FinMind 美股常態 07:30–08:30 才入庫，05:05 主班 12 輪×10 分在 06:59 耗盡
   搆不到入庫窗。us 的 recheck／晨間健檢判準同步由 genToday 改資料日（mode `usDate`））
 
+## 晚間 LINE 圖卡：主動ETF 動作總覽（`pm-aetf-2`，2026-09-10 改版）
+
+`FX_ACTIVE_CARDS` 由 5 張加到 **6 張**（新卡沿用 `pm-aetf-2` 的 id 與 `FX_CARD_BUILDERS` 表位
+**就地改寫 `function fxCardAetf2`**，builder 庫仍 **35 張**——`worker/test/dailycards.mjs` 六處
+硬編 35 全部不動）。carousel 順序落在 `pm-aetf-5` 之前（表序決定）。規格見
+`docs/line-cards-spec.md` §0／§3B.2／§3C。
+
+- **卡別＝B 類**（排行榜，spec §3B.2）：卡底標排序欄位、零形容詞。**不得掛 A 類標籤**
+  ——`src/build_cards_png.py` 的 `render_ranking` 對任何 rows 卡都畫金銀銅圓章＋比例條，
+  圖面天生就是排行榜。
+- **維度＝ETF（一列一檔），與個股維度的 `pm-aetf-5` 零欄位重疊、並存不取代**。只列當日有加減碼的
+  ETF（14 天實測 9–20/20 檔有異動），取前 `FX_ROWS_MAX`（8）。
+- **排序鍵＝Σ|val|（當日加減碼金額絕對值合計），主值＝Σval（主動淨額）——兩者刻意分家**
+  （使用者裁示）：用淨額排序會讓「大買 A、大賣 B」的 ETF 正負相抵而排到後面，與「今天誰動作
+  最大」相反。**副作用：金色比例條比例化於主值，長度與名次不單調**（`render_ranking` 只認
+  `row.r`），這是刻意接受的代價，note 已同時寫明兩者口徑。
+- **`r2`＝`新/加/減/清` 四類檔數（上游 `k` 欄 `new|add|cut|exit`）＋集保口徑規模**
+  （`twse_aum_yi`，缺則退 `aum`，兩者皆缺顯「—」但**該列保留**——規模不是排序鍵）。
+- **卡底 `foot` 揭露涵蓋率**（誠實原則，須消費 `aetfLatest`，它早在 `cardSourceUrls` pm 分支、
+  原本無人消費）：「納入 N 檔主動ETF，另 M 檔當日無揭露資料；其中 X 檔有加減碼，列出前 Y；
+  Z 筆個股金額缺值，已以 0 計」。`aetfLatest` 缺時只少「無揭露」那句、卡照發。
+  **`val` 為 null 一律以 0 計並在卡底報筆數，不得靜默**（今日實測 97 筆中 7 筆為 null）。
+- **刻意不放**（鐵律 8）：跨 ETF 共識（「N 檔同買/同賣」，與已封鎖的 `flows-sync-1` 同型且零回測，
+  屬 C 類）、`est_flow` 申贖估算（推估值，14 天實測每天僅 0–4 檔非零）、含申贖背離 judgement、
+  任何形容詞（「最積極」「動作強度」——`FX_FORBIDDEN` 的 15 字**擋不住**這類，要自己守）。
+- **aetf 三張卡（`pm-aetf-2/4/5`）同批補 per-card 新鮮度守門 `fxAetfStale`**（grep 該宣告字串）：
+  比對 `aetfDiff.primary_date`（上游寫 `YYYY/MM/DD`，正規化成 `YYYY-MM-DD`）與資料日
+  `baseline.date`，不符或**無可信資料日**一律 skip。原本三張卡只靠 `pushDailyCards` 的全域
+  `baseline.date` 閘門，aetf 管線單獨失敗時卡會帶舊 `primary_date` 照出（無聲降級）。
+  **代價**：缺 `baseline` 時三張卡也 skip（同 `fxCardSummaryLongform` 的保守立場），
+  `dailycards.mjs` 的 DEP `baseline` 條目已同步。資料正常時 `pm-aetf-4/5` 輸出**逐字不變**
+  （以 `03841a1` 的 `data/aetf/diff.json`＋`latest.json`＋`baseline.date=2026-09-10`，
+  即 pm 窗當下的真實快照，對跑改動前後實測 IDENTICAL）。
+- **`primary_date` 會在台北午夜後跑到隔日（實測，這條會影響非 pm 窗的 `/cards/data`）**：
+  它取各 ETF 揭露日的領先值，主動 ETF 一旦有人先公告隔日持股就會前進。2026-09-11 01:42
+  的 aetf 班實測 `primary_date=2026/09/11`、`laggards=16`（只有 `00400A` 前進），而
+  `baseline.date` 仍是 `2026-09-10`（當日 baseline 要到當晚才寫）。**此時 gate 判不符 → 三張
+  aetf 卡從 `/cards/data` 缺席**，直到當晚 baseline 追上。
+  **生產不受影響**：渲染（`cards.yml` 台北 22:12）與推播（22:30）都落在 pm 窗內，該窗
+  `primary_date` 與 `baseline.date` 相等（提案 14 天逐日快照＋2026-09-10 22:56 實測皆然）。
+  gate 刻意用**嚴格相等**而非 `>=`（`usFresh` 那條用 `>=` 是因為 us 的 date 不可能超前）：
+  超前時 `laggards` 通常很大（今日 16/20），放行等於把「只剩 1 檔 ETF 的聚合」當成當日全貌，
+  且會讓 aetf 卡的資料日與同一組 carousel 其餘卡不同天。
+- 測試：`node test/dailycards.mjs`（3b／3c 兩節）。**`src/build_cards_png.py` 零改動**。
+
 ## 晨間 LINE 圖卡（AM slot，2026-08-10）
 
 晚間圖卡管線（cards.yml → `src/build_cards_png.py` → pushDailyCards）的晨間平行場，

@@ -114,13 +114,26 @@ const FIX = () => ({
   },
   lastweek: { week: "2026-07-13", generated_at: "2026-07-20T12:32:31+08:00",
     stocks: { "2330": 6e11, "3231": 9e10, "2454": 4.5e10 }, tot: { twse: 5.5e12, tpex: 1.16e12 } },
-  aetfLatest: { run_date: "2026-07-24", etfs: {} },   // 組裝層目前不消費，佔位驗容錯
+  // 2026-09-10：pm-aetf-2 改版後開始消費 errors（涵蓋率揭露），etfs 仍佔位驗容錯
+  aetfLatest: { run_date: "2026-07-24", etfs: {},
+    errors: { "00408A": "Holding 近 14 日無資料", "00410A": "Holding 近 14 日無資料" } },
   aetfDiff: {
+    // etfs[].buy/sell 明細＋k 欄（new|add|cut|exit）為 pm-aetf-2 改版後的主資料，
+    // 刻意造成「gross 排序 ≠ |net| 排序」：00401A net 僅 +1e8 但 gross 1.7e9 為最大，
+    // 必須排第 1（驗排序鍵不被正負相抵）；00400A 有一筆 val=null（驗以 0 計＋卡底標註）；
+    // 00406A 當日零動作（驗不列入）。
     primary_date: "2026/07/24",
     etfs: {
-      "00400A": { name: "主動國泰動能高息", aum: null, twse_aum_yi: 261.89, est_flow: 0, n_buy: 0, n_sell: 0 },
-      "00401A": { name: "主動摩根台灣鑫收", aum: 2702280029, twse_aum_yi: 27.0, est_flow: 0, n_buy: 1, n_sell: 1 },
-      "00405A": { name: "主動統一台股增長", aum: null, twse_aum_yi: 380.5, est_flow: 0, n_buy: 1, n_sell: 1 },
+      "00400A": { name: "主動國泰動能高息", aum: null, twse_aum_yi: 261.89, est_flow: 0, n_buy: 2, n_sell: 0,
+        buy: [{ c: "6669", n: "緯穎", zh: 140, val: 5e8, rzh: 140, rval: 5e8, k: "new" },
+          { c: "8210", n: "勤誠", zh: 50, val: null, rzh: 50, rval: null, k: "add" }], sell: [] },
+      "00401A": { name: "主動摩根台灣鑫收", aum: 2702280029, twse_aum_yi: 27.0, est_flow: 0, n_buy: 1, n_sell: 1,
+        buy: [{ c: "2330", n: "台積電", zh: 200, val: 9e8, rzh: 200, rval: 9e8, k: "add" }],
+        sell: [{ c: "3481", n: "群創", zh: -300, val: -8e8, rzh: -300, rval: -8e8, k: "cut" }] },
+      "00405A": { name: "主動統一台股增長", aum: null, twse_aum_yi: 380.5, est_flow: 0, n_buy: 0, n_sell: 1,
+        buy: [], sell: [{ c: "6488", n: "環球晶", zh: -30, val: -2e8, rzh: -30, rval: -2e8, k: "exit" }] },
+      "00406A": { name: "主動中信台灣收益", aum: null, twse_aum_yi: 100.0, est_flow: 0, n_buy: 0, n_sell: 0,
+        buy: [], sell: [] },
     },
     stocks: [
       { c: "6669", n: "緯穎", zh: 140, val: 802200000, rzh: 140, rval: 802200000 },
@@ -312,6 +325,102 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
     chk(`B 類 ${id} note 標排序依據`, c && /依.+(降序|排序|分組)/.test(c.note || ""), c && c.note);
   }
 }
+// ---- 3b. pm-aetf-2 主動ETF 動作總覽（2026-09-10 改版，ETF 維度）----
+// 卡別＝B 類（spec §3B.2）：卡底標排序欄位、零形容詞。排序鍵（動作金額絕對值合計）
+// 與主值（主動淨額）刻意分家＝使用者裁示，這裡把「正負不相抵」釘成回歸測試。
+{
+  const { cards } = buildDailyCards(FIX());
+  const c = cards.find((x) => x.id === "pm-aetf-2");
+  chk("aetf-2 有產出", !!c);
+  chk("aetf-2 標題為動作總覽", c && c.title === "主動ETF 動作總覽", c && c.title);
+  // 排序鍵＝Σ|val|：00401A（net +1e8＝+1.0億、gross 1.7e9＝17.0億）必須壓過
+  // 00400A（net 5e8＝+5.0億、gross 5e8）——若誤用淨額排序，00400A 會跑到第 1
+  chk("aetf-2 依動作金額絕對值合計降序（正負不相抵）",
+    c && JSON.stringify(c.rows.map((r) => r.l)) === JSON.stringify(["00401A", "00400A", "00405A"]),
+    c && c.rows.map((r) => r.l).join(","));
+  chk("aetf-2 主值＝主動淨額（00401A 為 +1.0億，非 gross 17.0億）",
+    c && c.rows[0].r === "+1.0億" && c.rows[0].c === "up", c && JSON.stringify(c.rows[0]));
+  // val=null 以 0 計：00400A 兩筆買進只有 5e8 有值 → 淨額 +5.0億（不是 NaN、也不是缺筆跳過）
+  chk("aetf-2 val=null 以 0 計（00400A 淨額 +5.0億）",
+    c && c.rows[1].r === "+5.0億", c && JSON.stringify(c.rows[1]));
+  chk("aetf-2 缺值筆數標在卡底（不靜默當成 0）",
+    c && /1 筆個股金額缺值，已以 0 計/.test(c.foot || ""), c && c.foot);
+  // 四類計數＋規模（r2）
+  chk("aetf-2 r2＝新/加/減/清＋規模", c && c.rows[0].r2 === "新0/加1/減1/清0・規模27.0億",
+    c && c.rows[0].r2);
+  chk("aetf-2 規模缺 twse_aum_yi 時退 aum（00400A 顯 261.9億）",
+    c && /規模261\.9億/.test(c.rows[1].r2), c && c.rows[1].r2);
+  // 涵蓋率揭露：diff 4 檔、latest.errors 2 檔、有動作 3 檔、列出 3 列
+  chk("aetf-2 卡底揭露涵蓋率", c && c.foot.startsWith("納入 4 檔主動ETF，另 2 檔當日無揭露資料；其中 3 檔有加減碼，列出前 3"),
+    c && c.foot);
+  chk("aetf-2 零動作的 ETF 不列（00406A 缺席）", c && !c.rows.some((r) => r.l === "00406A"),
+    c && c.rows.map((r) => r.l).join(","));
+  chk("aetf-2 note 標排序欄位（B 類要求）", c && /依當日加減碼金額絕對值合計降序/.test(c.note), c && c.note);
+  // 誠實原則：卡面零形容詞／零引導語（FX_FORBIDDEN 的 15 字擋不住「最積極」這類）
+  const ADJ = ["最積極", "積極", "強度", "果斷", "強勢", "力道", "搶進", "領先", "看好",
+    "關注", "佈局", "布局", "大幅", "明顯", "共識", "同買", "同賣"];
+  const txt = c ? JSON.stringify([c.title, c.sub, c.rows, c.note, c.foot]) : "";
+  chk("aetf-2 卡面零形容詞／零共識語", !ADJ.some((w) => txt.includes(w)),
+    ADJ.filter((w) => txt.includes(w)).join(","));
+  chk("aetf-2 卡面零禁用字", !FX_FORBIDDEN.some((w) => txt.includes(w)),
+    FX_FORBIDDEN.filter((w) => txt.includes(w)).join(","));
+  let e2 = null; try { assertCardAllowed(c); } catch (e) { e2 = e.message; }
+  chk("aetf-2 過 assertCardAllowed", e2 === null, e2);
+  chk("aetf-2 在 FX_ACTIVE_CARDS 白名單內", FX_ACTIVE_CARDS.has("pm-aetf-2"), [...FX_ACTIVE_CARDS].join(","));
+  // aetfLatest 缺 → 卡照發，只是不揭露 errors 檔數（選配源，不得連坐）
+  { const fx = FIX(); fx.aetfLatest = null;
+    const out = buildDailyCards(fx);
+    const c2 = out.cards.find((x) => x.id === "pm-aetf-2");
+    chk("缺 aetfLatest → aetf-2 照發、卡底不提無揭露檔數",
+      c2 && !/無揭露/.test(c2.foot) && /納入 4 檔主動ETF；其中 3 檔有加減碼/.test(c2.foot),
+      c2 && c2.foot);
+    chk("缺 aetfLatest → 35 張全產出（不連坐）", out.cards.length === 35, `${out.cards.length}`); }
+  // 規模兩欄皆缺 → 顯「—」但該列保留（規模不是排序鍵，不該讓一檔 ETF 消失）
+  { const fx = FIX(); fx.aetfDiff.etfs["00401A"].twse_aum_yi = null; fx.aetfDiff.etfs["00401A"].aum = null;
+    const c3 = buildDailyCards(fx).cards.find((x) => x.id === "pm-aetf-2");
+    chk("規模缺 → 顯「—」且該列仍在", c3 && c3.rows[0].l === "00401A" && /規模—$/.test(c3.rows[0].r2),
+      c3 && c3.rows[0].r2); }
+  // 全部 ETF 零動作 → 整卡缺席（不產空卡）
+  { const fx = FIX();
+    for (const k of Object.keys(fx.aetfDiff.etfs)) { fx.aetfDiff.etfs[k].buy = []; fx.aetfDiff.etfs[k].sell = []; }
+    const out = buildDailyCards(fx);
+    const r = (out.skipped.find((x) => x.id === "pm-aetf-2") || {}).reason;
+    chk("全零動作 → aetf-2 skip、其餘 34 張照常",
+      r === "本日無主動ETF加減碼" && out.cards.length === 34, `${r} cards=${out.cards.length}`); }
+  // buy/sell 形狀壞（非陣列）→ fxArr 退空、不拋例外
+  { const fx = FIX(); fx.aetfDiff.etfs["00400A"].buy = 42;
+    let out = null, err = null;
+    try { out = buildDailyCards(fx); } catch (e) { err = e.message; }
+    chk("buy 形狀壞 → 不拋例外、aetf-2 仍產出", err === null
+      && !!out.cards.find((x) => x.id === "pm-aetf-2"), err); }
+}
+// ---- 3c. aetf 三張卡 per-card 新鮮度守門（2026-09-10 補）----
+// 原本只有 pushDailyCards 的全域 baseline.date 閘門；aetf 管線單獨失敗時 diff.json
+// 停在昨日，三張卡照出、只有 sub 的 primary_date 是舊的（無聲降級）。
+{
+  const AETF_IDS = ["pm-aetf-2", "pm-aetf-4", "pm-aetf-5"];
+  // 基準：primary_date（2026/07/24）＝baseline.date（2026-07-24）→ 三張全在
+  { const out = buildDailyCards(FIX());
+    chk("primary_date＝資料日 → aetf 三張全在",
+      AETF_IDS.every((id) => out.cards.some((c) => c.id === id))); }
+  // 過期：aetf 停在昨日 → 三張全缺席，其餘 32 張照常
+  { const fx = FIX(); fx.aetfDiff.primary_date = "2026/07/23";
+    const out = buildDailyCards(fx);
+    const sk = Object.fromEntries(out.skipped.map((s) => [s.id, s.reason]));
+    chk("aetf 資料非當日 → 三張全 skip", AETF_IDS.every((id) => !out.cards.some((c) => c.id === id)),
+      out.cards.filter((c) => AETF_IDS.includes(c.id)).map((c) => c.id).join(","));
+    chk("skip 理由標明兩個日期", AETF_IDS.every((id) =>
+      /aetf 資料非當日（aetf=2026-07-23 data=2026-07-24）/.test(sk[id] || "")), JSON.stringify(sk["pm-aetf-5"]));
+    chk("aetf 過期 → 其餘 32 張照常", out.cards.length === 32, `${out.cards.length}`); }
+  // 日期分隔符不同（YYYY-MM-DD）也要判為同日：只正規化、不改語意
+  { const fx = FIX(); fx.aetfDiff.primary_date = "2026-07-24";
+    const out = buildDailyCards(fx);
+    chk("primary_date 用 - 分隔亦判為當日", AETF_IDS.every((id) => out.cards.some((c) => c.id === id))); }
+  // primary_date 缺 → 無從核對 → 三張全 skip（不得帶「資料日 —」照出）
+  { const fx = FIX(); delete fx.aetfDiff.primary_date;
+    const out = buildDailyCards(fx);
+    chk("primary_date 缺 → 三張全 skip", AETF_IDS.every((id) => !out.cards.some((c) => c.id === id))); }
+}
 // ---- 4. regime 閘門：空頭只抑制卡 1/2，卡 3-6 不變 ----
 {
   chk("fxRegime bull", fxRegime(mkTotals()).regime === "bull");
@@ -337,7 +446,9 @@ const SIG_IDS = ["sig-sub-surge", "sig-dual-buy", "sig-new-high", "sig-new-low",
   const DEP = {   // 來源鍵 → 預期受影響卡
     // 2026-08-07 收緊：長文卡的日期守門要求 dataDate 必須存在（沒有可信資料日就
     // 無從核對摘要是不是當日的），故缺 baseline 時它也一起 skip
-    baseline: [...SIG_IDS, "pm-summary-1"].sort(),
+    // 2026-09-10：aetf 三張卡補 per-card 新鮮度守門後，缺 baseline＝沒有可信資料日，
+    // 無從核對 aetfDiff.primary_date 是不是當日的 → 一併 skip（同長文卡的保守立場）
+    baseline: [...SIG_IDS, "pm-summary-1", "pm-aetf-2", "pm-aetf-4", "pm-aetf-5"].sort(),
     flowsDaily: ["sig-dual-buy", "sig-surge-warn", "v2-rank-1"],
     daysummary: ["v2-global-1", "v2-ov-1", "v2-ov-5", "v2-ov-6", "v2-ov-7", "v2-ov-8",
       "v2-ov-14", "v2-chain-1", "news-morning-3"],

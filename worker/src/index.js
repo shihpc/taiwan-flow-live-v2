@@ -2460,20 +2460,71 @@ function fxCardInstRank(s, key, label) {  // flows-foreign-1／flows-trust-1 買
   return { title: `${label}買賣超排行`, sub: `資料日 ${s.flowsLatest.date}`,
     rows: [...buy.map(mk), ...sell.map(mk)], note: `依${label}買超／賣超金額（net_amt_k）各自降序，買超在前` };
 }
-function fxCardAetf2(s) {           // pm-aetf-2 主動ETF 總覽（aetfDiff.etfs）
+// aetf 三張卡（pm-aetf-2/4/5）共用的 per-card 新鮮度守門（2026-09-10 補）。
+// 原本三張卡只靠 pushDailyCards 的全域 baseline.date 閘門：aetf 管線單獨失敗時
+// diff.json 停在昨日，卡照出、只有 sub 的 primary_date 是舊的（無聲降級）。
+// 改為逐卡比對 aetfDiff.primary_date（上游寫 YYYY/MM/DD，正規化成 YYYY-MM-DD）與
+// 資料日 baseline.date；不符或**無可信資料日**一律 skip——同 fxCardSummaryLongform
+// 的保守立場（沒有可信資料日就無從核對資料是不是當日的）。純比對欄位、無時鐘。
+function fxAetfStale(s) {
+  const pd = s.aetfDiff && s.aetfDiff.primary_date
+    ? String(s.aetfDiff.primary_date).slice(0, 10).replaceAll("/", "-") : null;
+  const dd = s.baseline && s.baseline.date ? String(s.baseline.date).slice(0, 10) : null;
+  if (pd && dd && pd === dd) return null;
+  return `aetf 資料非當日（aetf=${pd} data=${dd}）`;
+}
+// 四類動作（上游 src/build_aetf_diff.py 的 k 欄）→ 卡面單字
+const FX_AETF_KINDS = [["new", "新"], ["add", "加"], ["cut", "減"], ["exit", "清"]];
+// pm-aetf-2 主動ETF 動作總覽（2026-09-10 改版：原「總覽」只有規模＋加減檔數，規模是
+// 慢變數、每天圖幾乎一樣）。一列一檔 ETF，與個股維度的 pm-aetf-5 零欄位重疊。
+// **主值＝該檔主動淨額（Σ val），排序鍵＝動作金額絕對值合計（Σ|val|）——兩者刻意分家**
+// （使用者 2026-09-10 裁示）：用淨額排序會讓「大買 A、大賣 B」的 ETF 正負相抵而排到
+// 後面，與「今天誰動作最大」的意圖相反。B 類卡，卡底標排序欄位（spec §3B.2）。
+// 刻意不放：跨 ETF 共識（C 類、零回測）、est_flow 推估值、含申贖背離判讀、任何形容詞。
+function fxCardAetf2(s) {
   const e = fxNeed(s.aetfDiff && s.aetfDiff.etfs, "aetfDiff.etfs");
-  const list = Object.entries(e).map(([c, o]) => ({ c, n: o.name || c,
-    aum: o.twse_aum_yi != null ? o.twse_aum_yi : (o.aum != null ? fxYi(o.aum) : null),
-    nb: o.n_buy || 0, ns: o.n_sell || 0 })).filter((o) => o.aum != null);
-  if (!list.length) throw new Error("aetfDiff.etfs 規模欄全空");
-  list.sort((a, b) => b.aum - a.aum);
+  const stale = fxAetfStale(s);
+  if (stale) return { skip: stale };
+  const list = [];
+  let nullVal = 0, acted = 0;
+  for (const [c, o] of Object.entries(e)) {
+    const acts = [...fxArr(o && o.buy), ...fxArr(o && o.sell)];
+    if (!acts.length) continue;                 // 當日無加減碼的 ETF 不列（14 天實測 9–20/20 檔有異動）
+    acted++;
+    let net = 0, gross = 0;
+    const kn = { new: 0, add: 0, cut: 0, exit: 0 };
+    for (const a of acts) {
+      const v = a && a.val;
+      if (v == null) nullVal++;                 // val 缺 → 以 0 計，卡底標明筆數（不靜默當成 0）
+      else { net += v; gross += Math.abs(v); }
+      if (a && kn[a.k] !== undefined) kn[a.k]++;
+    }
+    const aum = o && o.twse_aum_yi != null ? o.twse_aum_yi : (o && o.aum != null ? fxYi(o.aum) : null);
+    list.push({ c, n: String((o && o.name) || c).replace(/^主動/, ""), net, gross, kn, aum });
+  }
+  if (!list.length) return { skip: "本日無主動ETF加減碼" };
+  // 排序鍵＝gross（動作金額絕對值合計）；同值以代號為次鍵，確保輸出確定性
+  list.sort((a, b) => b.gross - a.gross || (a.c < b.c ? -1 : 1));
   const rows = list.slice(0, FX_ROWS_MAX).map((o) => ({ l: o.c, m: o.n,
-    r: `${fxR1(o.aum)}億｜加${o.nb}/減${o.ns}`, c: "neutral" }));
-  return { title: "主動ETF 總覽", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`, rows,
-    note: "依上市規模（twse_aum_yi）降序；加/減＝當日加減碼檔數" };
+    r: fxSgn(fxYi(o.net), "億"), c: fxC(o.net),
+    r2: `${FX_AETF_KINDS.map(([k, t]) => `${t}${o.kn[k]}`).join("/")}・規模${
+      o.aum != null ? `${fxR1(o.aum)}億` : "—"}` }));
+  // 涵蓋率揭露（誠實原則）：diff 納入幾檔、latest.errors 幾檔當日無揭露、缺值幾筆
+  const total = Object.keys(e).length;
+  const errN = s.aetfLatest && s.aetfLatest.errors && typeof s.aetfLatest.errors === "object"
+    ? Object.keys(s.aetfLatest.errors).length : null;
+  const foot = [`納入 ${total} 檔主動ETF${errN ? `，另 ${errN} 檔當日無揭露資料` : ""}`,
+    `其中 ${acted} 檔有加減碼，列出前 ${rows.length}`,
+    ...(nullVal ? [`${nullVal} 筆個股金額缺值，已以 0 計`] : [])].join("；");
+  return { title: "主動ETF 動作總覽", sub: `資料日 ${s.aetfDiff.primary_date || "—"}`, rows,
+    note: "依當日加減碼金額絕對值合計降序；右側數值為主動淨額（已排除申購贖回的等比效應），"
+      + "新/加/減/清＝新增、加碼、減碼、出清檔數，規模為集保口徑上市規模",
+    foot };
 }
 function fxCardAetf4(s) {           // pm-aetf-4 主動ETF 加減碼明細（aetfDiff.stocks zh/val）
   const st = fxNeed(s.aetfDiff && s.aetfDiff.stocks, "aetfDiff.stocks");
+  const stale = fxAetfStale(s);
+  if (stale) return { skip: stale };   // per-card 新鮮度守門（2026-09-10）
   const up = st.filter((o) => (o.zh || 0) > 0).sort((a, b) => (b.val || 0) - (a.val || 0)).slice(0, 4);
   const dn = st.filter((o) => (o.zh || 0) < 0).sort((a, b) => (a.val || 0) - (b.val || 0)).slice(0, 4);
   if (!up.length && !dn.length) return { skip: "本日無主動ETF加減碼" };
@@ -2484,6 +2535,8 @@ function fxCardAetf4(s) {           // pm-aetf-4 主動ETF 加減碼明細（aet
 }
 function fxCardAetf5(s) {           // pm-aetf-5 主動ETF 進出個股（2026-08-16 改排行 rows 形，比照 fxCardInstRank）
   const st = fxNeed(s.aetfDiff && s.aetfDiff.stocks, "aetfDiff.stocks");
+  const stale = fxAetfStale(s);
+  if (stale) return { skip: stale };   // per-card 新鮮度守門（2026-09-10）
   const up = st.filter((o) => (o.zh || 0) > 0).sort((a, b) => (b.val || 0) - (a.val || 0)).slice(0, 5);
   const dn = st.filter((o) => (o.zh || 0) < 0).sort((a, b) => (a.val || 0) - (b.val || 0)).slice(0, 5);
   if (!up.length && !dn.length) return { skip: "本日無主動ETF進出個股" };
@@ -2533,11 +2586,14 @@ export const FX_CARD_BUILDERS = [
 // 「不開網站也想送到眼前、會影響明天的決定、更新頻率配得上每日推播」。
 // 2026-08-16 二次裁剪（使用者指示）：11→5 張——sig 四張（sub-surge／dual-buy／
 // exit-sell／surge-warn）移出；v2-ov-1＋flows-hdr-1＋flows-hdr-2 合併成 v2-dash-1。
+// 2026-09-10（使用者裁示，G3）：5→6 張——pm-aetf-2 就地改版為「主動ETF 動作總覽」
+// （ETF 維度）後加回白名單，與個股維度的 pm-aetf-5 並存、零欄位重疊。
 // builder 全保留——砍掉的卡加回這個清單即復活。詳見 spec 3C 節。
 export const FX_ACTIVE_CARDS = new Set([
   "v2-dash-1",                                // 三合一看板（大盤總結＋三大法人＋台指期）
   "v2-ov-6",                                  // 次產業貢獻發散（附每業前 3 檔個股）
   "flows-foreign-1", "flows-trust-1",         // 外資／投信買賣超排行
+  "pm-aetf-2",                                // 主動ETF動作總覽（ETF 維度，2026-09-10 加入）
   "pm-aetf-5",                                // 主動ETF進出個股（差異化資訊）
 ]);
 // 盤後分析摘要長文卡：postmkt data/summary/<date>-pm.json 的 synthesis 全文。
