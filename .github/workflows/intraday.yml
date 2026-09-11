@@ -58,6 +58,11 @@ jobs:
       # ★ 刻意不看 data/intraday/ 有沒有新檔就直接跑：本步只讀 KV frame，與歸檔無關；
       #   非交易日時腳本自己會因為「一格 frame 都沒有」優雅退出不寫檔（12 次 KV get，可忽略），
       #   這樣 workflow_dispatch 補跑舊日期也不會被「歸檔無變動」誤擋。
+      # ★ **上面那條步驟序只在單次執行內成立**（2026-09-11 覆驗抓到）：同一天第二次跑時
+      #   「build rrg base」會因 data/intraday/ 無新檔而跳過、本步卻照跑，磁碟上的 rrg_base.json
+      #   已是第一次跑重算後、含當日的那版。所以**真正的守門在 Python 端**：
+      #   build_rrg_frozen.py 遇到 `date in base["days"]` 一律拒絕寫檔（優雅退出保留舊檔）。
+      #   改這兩步的順序或增刪守門前，先看該檔 build() 內那段註解。
       - name: build rrg frozen
         id: frz
         run: |

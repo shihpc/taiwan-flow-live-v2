@@ -32,6 +32,9 @@
 # base：**取自當下那份 data/rrg_base.json 的同時點切片**，且 .github/workflows/intraday.yml
 #   把本步驟排在「build rrg base」**之前** —— 那一步會把「今天」也算進基準，重算後的 base
 #   反推今天的座標會與使用者盤中看到的不同。切片只是原值搬運，不做任何運算。
+#   **但步驟序只在單次執行內成立**：同一天重跑時 `build rrg base` 會因無新檔而跳過、本步卻照跑，
+#   磁碟上的 base 已是重算版。故 `build()` 另有一道 fail-safe：`date in base["days"]` 就拒絕寫檔
+#   （優雅退出保留舊檔）——守門在 Python 端，不靠 workflow 的步驟序。
 #
 # 產物：data/rrg_frozen.json
 #   {date, generated_at, times[12], frames{hm:{鏈:share}}, amt{hm:{鏈:億}},
@@ -162,6 +165,24 @@ def build(date: str, out_path: Path, base_path: Path | None = None) -> int:
         return 1
     bidx = {t: i for i, t in enumerate(btimes)}
     chains = sorted(bchains)
+
+    # ★ 守門（2026-09-11 覆驗退回後補）：base 的 days 含定格日 → 這份 base **已經把當日算進去**，
+    #   拿它切片會釘到「使用者當日盤中沒看過的那版基準」，違反本檔存在的前提（定格＝同一張圖）。
+    #   拒絕寫檔、保留前一版定格檔（它自帶 date，前端會照實標示那一天），**優雅退出不紅燈**。
+    #   為什麼一定要在這裡擋、而不是只靠 intraday.yml 的步驟序（本步排在 build rrg base 之前）：
+    #   **步驟序只在「單次執行內」成立**。同一天第二次跑（Worker 對 intraday 有台北 14:40／15:10
+    #   兩個備援 dispatch；GitHub cron 延遲中位數約 2h，主班延後就會與備援重疊）時，
+    #   `build rrg base` 因 data/intraday/ 無新檔而跳過，本步卻照跑，磁碟上的 rrg_base.json
+    #   已是第一次跑重算後、含當日的那版 → 定格檔被靜默改寫成錯的 base
+    #   （tools/noop_guard.py 只忽略 generated_at，照樣 commit，全程零訊號）。
+    #   任何 workflow_dispatch 補跑同理。這條 fail-safe 連手動補跑都擋得住；真要補跑請用
+    #   `--base`（見 main() 的說明）指定當時那一版。
+    bdays = base.get("days") or []
+    if date in bdays:
+        print(f"{date}：base 的 days 已含定格日（{','.join(bdays)}）＝這份 rrg_base.json 已把當日算進基準，"
+              f"切片會與使用者當日盤中看到的不同 → 不寫檔，保留前一版定格檔（正常退出）。"
+              f"若為事後補跑，請以 --base 指定當日盤中那一版（git show <該日之前的 sha>:data/rrg_base.json）")
+        return 0
 
     samples, times = rrg_times()
     missing_t = [t for t in times if t not in bidx]

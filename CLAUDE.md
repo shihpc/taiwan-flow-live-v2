@@ -488,6 +488,16 @@ p90 4h44m／最大 **12h23m**；>4h 12.8%、>10h **2 筆(1.1%)**、>14h 0 筆。
   的代號取交集，因為 `ovAggBy` 走訪的是 `state.live.stocks`）——照抄前端既有行為，不要「修正」它。
   2026-09-11 以 node 抽出 `index.html` 真正的 `ovReplayBuild`／`ovAggBy`／`ovRrgAggFrame` 對跑，
   12 時點 × 47 鏈的 share／amt 與 Python 端**逐位相同**。
+- **`date in base["days"]` 就拒絕寫檔（`build()` 的 fail-safe，2026-09-11 覆驗退回後補）**：
+  base 的 days 含定格日＝這份 `rrg_base.json` 已把當日算進基準，切片會釘到使用者當日盤中沒看過
+  的那版 → 不寫檔、保留前一版定格檔、**優雅退出不紅燈**（舊檔自帶 date，畫面照實標示）。
+  **為什麼不能只靠下面那條步驟序**：步驟序只在**單次執行內**成立。同一天第二次跑時
+  （Worker 對 intraday 另有台北 14:40／15:10 備援 dispatch，家族 cron 延遲中位數約 2h，
+  主班延後就會與備援重疊；`workflow_dispatch` 補跑同理），`build rrg base` 會因
+  `data/intraday/` 無新檔而跳過、定格步驟卻照跑，磁碟上的 base 已是重算版 → 定格檔被靜默寫錯
+  （實測 564/564 格全不同），而 `tools/noop_guard.py` 只忽略 `generated_at`、照常 commit，
+  **全程零訊號**。**這是「靠步驟序保證正確性」的通病**：凡是「A 的正確性依賴 B 還沒跑」的設計，
+  A 自己身上都要有一道守門。補跑用 `--base` 指定當日那一版。
 - **`.github/workflows/intraday.yml` 的步驟序是硬約束**：`archive intraday` → **`build rrg frozen`
   （id: `frz`）** → `build rrg base`（id: `rrg`）→ `commit` → 失敗才轉紅燈 → notify。
   ①**定格必須排在 `build rrg base` 之前**：後者會把「今天」也算進基準，重算後的 base 反推今天的
@@ -496,8 +506,14 @@ p90 4h44m／最大 **12h23m**；>4h 12.8%、>10h **2 筆(1.1%)**、>14h 0 筆。
   `ok=0` ＋ 延後紅燈模式，**禁止 `continue-on-error`**（會被靜默吞掉，理由寫在該檔最後一步註解）。
   ③commit 步驟的 pages dispatch 判斷已改成 `grep -qE '^data/rrg_(base|frozen)\.json$'`——
   定格檔是前端以同源相對路徑載入的產物，不 dispatch 就只進 repo、不上 Pages。
-- **前端降級順序**（`function ovRrgHtml`）：rows 為空 → 先試定格檔 → 定格檔讀不到／內容湊不出
-  3 個可用取樣點才退回原降級③文案。**盤中與交易日收盤後走不到定格路徑**（那時 rows 非空），
+- **前端降級順序**（`function ovRrgHtml`）：**台北週末**（`function ovRrgTaipeiToday` 取星期，
+  沿用 `liveStatus` 既有做法）直接走定格、連 `/replay` 都不打——降級②那兩句（「盤前時段」
+  「盤中資料累積中」）依的是**牆鐘**，週末說出口是**假的斷言**（覆驗實測週六 00:15/03:00/09:10
+  顯示「盤前時段」、09:30/09:56 顯示「盤中資料累積中」，定格檔請求 0 次）。**平日路徑逐字不動**
+  （那兩句在平日是真的）：rows 為空 → 先試定格檔 → 定格檔讀不到／內容湊不出
+  3 個可用取樣點才退回原降級③文案。**國定假日不處理**（同 `liveStatus` 立場），平日假日 10:01 前
+  仍會看到「盤前時段」。用詞與 `liveStatus` 五值對齊：週末＝**休市定格**、其餘＝**收盤定格**。
+  **盤中與交易日收盤後走不到定格路徑**（那時 rows 非空），
   即時路徑逐字不變（2026-09-11 Playwright 以同一組 mock ＋ 固定時鐘，對跑改動前後的 `#main`
   innerHTML **逐字相同**）。CSP 不需改（同源 `data/*.json` 已被 `connect-src 'self'` 涵蓋）。
 - **補跑**：`--base` 可指定當時那一版 base（事後補跑時 `data/rrg_base.json` 已被重算，要用

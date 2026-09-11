@@ -12,6 +12,8 @@
 #   4. share 口徑：只算 twse、依 c 去重、分母只看 frame（不與 /live 取交集）、
 #      分子多一層 /live 交集——不對稱是前端 ovAggBy／ovReplayBuild 的既有行為
 #   5. times 不足（frame 缺格使可用取樣點 <3）→ 不寫檔、exit 0（保留前一版定格檔）
+#   6. **base 的 days 含定格日 → 拒絕寫檔**（同日二次跑／補跑時 rrg_base.json 已被重算，
+#      切片會釘到使用者當日盤中沒看過的那版基準；守門在 Python 端，不靠 workflow 步驟序）
 from __future__ import annotations
 
 import json
@@ -71,12 +73,13 @@ def _frame(mult: float):
     }
 
 
-def _setup(tmp: Path, base_chains=None, live_codes=None):
+def _setup(tmp: Path, base_chains=None, live_codes=None, base_days=None):
     (tmp / "data").mkdir(parents=True, exist_ok=True)
     (tmp / "data" / "classify.json").write_text(json.dumps({"map": CMAP}), encoding="utf-8")
     (tmp / "data" / "rrg_base.json").write_text(json.dumps({
         "generated_at": "2026-09-10T14:20:00+08:00",
-        "days": ["2026-09-04", "2026-09-05", "2026-09-08", "2026-09-09", "2026-09-10"],
+        "days": base_days if base_days is not None else
+                ["2026-09-03", "2026-09-04", "2026-09-05", "2026-09-08", "2026-09-09"],
         "times": BTIMES,
         "chains": base_chains if base_chains is not None else BCHAINS,
     }), encoding="utf-8")
@@ -205,6 +208,25 @@ def test_not_enough_times():
     done()
 
 
+def test_base_contains_date_guard():
+    """base 的 days 含定格日（＝已把當日算進基準）→ 拒絕寫檔、exit 0、保留前一版定格檔。"""
+    with tempfile.TemporaryDirectory() as td:
+        out = _setup(Path(td), base_days=["2026-09-05", "2026-09-08", "2026-09-09",
+                                          "2026-09-10", "2026-09-11"])
+        out.write_text('{"date":"2026-09-09","keep":"me"}', encoding="utf-8")
+        rc = bf.build("2026-09-10", out)
+        check("base.days 含定格日 → exit 0（優雅退出，不紅燈）", rc == 0)
+        check("base.days 含定格日 → 不覆寫前一版定格檔",
+              json.loads(out.read_text(encoding="utf-8")).get("keep") == "me")
+    with tempfile.TemporaryDirectory() as td:
+        # 對照組：同一組資料、days 不含定格日 → 照常寫檔（證明上面擋下來的是守門、不是別的原因）
+        out = _setup(Path(td), base_days=["2026-09-04", "2026-09-05", "2026-09-08",
+                                          "2026-09-09", "2026-09-10"])
+        check("對照組：days 不含定格日 → 照常寫檔",
+              bf.build("2026-09-11", out) == 0 and out.exists())
+    done()
+
+
 def test_base_file_problems():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -224,6 +246,7 @@ if __name__ == "__main__":
     test_chain_mismatch()
     test_base_missing_timepoint()
     test_not_enough_times()
+    test_base_contains_date_guard()
     test_base_file_problems()
     if FAILED:
         print(f"\nFAIL {len(FAILED)}：" + "、".join(FAILED))

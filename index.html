@@ -1609,6 +1609,13 @@ function ovRrgFrozenLoad(){
     ovRrgRepaint();
   }).catch(e=>{ OV_RRG_FRZ_ERR=String((e&&e.message)||e); ovRrgRepaint(); });
 }
+// 台北「今天是星期幾」：沿用 `function liveStatus` 的既有做法（taipeiNowStr 取台北日，再以該日的
+// getUTCDay 取星期），**不另寫一套時區換算**。國定假日**不處理**（同 liveStatus 與 taiwan-flows
+// 的既有立場，站內沒有行事曆來源）——平日的國定假日仍會走牆鐘那條降級文案。
+function ovRrgTaipeiToday(){
+  const today=taipeiNowStr().slice(0,10);
+  return {today,dow:new Date(today+"T00:00:00Z").getUTCDay()};
+}
 // 回 {T,rows,valid,bd,date}；檔案未載入、或湊不出 3 個可用取樣點 → 回 null，呼叫端退回原降級文案。
 function ovRrgFrozenView(){
   const j=OV_RRG_FRZ; if(!j)return null;
@@ -1707,17 +1714,32 @@ function ovRrgHtml(){
   // 生效時刻的算法（勿憑印象改）：錨點＝floor((now−1)/10)×10（ovRrgAnchorMin），座標點還要滿足
   // m−LAG(30) ≥ TMIN(545) → 最早的座標點是 09:40；三個座標點要錨點推到 10:00，即台北 10:01 起可畫。
   // 位移異常另需 MIN_WIN=4 筆 30 分位移＝7 個座標點（09:40…10:40），故錨點 10:40／台北 10:41 起才可能觸發。
+  // 降級②（盤前／時點不足）**只在平日成立**：那兩句文案斷言的是「今天稍後會有盤中資料」，
+  // 週末說出口就是假的——週末沒有盤前、也不會有盤中，而定格檔早就躺在同源路徑上。
+  // 故台北週末一律先走定格路徑（連 /replay 都不打，週末必然取不到 frame）；
+  // **平日路徑一行不動**（含國定假日：站內無行事曆來源，維持 liveStatus 的「不處理」立場，
+  // 平日假日在 ${RRG_T0} 之前仍會看到「盤前時段」，之後由降級③的定格 fallback 接手）。
+  let frz=null, T=null, rows=null, valid=null;
+  const tpToday=ovRrgTaipeiToday(), wknd=(tpToday.dow===0||tpToday.dow===6);
+  if(wknd){
+    ovRrgFrozenLoad();
+    frz=ovRrgFrozenView();
+    if(!frz){
+      if(!OV_RRG_FRZ&&!OV_RRG_FRZ_ERR)return `<div class="loading">盤外定格資料載入中…</div>`+dailyLink;
+      return `<div class="loading">非交易日（台北週末休市）：今日沒有盤中分鐘快照，輪動軌跡改讀盤外定格檔，但${escI(OV_RRG_FRZ_ERR||"定格檔的內容不足以繪製軌跡")}。</div>`+dailyLink;
+    }
+    T=frz.T; rows=frz.rows; valid=frz.valid;
+  }else{
   const anchor=ovRrgAnchorMin();
   if(anchor==null)return `<div class="loading">盤前時段：輪動雷達需要盤中累積的分鐘快照（${RRG_T0}生效）。</div>`+dailyLink;
-  let T=ovRrgTimes(anchor);
+  T=ovRrgTimes(anchor);
   if(T.samples.length<3)return `<div class="loading">盤中資料累積中：目前僅 ${T.samples.length} 個可用時點（軌跡至少需 3 個，${RRG_T0}生效；「位移異常」需更長的取樣視窗，${RRG_TODD}才會出現）。</div>`+dailyLink;
   ovRrgEnsure(T.all);
-  let {rows,valid}=ovRrgCompute(T);
-  // 降級③：抓不到 frame（週末／假日／已過 TTL）或仍在載入
+  ({rows,valid}=ovRrgCompute(T));
+  // 降級③：抓不到 frame（平日假日／已過 TTL）或仍在載入
   // → 先試盤外定格檔（見上方 ovRrgFrozenView），拿得到就改畫定格圖並在下方明標；
   //   拿不到才回到原本的降級文案。**盤中與交易日收盤後走不到這裡**（那時 rows 非空），
   //   即時路徑逐字不變。
-  let frz=null;
   if(!rows.length){
     if(OV_RRG.loading)return `<div class="loading">輪動軌跡載入中…（${T.all.length} 個時點快照）</div>`+dailyLink;
     ovRrgFrozenLoad();
@@ -1725,6 +1747,7 @@ function ovRrgHtml(){
     if(frz){ T=frz.T; rows=frz.rows; valid=frz.valid; }
     else if(!OV_RRG_FRZ&&!OV_RRG_FRZ_ERR)return `<div class="loading">盤外定格資料載入中…</div>`+dailyLink;
     else return `<div class="loading">${escI(OV_RRG.err||"此時段取不到盤中快照，暫時無法繪製輪動軌跡。")}</div>`+dailyLink;
+  }
   }
   if(valid.length<3)return `<div class="loading">盤中資料累積中：可用時點僅 ${valid.length} 個（軌跡至少需 3 個）。</div>`+dailyLink;
 
@@ -1878,8 +1901,11 @@ function ovRrgHtml(){
   // 盤外定格的誠實標示（規格 §7，2026-09-11）：資料日 ＋「收盤定格」＋「不是即時盤面」，
   // 使用者一眼要能分辨。用詞沿用本站既有的 liveStatus／ovFlowLastBadge 詞彙（收盤定格／休市定格），
   // 不自創新說法；不寫「最新」「目前」這類會讓人誤讀成即時的字。
+  // 用詞分兩種，與 `function liveStatus` 的五值對齊：台北週末＝「休市定格」，
+  // 其餘（平日的國定假日／盤中快照過 TTL）＝「收盤定格」。兩者都要標資料日與「不是即時盤面」。
+  const frzKind=wknd?"休市定格":"收盤定格";
   const frzNote=frz
-    ? `<div class="ovrrghint" style="color:var(--accent);font-weight:700">${escI(frz.date)} <b>收盤定格</b>：目前為非交易時段（週末／假日，或盤中快照已過保存期限），取不到即時盤中快照——本圖是 <u>${escI(frz.date)} 收盤（${escI(ovMin2Hm(OV_RRG_TMAX))}）</u>的定格軌跡，<u>不是即時盤面</u>。</div>`
+    ? `<div class="ovrrghint" style="color:var(--accent);font-weight:700">${escI(frz.date)} <b>${frzKind}</b>：${wknd?"台北週末休市，今日沒有盤中快照":"目前為非交易時段（國定假日，或盤中快照已過保存期限），取不到即時盤中快照"}——本圖是 <u>${escI(frz.date)} 收盤（${escI(ovMin2Hm(OV_RRG_TMAX))}）</u>的定格軌跡，<u>不是即時盤面</u>。</div>`
     : "";
   const chart=`<div class="ovrrgchart">${replayNote}${frzNote}<div class="ovquad"><div class="ovquadzoom" id="ovQuadZoom">`+
     `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${svg}${tails}${bubs}${lbls}</svg>`+
@@ -1891,7 +1917,7 @@ function ovRrgHtml(){
   const baseWarn=bd&&bd.stale
     ? `<div class="ovrrghint" style="color:var(--up);font-weight:700">⚠ 基準已過期：最後一個基準日 ${escI(bd.to)} 距今約 ${bd.gap} 個交易日（未扣國定假日，實際只會更久），可能是夜間基準表排程連續失敗。此時 RS-Ratio 比較的是舊常態，請降低採信度。</div>`
     : "";
-  const foot=`<div class="ovtfoot">${frz?`<b>${escI(frz.date)} 收盤定格</b>（非即時盤面）。`:""}軌跡＝最近 ${nDraw} 個時點（每 ${OV_RRG_STEP} 分一格，最新 ${escI(valid[valid.length-1].hm)}）。`+
+  const foot=`<div class="ovtfoot">${frz?`<b>${escI(frz.date)} ${frzKind}</b>（非即時盤面）。`:""}軌跡＝最近 ${nDraw} 個時點（每 ${OV_RRG_STEP} 分一格，最新 ${escI(valid[valid.length-1].hm)}）。`+
     `x＝RS-Ratio：100 表示該鏈成交佔比與${baseTxt}同時點的常態相同；y＝RS-Mom：100 表示近 ${OV_RRG_LAG} 分鐘相對強弱沒有變化。`+
     `錨點取成交額前 ${OV_RRG_TOPN} 大（共 ${rows.length} 條全數在圖上）；${impAll.length>OV_RRG_IMPMAX
       ? `錨點一律標名，改善象限本時點 ${impAll.length} 條、圖上標示近 ${OV_RRG_LAG} 分位移最大的 ${OV_RRG_IMPMAX} 條（其餘 ${impAll.length-OV_RRG_IMPMAX} 條見右側「資金剛輪入」清單，該清單完整列出全部 ${impAll.length} 條）`
