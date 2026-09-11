@@ -469,6 +469,40 @@ p90 4h44m／最大 **12h23m**；>4h 12.8%、>10h **2 筆(1.1%)**、>14h 0 筆。
 （`buildLive` 回傳前 delete）。改 `ts` 或 `snap_ts` 任一者＝改 `/live` 語意，屬跨站變更，
 先讀 `PROJECT_SUMMARY.md`「/live 資料時間改取 max(date)」段。
 
+## 盤中 RRG 盤外定格（`data/rrg_frozen.json`，2026-09-11）
+
+週末／國定假日／frame 過了 KV 2 天 TTL 時，`/replay` 一格也拿不到 → 前端輪動雷達原本整張圖消失
+（`index.html` 的 `function ovRrgHtml` 降級③「取不到盤中快照」）。**交易日收盤後不受影響**
+（錨點夾到 13:30）。現改為讀 `data/rrg_frozen.json` 畫「定格圖」並明標，規格見
+`docs/rrg-spec-20260809.md` §4 完成定義 5 ＋ §7.6。
+
+- **產物**：`src/build_rrg_frozen.py` → `data/rrg_frozen.json`（約 49KB）。只存**輸入**、**不存座標**：
+  12 個時點（＝前端 `ovRrgTimes(錨點 13:30)` 的 `all`）的鏈層 `frames`(share)／`amt`(億)／`mkt`(tseYi)
+  ＋ `base`（`rrg_base.json` 的同時點切片）。座標仍由前端**同一支** `ovRrgCompute` 算
+  （`function ovRrgFrozenView` 把定格資料暫換進 `OV_RRG`／`OV_RRG_BASE` 再呼叫它，try/finally 還原）
+  ——**刻意不在 Python 重算座標**，那會變成同一口徑兩份實作（taiwan-flows `parity.py`、
+  postmkt `augmentLending` 的漂移教訓）。
+- **share 口徑＝前端 `ovRrgAggFrame`，不是 `data/intraday` 的次產業層**（兩者差異見
+  `src/build_rrg_base.py` 檔頭「口徑」段）：個股層、依 classify 的 `c` 去重、只算 twse、
+  分母 `market.tse.amt_yi`。**分子與分母的代號集合不對稱**（分母只看 frame；分子還要與 `/live`
+  的代號取交集，因為 `ovAggBy` 走訪的是 `state.live.stocks`）——照抄前端既有行為，不要「修正」它。
+  2026-09-11 以 node 抽出 `index.html` 真正的 `ovReplayBuild`／`ovAggBy`／`ovRrgAggFrame` 對跑，
+  12 時點 × 47 鏈的 share／amt 與 Python 端**逐位相同**。
+- **`.github/workflows/intraday.yml` 的步驟序是硬約束**：`archive intraday` → **`build rrg frozen`
+  （id: `frz`）** → `build rrg base`（id: `rrg`）→ `commit` → 失敗才轉紅燈 → notify。
+  ①**定格必須排在 `build rrg base` 之前**：後者會把「今天」也算進基準，重算後的 base 反推今天的
+  座標就與使用者當日盤中看到的不同了，定格的意義正是「同一張圖」。②**定格步驟失敗絕不得讓
+  commit 被 skip**（`data/intraday/` 是 KV TTL 2 天內唯一能留下的回測原料）：沿用既有的
+  `ok=0` ＋ 延後紅燈模式，**禁止 `continue-on-error`**（會被靜默吞掉，理由寫在該檔最後一步註解）。
+  ③commit 步驟的 pages dispatch 判斷已改成 `grep -qE '^data/rrg_(base|frozen)\.json$'`——
+  定格檔是前端以同源相對路徑載入的產物，不 dispatch 就只進 repo、不上 Pages。
+- **前端降級順序**（`function ovRrgHtml`）：rows 為空 → 先試定格檔 → 定格檔讀不到／內容湊不出
+  3 個可用取樣點才退回原降級③文案。**盤中與交易日收盤後走不到定格路徑**（那時 rows 非空），
+  即時路徑逐字不變（2026-09-11 Playwright 以同一組 mock ＋ 固定時鐘，對跑改動前後的 `#main`
+  innerHTML **逐字相同**）。CSP 不需改（同源 `data/*.json` 已被 `connect-src 'self'` 涵蓋）。
+- **補跑**：`--base` 可指定當時那一版 base（事後補跑時 `data/rrg_base.json` 已被重算，要用
+  `git show <該日之前的 sha>:data/rrg_base.json` 取出舊版）。離線測試 `tests/test_rrg_frozen.py`。
+
 ## CSP 與注入面（2026-09-06）
 
 `index.html:13` 的 `<meta http-equiv="Content-Security-Policy">`（比照 `postmkt/index.html:10`，另加 `form-action 'none'`）。

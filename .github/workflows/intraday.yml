@@ -45,6 +45,40 @@ jobs:
           else
             python src/archive_intraday.py
           fi
+      # RRG 盤外定格（G1，2026-09-11；規格 docs/rrg-spec-20260809.md §7）：把當日收盤那組
+      # 軌跡的**輸入**（12 個時點的鏈層 share／amt ＋ rrg_base.json 的同時點切片）落成
+      # data/rrg_frozen.json。前端在週末／假日／frame 過 KV 2 天 TTL 時改吃它畫圖並明標定格，
+      # 不再整張圖消失。座標仍由前端算，本步不產生任何座標。
+      #
+      # ★ 位置固定在「build rrg base」**之前**，兩步不可調換：下一步會把「今天」也算進基準，
+      #   重算後的 base 反推今天的座標就與使用者當日盤中看到的不一樣了——定格的意義正是
+      #   「同一張圖」，切片必須取自使用者當日載到的那一版 rrg_base.json。
+      # ★ 同樣「絕不」讓自己的失敗擋到下面的 commit（理由同下一步）：失敗只記 outputs.ok，
+      #   紅燈延到 commit 之後才發。**不用 continue-on-error**（會被靜默吞掉，見最後一步註解）。
+      # ★ 刻意不看 data/intraday/ 有沒有新檔就直接跑：本步只讀 KV frame，與歸檔無關；
+      #   非交易日時腳本自己會因為「一格 frame 都沒有」優雅退出不寫檔（12 次 KV get，可忽略），
+      #   這樣 workflow_dispatch 補跑舊日期也不會被「歸檔無變動」誤擋。
+      - name: build rrg frozen
+        id: frz
+        run: |
+          d="${{ github.event.inputs.date }}"
+          run_frozen() {
+            if [ -n "$1" ]; then
+              python src/build_rrg_frozen.py --date "$1"
+            else
+              python src/build_rrg_frozen.py
+            fi
+          }
+          if run_frozen "$d"; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            echo "::warning::build_rrg_frozen.py 失敗（exit $rc）→ 保留舊 data/rrg_frozen.json"\
+                 "（前端盤外定格會停在前一版，該版自帶 date、畫面照實標示），"\
+                 "不影響 data/intraday 歸檔；本次 run 會在 commit 之後才轉紅燈"
+            git checkout -- data/rrg_frozen.json 2>/dev/null || true
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+          fi
       # RRG 同時點基準表：吃剛歸檔的 data/intraday/ 近 5 個有效交易日 ＋ data/baseline.json，
       # 離線免 token。非交易日（archive 優雅退出、沒新檔）就不跑，免得每天靠 generated_at
       # 製造無意義 commit 與 pages 部署。
@@ -81,6 +115,7 @@ jobs:
           if [ ! -d data/intraday ]; then echo "no data/intraday（優雅退出）"; exit 0; fi
           git add data/intraday/
           if [ -f data/rrg_base.json ]; then git add data/rrg_base.json; fi
+          if [ -f data/rrg_frozen.json ]; then git add data/rrg_frozen.json; fi
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           # noop 守門（2026-09-06）：GH 兜底 cron 延遲後冪等重跑，內容全同、只有頂層 generated_at
           # 被覆寫也會有 diff → 多餘 commit＋時間戳失真。只有時間戳變動就放棄本次 commit
@@ -98,20 +133,28 @@ jobs:
           # GITHUB_TOKEN 的 push 不會觸發 pages.yml（GitHub 防遞迴），需主動 dispatch，
           # 否則 data/rrg_base.json 進了 repo 卻不會出現在 Pages 站上（同 baseline.yml:46）
           # （grep 用 if 包住：GitHub Actions 的 bash 帶 -e，裸 `a && b` 失敗會直接讓步驟紅燈）
-          if git diff --name-only HEAD~1 HEAD | grep -q '^data/rrg_base\.json$'; then
+          # rrg_frozen.json 同樣是前端以同源相對路徑載入的產物（盤外定格），變動時也要部署，
+          # 否則線上拿不到新的一版定格檔（週末打開會停在更舊的那天）
+          if git diff --name-only HEAD~1 HEAD | grep -qE '^data/rrg_(base|frozen)\.json$'; then
             gh workflow run pages.yml --ref main
           else
-            echo "rrg_base.json 未變動 → 不 dispatch pages"
+            echo "rrg_base.json／rrg_frozen.json 皆未變動 → 不 dispatch pages"
           fi
         env:
           GH_TOKEN: ${{ github.token }}
       # 排在 commit 之後才紅燈：讓 rrg base 的失敗看得見（不被 continue-on-error 靜默吞掉），
       # 但此時 data/intraday/ 已經 commit + push 完成，不會被連坐弄丟。
-      - name: rrg base 失敗才轉紅燈
-        if: steps.rrg.outputs.ok == '0'
+      - name: rrg base／frozen 失敗才轉紅燈
+        if: steps.rrg.outputs.ok == '0' || steps.frz.outputs.ok == '0'
         run: |
-          echo "::error::build_rrg_base.py 失敗，data/rrg_base.json 未更新"\
-               "（data/intraday/ 歸檔已完成並 push，未受影響）"
+          if [ "${{ steps.rrg.outputs.ok }}" = "0" ]; then
+            echo "::error::build_rrg_base.py 失敗，data/rrg_base.json 未更新"\
+                 "（data/intraday/ 歸檔已完成並 push，未受影響）"
+          fi
+          if [ "${{ steps.frz.outputs.ok }}" = "0" ]; then
+            echo "::error::build_rrg_frozen.py 失敗，data/rrg_frozen.json 未更新"\
+                 "（前端盤外定格停在前一版；data/intraday/ 歸檔已完成並 push，未受影響）"
+          fi
           exit 1
       - name: Notify failure
         # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
