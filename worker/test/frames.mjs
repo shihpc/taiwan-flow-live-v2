@@ -74,13 +74,18 @@ const rows = (ts) => [
   chk("索引在但 frame 全缺 → 回空物件", Object.keys(none).length === 0, JSON.stringify(none));
 }
 
-// ---- 1b. 跨日停滯（07-17 整天壞掉型：FinMind 還在吐前一日時戳）→ 照存、標 stale ----
+// ---- 1b. 跨日停滯（07-17 整天壞掉型：FinMind 還在吐前一日時戳）→ frame 照存、標 stale ----
+//     **「照存」自 B5′（2026-09-12）起只指 frame 本體與 fi 索引**：序列點改為不寫
+//     （前日殘留會污染當日 09:0x 的累計額與收盤指數，實害見 src/index.js 該處註解）。
 {
   const env = { FLOW_KV: mockKV() };
   const o = await storeFrame(env, tpeMs("2026-07-21T09:03:00"),
     { snapFn: async () => rows("2026-07-20 13:30:00") });
   chk("跨日停滯照存於今日牆鐘 key", o.key === "f:2026-07-21:09:03", o.key);
   chk("跨日停滯標 stale", o.stale === true);
+  chk("跨日停滯 → 序列點不寫（B5′ 改動了這一格的行為，此處釘住）",
+    o.series_skipped === true && env.FLOW_KV.store.get("series:2026-07-21") === undefined,
+    `${o.series_skipped} / ${env.FLOW_KV.store.get("series:2026-07-21")}`);
 }
 
 // ---- 1c. 收盤後守門：>13:35 跳過（牆鐘 key 不長盤後假格）；force=1 略過 ----
@@ -179,6 +184,50 @@ const rows = (ts) => [
   chk("src 無 .list( 呼叫", !src.includes(".list("));
   chk("scheduled 帶 event.scheduledTime 進 storeFrame", src.includes("storeFrame(env, event.scheduledTime)"));
   chk("scheduled 失敗記 recordFrameErr", src.includes("recordFrameErr(env, tp.date, e)"));
+}
+
+// ---- B5′（2026-09-12）：快照日期 ≠ 今天 → 不寫序列點，但 frame 本體照存 ----
+{
+  // A1：台北 09:00 開盤瞬間 FinMind 仍供前一交易日收盤快照（實際發生過，38 日中 6 日）
+  const env = { FLOW_KV: mockKV() };
+  const YDAY = "2026-09-03 13:33:00";   // 前一交易日的收盤時戳
+  const o = await storeFrame(env, tpeMs("2026-09-04T09:00:00"), { snapFn: async () => rows(YDAY) });
+  chk("A1 前日殘留 → series_skipped 為 true", o.series_skipped === true, JSON.stringify(o));
+  chk("A1 前日殘留 → series:<date> 完全沒被寫", env.FLOW_KV.store.get("series:2026-09-04") === undefined,
+    String(env.FLOW_KV.store.get("series:2026-09-04")));
+  const fr = await env.FLOW_KV.get("f:2026-09-04:09:00", "json");
+  chk("A1 frame 本體仍寫入且標 _stale", !!fr && fr._stale === 1 && fr._ts === YDAY, JSON.stringify(fr && fr._ts));
+  chk("A1 fi 索引仍寫入", !!(await env.FLOW_KV.get("fi:2026-09-04", "json")));
+}
+{
+  // A2：同一天但時戳漂移 >3 分 → 仍要寫序列點（守門只綁日期，不綁整個 stale）
+  const env = { FLOW_KV: mockKV() };
+  const DRIFT = "2026-09-04 09:00:00";                 // 與牆鐘 09:30 差 30 分
+  const o = await storeFrame(env, tpeMs("2026-09-04T09:30:00"), { snapFn: async () => rows(DRIFT) });
+  chk("A2 同日漂移 → stale 為 true（既有行為不動）", o.stale === true, JSON.stringify(o));
+  chk("A2 同日漂移 → series_skipped 為 false", o.series_skipped === false, JSON.stringify(o));
+  const arr = await env.FLOW_KV.get("series:2026-09-04", "json");
+  chk("A2 同日漂移 → 序列點仍寫入（不得一起丟）", Array.isArray(arr) && arr.length === 1 && arr[0].t === "09:30",
+    JSON.stringify(arr));
+}
+{
+  // A3：同日、無漂移 → 行為逐字不變
+  const env = { FLOW_KV: mockKV() };
+  const OK = "2026-09-04 09:31:00";
+  const o = await storeFrame(env, tpeMs("2026-09-04T09:30:00"), { snapFn: async () => rows(OK) });
+  chk("A3 正常快照 → stale false、series_skipped false", o.stale === false && o.series_skipped === false,
+    JSON.stringify(o));
+  const arr = await env.FLOW_KV.get("series:2026-09-04", "json");
+  chk("A3 正常快照 → 序列點寫入", Array.isArray(arr) && arr.length === 1 && arr[0].t === "09:30", JSON.stringify(arr));
+}
+{
+  // 反向對照：若守門誤綁「整個 stale」，A2 那組就會被丟掉。此處以同一組輸入斷言
+  // 「stale 為 true 但序列點存在」，守門一旦改綁 stale 這條就會紅。
+  const env = { FLOW_KV: mockKV() };
+  const o = await storeFrame(env, tpeMs("2026-09-04T09:30:00"), { snapFn: async () => rows("2026-09-04 09:00:00") });
+  const arr = await env.FLOW_KV.get("series:2026-09-04", "json");
+  chk("反向對照：stale=true 但序列點必須存在（守門若改綁整個 stale 這條會紅）",
+    o.stale === true && Array.isArray(arr) && arr.length === 1, `${o.stale} / ${JSON.stringify(arr)}`);
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

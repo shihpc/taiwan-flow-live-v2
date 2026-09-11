@@ -683,12 +683,27 @@ export async function storeFrame(env, scheduledTime, opts = {}) {
   // 分鐘動能序列（即時一覽 tab 第二期）：單一 rolling key，繞開 fi 索引最終一致性偶爾漏筆的問題
   // （fi 用 get-modify-put 也會漏，但 series 只需「近60分連續走勢」，單筆漏格不影響判讀；
   // 用同一支 key 而非 list 掃描，讀寫成本固定 1 get + 1 put/分鐘）。失敗不影響 storeFrame 主體。
-  try {
-    await appendSeries(env, d, hm, mktAmt, idxRow);
-  } catch (e) {
-    console.log("appendSeries:", e && e.message);
+  // ★ 快照日期 ≠ 今天 → **不寫序列點**（B5′，2026-09-12）。台北 09:00:00 開盤瞬間 FinMind
+  // 仍會供「前一交易日」的收盤快照，照寫就會讓當日 09:00 那一點裝著昨天的累計額與收盤指數。
+  // 該分鐘只被寫一次，`pickSeriesDup` 的 min 歸約沒有更小的值可比，**擋不住**。
+  // 實害已確認：38 個歸檔日中 6 日中招，其中 2026-09-04 的 `data/daysummary` 把
+  // `index.tse.lo` 寫成前日收盤 45857.66（當日真實低點 46015.1，低 157.44 點）——
+  // `src/build_daysummary.py` 的全日高低取自 series 的 `idx` max/min。
+  // **守門刻意只綁日期那一半、不綁整個 `stale`**：`stale` 還包含「時戳距牆鐘 >3 分」，
+  // 那是延遲不是錯日，綁上去會連合法的漂移點一起丟（而「多少漂移算太多」沒有資料可依據）。
+  // frame 本體（`f:`）與索引（`fi:`）照舊寫入、仍標 `_stale`，本守門只擋序列點。
+  const wrongDay = ts.slice(0, 10) !== d;
+  if (wrongDay) {
+    console.log(`appendSeries skip: 快照日期 ${ts.slice(0, 10)} ≠ 今日 ${d}（開盤瞬間的前日殘留），不寫 ${hm} 序列點`);
+  } else {
+    try {
+      await appendSeries(env, d, hm, mktAmt, idxRow);
+    } catch (e) {
+      console.log("appendSeries:", e && e.message);
+    }
   }
-  return { key: `f:${d}:${hm}`, src_ts: ts, stale, stocks: nStocks };
+  // `series_skipped` 為新增欄位（既有欄位語意不動），讓「序列點被守門擋掉」可觀測、不靜默。
+  return { key: `f:${d}:${hm}`, src_ts: ts, stale, stocks: nStocks, series_skipped: wrongDay };
 }
 // storeFrame 失敗可見化（07-16/17 斷檔兩天無人知的教訓）：err:<date> 存最後錯誤＋當日計數，
 // TTL 2 天；「僅錯誤內容變化時寫」省 KV write 額度——同錯誤連續發生時 count 不再累加（可接受取捨）。
