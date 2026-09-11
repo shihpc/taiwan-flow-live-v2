@@ -692,6 +692,12 @@ export async function storeFrame(env, scheduledTime, opts = {}) {
   // **守門刻意只綁日期那一半、不綁整個 `stale`**：`stale` 還包含「時戳距牆鐘 >3 分」，
   // 那是延遲不是錯日，綁上去會連合法的漂移點一起丟（而「多少漂移算太多」沒有資料可依據）。
   // frame 本體（`f:`）與索引（`fi:`）照舊寫入、仍標 `_stale`，本守門只擋序列點。
+  // **次生效應（2026-09-12 覆驗補記）**：07-17 那種「整天吐前一日時戳」的情形，會讓
+  // `series:<date>` 整天不存在 → `runBackup`／`runSummaryDispatch`／`runEvening` 的
+  // 空判閘門把當天當成非交易日、整條晚場鏈跳過。**不是全靜默**（23:50 健檢的 `noSeries`
+  // 會告警），但要知道有這條路。同理，上游日期格式漂移（斜線、前導空白）也會整天不寫。
+  // **本守門擋不到「①型盤中漂移」**：那種點的日期是對的、只是內容取自較晚時刻，
+  // 實害反而更大（2026-09-07 的 daysummary 低點錯 219.7 點）。詳見 PROJECT_SUMMARY 同段。
   const wrongDay = ts.slice(0, 10) !== d;
   if (wrongDay) {
     console.log(`appendSeries skip: 快照日期 ${ts.slice(0, 10)} ≠ 今日 ${d}（開盤瞬間的前日殘留），不寫 ${hm} 序列點`);
