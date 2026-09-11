@@ -1,12 +1,14 @@
 # CLAUDE.md — taiwan-flow-live-v2 接手速覽
 
 <!-- CANON:BEGIN v1 -->
-<!-- 唯一事實來源＝shihpc/claude-harness 的 CANON.md。以下區塊在六個 repo 的 CLAUDE.md 頂端
+<!-- 唯一事實來源＝shihpc/claude-harness 的 CANON.md。以下區塊在家族各 repo 的 CLAUDE.md 頂端
      有 byte-identical 逐字副本，由各 repo 的 .github/workflows/canon.yml 守門（比對 sha256）。
-     改動流程：先改 claude-harness/CANON.md → 跑 tools/sync_canon.py 同步六份 → 更新守門 hash。
+     改動流程：先改 claude-harness/CANON.md → 跑 tools/sync_canon.py 同步全部副本 → 更新守門 hash。
+     **repo 名單以 tools/sync_canon.py 的 TARGET_REPOS 為準，此處刻意不寫死數量**——
+     數量已改過兩次（五→六→七），每改一次就得動全部 repo 的 CLAUDE.md 與守門 hash。
      不要只改單一 repo，CI 會擋下來。 -->
 
-## 通用工作鐵律（六個 repo 逐字相同，勿單獨修改）
+## 通用工作鐵律（家族各 repo 逐字相同，勿單獨修改）
 
 1. **機密**：token／金鑰只存在不受版控的本機設定或受控 secrets（`.env`／Actions secret／
    `wrangler secret`），絕不寫進會 commit 的檔案、log 或對話輸出。commit 前掃 staged 內容，
@@ -202,6 +204,93 @@
   移除＝拿掉第 20 條 cron、`ticksample` 分流、`runTickSample`／`/tickdiag`／`test/tickdiag.mjs`。
   **判準定案後才輪到「接哨兵」，那是另一批工作**（本批對 `SENTINEL_SIGNALS`／`signalLanded`／
   `runSentinel`／既有 19 條 cron 一個字都沒動）。
+
+## 晚間 LINE 圖卡：主動ETF 動作總覽（`pm-aetf-2`，2026-09-10 改版）
+
+`FX_ACTIVE_CARDS` 由 5 張加到 **6 張**（新卡沿用 `pm-aetf-2` 的 id 與 `FX_CARD_BUILDERS` 表位
+**就地改寫 `function fxCardAetf2`**，builder 庫仍 **35 張**——`worker/test/dailycards.mjs` 六處
+硬編 35 全部不動）。carousel 順序落在 `pm-aetf-5` 之前（表序決定）。規格見
+`docs/line-cards-spec.md` §0／§3B.2／§3C。
+
+- **卡別＝B 類**（排行榜，spec §3B.2）：卡底標排序欄位、零形容詞。**不得掛 A 類標籤**
+  ——`src/build_cards_png.py` 的 `render_ranking` 對任何 rows 卡都畫金銀銅圓章＋比例條，
+  圖面天生就是排行榜。
+- **維度＝ETF（一列一檔），與個股維度的 `pm-aetf-5` 零欄位重疊、並存不取代**。只列當日有加減碼的
+  ETF（14 天實測 9–20/20 檔有異動），取前 `FX_ROWS_MAX`（8）。
+- **排序鍵＝Σ|val|（當日加減碼金額絕對值合計），主值＝Σval（主動淨額）——兩者刻意分家**
+  （使用者裁示）：用淨額排序會讓「大買 A、大賣 B」的 ETF 正負相抵而排到後面，與「今天誰動作
+  最大」相反。**副作用：金色比例條比例化於主值，長度與名次不單調**（`render_ranking` 只認
+  `row.r`），這是刻意接受的代價，note 已同時寫明兩者口徑。
+- **`r2`＝`新/加/減/清` 四類檔數（上游 `k` 欄 `new|add|cut|exit`）＋集保口徑規模**
+  （`twse_aum_yi`，缺則退 `aum`，兩者皆缺顯「—」但**該列保留**——規模不是排序鍵）。
+- **卡底 `foot` 揭露涵蓋率**（誠實原則，須消費 `aetfLatest`，它早在 `cardSourceUrls` pm 分支、
+  原本無人消費）：「納入 N 檔主動ETF，另 M 檔當日無揭露資料；其中 X 檔有加減碼，列出前 Y；
+  Z 筆個股金額缺值，已以 0 計」。`aetfLatest` 缺時只少「無揭露」那句、卡照發。
+  **`val` 為 null 一律以 0 計並在卡底報筆數，不得靜默**（今日實測 97 筆中 7 筆為 null）。
+- **兩個口徑差異已揭露在 note（2026-09-11 覆驗退回補上，鐵律 4）**：
+  ①**`r2` 四類計數與 `r` 主值不同口徑**——`k` 由上游**依原始股數 `sh1` vs `sh0`** 分類
+  （`src/build_aetf_diff.py` 的 `# 持股型態分類` 段，註解明寫「與主動純額無關」），`r` 是主動
+  口徑，申贖日兩者系統性打架（15 天 273 個 ETF-day 中 13 個 `ratio`≠1；實例 `2026/08/04
+  00991A` `ratio=1.0618` → 卡面會是「−8.9 億」配「新0/加19/減8/清0」，**看起來像 bug**）。
+  上游只有 `n_buy`／`n_sell` 是主動口徑、**四分類只有 `k` 有**，故用 `k` 是必要取捨。
+  ②**「排除申贖」是估算**——`ratio` 走 `_units_ratio`，FinMind 無總單位數（實查
+  `data/aetf/latest.json` 各檔 `units` 皆 `null`），一律落到「各持股今/昨股數比中位數」。
+  note 因此寫「以**估算**申贖比扣除等比效應」，不寫「已排除」。
+- **比例條與名次不同軸，note 必須點明**：`render_ranking` 的金色條長度比例化於 `row.r`
+  （主值＝淨額），名次卻來自 Σ|val|，所以條長與名次不單調（2026-09-10 實資料：第 3 名
+  `00405A −3.5億` 的條明顯短於第 4 名 `00406A +6.8億`，而第 3 名還戴銅牌）。
+  **全卡唯一沒被文字說明的視覺元素恰好就是會誤導的那個**，故 note 加「長條長度比例化於
+  右側數值、與名次不同軸」。**`build_cards_png.py` 仍是零改動的硬約束，排序鍵亦不變。**
+- **規模欄兩種來源要分開標**：`twse_aum_yi` 是集保口徑；缺值時退的 `aum` 是「當日成分股
+  market_value 加總（元，**僅供估算**）」（`src/build_aetf.py` 檔頭），**不是集保口徑**。
+  15 天樣本 4/209 個 ETF-day（1.9%）會走回退，note 已寫「缺值時退成分股市值加總（估算）」。
+- **刻意不放**（鐵律 8）：跨 ETF 共識（「N 檔同買/同賣」，與已封鎖的 `flows-sync-1` 同型且零回測，
+  屬 C 類）、`est_flow` 申贖估算（推估值，14 天實測每天僅 0–4 檔非零）、含申贖背離 judgement、
+  任何形容詞（「最積極」「動作強度」——`FX_FORBIDDEN` 的 **19 個字串**（2026-09-11 實查，原寫 15 是錯的）**擋不住**這類，要自己守）。
+- **aetf 三張卡（`pm-aetf-2/4/5`）同批補 per-card 新鮮度守門 `fxAetfStale`**（grep 該宣告字串）：
+  比對 `aetfDiff.primary_date`（上游寫 `YYYY/MM/DD`，正規化成 `YYYY-MM-DD`）與資料日
+  `baseline.date`，不符或**無可信資料日**一律 skip。原本三張卡只靠 `pushDailyCards` 的全域
+  `baseline.date` 閘門，aetf 管線單獨失敗時卡會帶舊 `primary_date` 照出（無聲降級）。
+  **代價**：缺 `baseline` 時三張卡也 skip（同 `fxCardSummaryLongform` 的保守立場），
+  `dailycards.mjs` 的 DEP `baseline` 條目已同步。資料正常時 `pm-aetf-4/5` 輸出**逐字不變**
+  （以 `03841a1` 的 `data/aetf/diff.json`＋`latest.json`＋`baseline.date=2026-09-10`，
+  即 pm 窗當下的真實快照，對跑改動前後實測 IDENTICAL）。
+- **`primary_date` 會在台北午夜後跑到隔日（實測，這條會影響非 pm 窗的 `/cards/data`）**：
+  它取各 ETF 揭露日的領先值，主動 ETF 一旦有人先公告隔日持股就會前進。2026-09-11 01:42
+  的 aetf 班實測 `primary_date=2026/09/11`、`laggards=16`——前進的是 **4 檔**
+  （`00400A`／`00407A`／`00987A`／`00996A`，`latest.json` 的 `src_date` 皆 `2026-09-11`；
+  20−16＝4，**2026-09-11 覆驗更正原本誤寫的「只有 `00400A`」**），而
+  `baseline.date` 仍是 `2026-09-10`（當日 baseline 要到當晚才寫）。**此時 gate 判不符 → 三張
+  aetf 卡從 `/cards/data` 缺席**，直到當晚 baseline 追上。
+  **生產不受影響**：`baseline.date` 每日在 **12:07 UTC＝台北 20:07** 翻成當日（`data/baseline.json`
+  近 8 次 commit 實查：09-07/08/09/10 皆為 12:07Z 首次寫入當日、17:xxZ 為冪等重跑），而
+  `primary_date` 約在台北午夜後翻——**實測 9 次「翻成隔日」的 commit 落在 17:44Z–20:57Z
+  ＝台北 01:44–04:57**（`git log` 逐版解 `primary_date`；另有一族 10:37–10:38Z＝台北 18:37
+  的翻動，那是主班翻成**當日**、非隔日，週一等隔了非交易日的日子才出現），
+  故**兩者相等的窗約為台北 20:07 至隔日 01:44–04:57**，
+  渲染（`cards.yml` 台北 22:12）與推播（22:30）都落在窗內；提案 14 天逐日快照＋
+  2026-09-10 22:56 實測亦皆相等。**非該窗時段打 `/cards/data` 看不到這三張卡是預期行為。**
+  gate 刻意用**嚴格相等**而非 `>=`（`usFresh` 那條用 `>=` 是因為 us 的 date 不可能超前）：
+  超前時 `laggards` 通常很大（今日 16/20），放行等於把「只剩 1 檔 ETF 的聚合」當成當日全貌，
+  且會讓 aetf 卡的資料日與同一組 carousel 其餘卡不同天。
+- 測試：`node test/dailycards.mjs`（3b／3c 兩節）。**`src/build_cards_png.py` 零改動**。
+- **pm 窗線上覆驗（2026-09-11 台北 22:3x，實作當時唯一驗不到的一項）**：`GET /cards/data` 回
+  7 張（`FX_ACTIVE_CARDS` 6 張＋長文卡 `pm-summary-1`），`pm-aetf-2` 在列、資料日 `2026/09/11`。
+  fresh-context 驗收者依 `function fxCardAetf2` 的實際路徑用 raw `diff.json`／`latest.json` 重算，
+  **8 列的 `l`／`m`／`r`／`r2` 與 `foot` 四個數字逐格復現**；主對話另行獨立重算 `r` 與排序鍵，結果相同。
+  排序鍵實證：**00991A 主動淨額 −2.1 億排第 1、00406A +23.8 億排第 2**，因 Σ|val| 為 38.36 vs 23.84
+  ——**負淨額排在正淨額之前**正是 Σ|val| 生效的直接證據。`foot` 的「9 筆金額缺值」實測為
+  00404A 6 筆（`zh` 為 null）＋00406A 3 筆（臺指選擇權無收盤價）。規模欄 8 列**全走 `twse_aum_yi`**、
+  零回退。gate 證據：`primary_date`＝`baseline.date`＝`2026-09-11`、`laggards` 空。
+- **算 ETF 維度聚合時不可走 `subs[].detail[]`（2026-09-11 踩到）**：`subs` 是**次產業多對多**聚合，
+  `src/build_aetf_diff.py` 的 `for sub in {p[1] for p in info.get("p", [])}` 會把同一檔股票依其所屬
+  次產業數**重複 append**，依 `etf` 直接彙總會重複計算（實測 00991A Σval 由 −2.07 億膨脹成 −95 億，
+  名次也全亂）。**ETF 維度的唯一正確路徑是 `etfs[<code>].buy` ＋ `.sell`**——`k` 四類分類也只在那裡，
+  `subs[].detail[]` 沒有 `k`，且它 `if r["val"] is not None` 把 null 濾掉了（所以在 subs 上數 null 會得 0）。
+- **`foot` 的「另 M 檔當日無揭露資料」措辭偏寬（已知、未修）**：M 取
+  `Object.keys(aetfLatest.errors).length`，但 `errors` 的成因不只「當日無揭露」——2026-09-11 的 4 檔中
+  3 檔是「Holding **近 14 日**無資料」、`00998A` 是「過濾後無台股持股」。**數字與方向（未納入）誠實**，
+  只是歸因用語不夠精確；要修需動 Worker 並重新部署，未併入本批。
 
 ## 晨間 LINE 圖卡（AM slot，2026-08-10）
 
