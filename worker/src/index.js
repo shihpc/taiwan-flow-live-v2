@@ -383,6 +383,249 @@ export function diagThrottle(now, tpDate, st = diagQuota, gap = DIAG_MIN_GAP_MS,
   return { ok: true, used: st.used, cap };
 }
 
+
+// ---- 台指期 tick 量測班（2026-09-09；**暫時性**，量到答案就回來收窄或整段移除）----
+// 目的：只量測、只記錄，**這批不下任何落地判準**。定時對 FinMind `TaiwanFuturesTick`(TX)
+// 打與 `/live` 的 `finFuturesVix` **同形狀**的請求，把「這一刻拿到的東西長什麼樣」原樣寫成
+// 一把獨立 KV key，事後由唯讀端點 `/tickdiag` 讀回來看分布。
+//
+// 為什麼不能用「非空即落地」判準（本班存在的理由）：
+//   FinMind 日曆日 D 的 TX tick 檔**同時含三段**——D 的 00:00–05:00 夜盤（前一日夜盤的延續）、
+//   08:45–13:45 日盤、15:00–24:00 當日夜盤。所以
+//     ① `rows.length > 0` 早在台北 09:00 就為真（夜盤段先在檔裡）→ naive 判準必假陽性；
+//     ② 連 `max(time) >= "13:44"` 也不安全——15:00 之後的當日夜盤列同樣滿足它。
+//   要分辨「日盤真的收完了」只能看**分段**的列數與時間邊界，而那個分布現在**沒有人量過**
+//   （既有觀測只有台北 16:54 的一筆，N=1）。所以本班先蒐集原始分布，判準留待有資料再定。
+//
+// 為什麼三段時間分布是關鍵：三個未知裡有兩個只有分段量得出來——
+//   (1) 日盤收盤段（time 落在 [13:44,14:00) 的列，即 `d13`）最早幾點拿得到？
+//   (2) 夜盤段是否先落地？（`seg.a`/`seg.c` 相對 `seg.b` 的出現順序；**必須有上午的樣本**才驗得到，
+//       這也是 cron 從台北 09:00 就開始跑、而不是只跑傍晚的原因）
+//   (3) 單日 payload 位元組數與 Worker 端 fetch+parse 耗時（`bytes`／`ms`）。
+//
+// 為什麼一次採樣一把獨立 key：`tick:<YYYYMMDD>:<HHMM>` 每個時點各自一把，
+//   ① 天生免疫 KV「同一把 key 每秒至多 1 次寫入」的限制；
+//   ② 不必做「讀出當日索引→append→寫回」的讀-改-寫（那會在並發時互相覆蓋、也讓端點無法唯讀）；
+//   ③ 讀回時 key 名可由 `tickSampleSlots()` **決定性重建**，所以 `/tickdiag` 完全不需要 KV list
+//      （全檔零 KV list 呼叫，有測試靜態守著——KV list 免費額度曾經爆掉，見 CLAUDE.md 已知限制 1；
+//       也因為守門是字面比對，本檔註解一律不寫出那個呼叫的字面形式）。
+export const TICK_START_HOUR = 9;         // 台北 09:00 起（要涵蓋上午才驗得到「夜盤是否先落地」）
+export const TICK_END_HOUR = 20;          // 台北 20:00 前（19:55 為最後一輪）
+export const TICK_SAMPLE_TTL = 7 * 86400; // 樣本保留 7 天（量測用，過期自動清）
+export const tickSampleKey = (dateISO, hm) => `tick:${dateISO.replaceAll("-", "")}:${hm}`;
+// 時間欄位名不靠印象：依序試這四個，量到哪個就記哪個（`tk`）。
+export const TICK_TIME_KEYS = ["time", "Time", "datetime", "Datetime"];
+// 尺寸閘門：分兩關，值都用這個門檻，但**擋的東西不同、樣本形狀也不同**（見 runTickSample）：
+//   `skip:"too-large:clen"`＝上游宣告的 content-length 超標 → **連 body 都不讀**，`bytes` 為 `null`；
+//   `skip:"too-large:text"`＝上游沒給 content-length、讀完才發現超標 → 只跳過 `JSON.parse`，`bytes` 有值。
+// 兩關的 `n` 都是 `null`。**沒有 `skip:"too-large"` 這個值**（2026-09-10 覆驗發現本註解區還在寫它）。
+// 理由有二：
+//   ① 現行寫法是 `await r.text()` → `JSON.parse`，字串與解析後的物件會**同時常駐**，記憶體峰值
+//      約為 `/live` 那種直接 `.json()` 的 2 倍；Cloudflare 官方文件記載 Worker 記憶體上限
+//      128 MB／isolate，**量測班自己不能把 Worker 打爆**（本班與 frame／哨兵同分醒，見 TICK_CRON）。
+//   ② 「單日 tick 檔到底多大」正是本班要量的未知 (3)——**「大到不敢 parse」本身就是那個未知的答案**，
+//      記成 `skip` ＋ `clen`（第二關另有 `bytes`）比讓 isolate OOM（連樣本都寫不進去）有用得多。
+// 20e6 是保守值：JS 字串內部為 UTF-16，20e6 字元約 40 MB，加上 parse 後的物件仍在 128 MB 內留有餘裕。
+// **本註解原本寫「只影響要不要 parse、不影響 bytes／clen 的記錄，量測資料不會缺角」——那是錯的**
+// （2026-09-10 覆驗指出，且與下方 runTickSample 內的註解直接矛盾）：第一關正是「連 body 都不讀」，
+// `bytes` 就是缺角（記 `null`＝沒量到）。第二關才是「只影響要不要 parse」。
+// **判讀陷阱（無測試可擋，讀樣本的人要自己知道）**：上游若**謊報一個很大的 content-length**，
+// 第一關會照樣短路，樣本長得與「檔案真的很大」**一模一樣**（`bytes:null` ＋ `clen` 很大 ＋
+// `skip:"too-large:clen"`），**樣本裡沒有任何欄位分辨得出來**。而「單日 payload 多大」正是本班
+// 要量的未知 (3)，所以看到第一關觸發時，`clen` 只能當作「上游宣告的值」、不能當作實際大小。
+export const TICK_MAX_PARSE_BYTES = 20e6;
+// 閘門觸發時丟出的哨兵物件（不是錯誤）：讓 clen 那一關能跳出 try 的其餘步驟，
+// 又不會被下方 catch 當成「抓失敗」寫進 err——「太大所以沒讀」和「抓失敗」不可混講。
+const TICK_SKIP = Symbol("tick-skip");
+const tickPad2 = (n) => String(n).padStart(2, "0");
+
+// 例外訊息去識別化（鐵律 1）。**這不是防禦性補強，是必要的一道**：
+//   本班請求的 URL 內含 `token=<FINMIND_TOKEN>`，而 workerd 的 fetch 例外訊息**很可能帶上請求 URL**
+//   （`TypeError: Fetch API cannot load: <url>` 是常見形狀）——**這是推測、不是已驗證事實**，
+//   我方沒有實測過該訊息形狀（原本引 cloudflare/workerd #1957 當出處是**引錯了**，那張 issue
+//   講的是前導空白 URL 的解析不一致，只在內文順帶出現該錯誤字串）。
+//   樣本又會**持久化 7 天**並由**無認證**的 `/tickdiag` 對外吐出。
+//   機率低，但「持久化 ＋ 公開端點」的組合不允許用機率當理由。
+// 兩道遮罩。**不可宣稱「任一道失效另一道必定有效」**（2026-09-09 覆驗構造出反例）：
+// ① 失效（token 被百分比編碼）而 ② 的字元類又在 token 內部提前停下時，會只遮掉一半。
+// 修法＝把 ② 的停止字元收窄到只剩 `&` 與空白（原本還把 `"'`)]}"` 當停止字元，而
+// `encodeURIComponent` **不轉義 `'` 與 `)`**，token 含這兩者就會被切斷）。代價是像
+// `(見 ...?token=abc)` 這種訊息會連結尾的 `)` 一起遮掉——**寧可多遮，不可少遮**。
+// 對現行 FinMind token（JWT 形狀，字元集 `A-Za-z0-9-_.`）兩道都成立，但那是**目前的**事實，
+// 不是結構保證；上游換發別種形狀的 token 時要回來重看這裡。
+//   ① 精確替換 token 字面量——**token 為空／undefined／過短時必須跳過**：`"abc".split("")` 會把訊息
+//      炸成逐字元陣列、再以 `<token>` 串回，等於整段訊息被毀（空字串是 `split` 的特例，不是理論風險）；
+//   ② 不論 ① 有沒有生效，一律把 `token=` 之後到下一個分隔符為止的內容遮掉——涵蓋 token 被
+//      `encodeURIComponent` 百分比編碼後與訊息被上游截斷的形狀，這兩種 ① 都比對不到。
+// 最後截到 300 字元：例外訊息不需要更長，也順帶壓掉「超長訊息塞爆 KV 值」的可能。
+export function maskTickErr(msg, token) {
+  let s = String(msg == null ? "" : msg);
+  if (typeof token === "string" && token.length >= 4) s = s.split(token).join("<token>");
+  return s.replace(/token=[^&\s]*/gi, "token=<token>").slice(0, 300);
+}
+
+// 本班會採樣的台北時點（HHMM），**與 cron `*/5 1-11 * * 2-6` 決定性一致**：09:00–19:55 每 5 分，共 132 個。
+// `/tickdiag` 用它重建 key 清單，因此改 cron 就要改這裡（兩邊都以 TICK_START_HOUR/TICK_END_HOUR 為準）。
+export function tickSampleSlots() {
+  const out = [];
+  for (let h = TICK_START_HOUR; h < TICK_END_HOUR; h += 1)
+    for (let m = 0; m < 60; m += 5) out.push(`${tickPad2(h)}${tickPad2(m)}`);
+  return out;
+}
+
+// 從一列裡抓出時間字串（欄位名不定，見 TICK_TIME_KEYS）
+function tickTimeKeyOf(rows) {
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    for (const k of TICK_TIME_KEYS) {
+      const v = r[k];
+      if (v != null && String(v) !== "") return k;
+    }
+  }
+  return null;
+}
+// 取 HH:MM 供分段比較：容忍 "08:45:00.123000" 與 "2026-09-09 08:45:00" 兩種形狀
+// （日期部分無冒號，第一個 HH:MM 必為時間）。抓不到回 null＝該列不計入任何段。
+const TICK_HM_RE = /(\d{2}):(\d{2})/;
+function tickHm(v) {
+  const m = TICK_HM_RE.exec(String(v == null ? "" : v));
+  return m ? `${m[1]}:${m[2]}` : null;
+}
+
+// 純函式（無 I/O，可離線測）：把一批 tick 列摘要成一個樣本。
+// 分段門檻**刻意固定寫死**並在此註記語意，之後要改判準時才有對照基準：
+//   seg.a  time < "08:00"                 → 凌晨夜盤段（前一日夜盤延續，00:00–05:00）
+//   seg.b  "08:00" ≤ time < "14:00"       → 日盤段（08:45–13:45）
+//   seg.c  time ≥ "14:00"                 → 當日夜盤段（15:00–24:00）
+//   d13    "13:44" ≤ time < "14:00"       → **日盤收盤段**，未知 (1) 的直接量測值
+// mn/mx 記**原始字串**的字典序 min/max（順便看得到上游真正的時間格式）。
+// 空／非陣列輸入回 n:0 其餘 null/0，**不得拋錯**（採樣班不能因為一次壞回應就整班掛掉）。
+//
+// ★ 讀樣本時務必知道：`seg.a + seg.b + seg.c` **可以小於 `n`**，成因有四種、語意完全不同，
+//   看到總和對不上不可逕自解讀成「那些列不在任何時段」：
+//     ① 該列不是物件（`null`／字串／數字混進 `data`）→ 整列跳過，連 `ct`／`dates` 都不計；
+//     ② **整批偵不到時間欄位**（`TICK_TIME_KEYS` 四個名字全不存在或全為空）→ `tk` 記成 `null`，
+//        **三段一律 0、`d13` 也是 0，但 `n` 仍是全部列數**。
+//        ⚠ 所以 **`tk===null` 時 `seg` 全 0 不等於「當下真的沒有列」**——那是「有列但量不到時間」，
+//        判讀第一批樣本時必須先看 `tk`，`tk` 為 null 的樣本在時間分布上**沒有任何資訊量**，
+//        要回頭補 `TICK_TIME_KEYS` 的欄位名再重量，不可當成「日盤尚未落地」的證據；
+//     ③ 該批有 `tk`，但**這一列缺該欄或值為空字串** → 只有這列不計入段（`n` 仍含它）；
+//     ④ 值存在但**不符 `\d{2}:\d{2}`**（`tickHm` 回 null，例如上游改成 epoch 秒數）→ 同 ③ 只跳該列，
+//        不過 `mn`／`mx` 仍會記到它的原始字串，所以 `mn`／`mx` 形狀怪異就是這一種的線索。
+//   另有第五種「三段全 0」但**不是**本函式造成的：`runTickSample` 的尺寸閘門跳過 `JSON.parse` 時
+//   （樣本帶 `skip:"too-large:clen"` 或 `"too-large:text"`），根本沒有列進到這裡，
+//   該樣本的 `n` 會被覆寫成 `null` 以資區別。
+export function summarizeTickRows(rows) {
+  const empty = { n: 0, mn: null, mx: null, seg: { a: 0, b: 0, c: 0 }, d13: 0, ct: 0, dates: [], tk: null };
+  if (!Array.isArray(rows) || rows.length === 0) return empty;
+  const tk = tickTimeKeyOf(rows);
+  const contracts = new Set();
+  const dates = new Set();
+  let mn = null, mx = null, a = 0, b = 0, c = 0, d13 = 0;
+  for (const r of rows) {
+    if (!r || typeof r !== "object") continue;
+    if (r.contract_date != null && String(r.contract_date) !== "") contracts.add(String(r.contract_date));
+    if (r.date != null && String(r.date) !== "") dates.add(String(r.date));
+    if (!tk) continue;
+    const raw = r[tk];
+    if (raw == null || String(raw) === "") continue;
+    const s = String(raw);
+    if (mn === null || s < mn) mn = s;
+    if (mx === null || s > mx) mx = s;
+    const hm = tickHm(s);
+    if (hm === null) continue;                       // 解不出時間的列不計入任何段（seg 總和可 < n）
+    if (hm < "08:00") a += 1;
+    else if (hm < "14:00") { b += 1; if (hm >= "13:44") d13 += 1; }
+    else c += 1;
+  }
+  return { n: rows.length, mn, mx, seg: { a, b, c }, d13, ct: contracts.size,
+    dates: [...dates].sort().slice(0, 5), tk };
+}
+
+// 採樣一次並寫一把 KV。失敗一律吞掉（回傳值僅供測試與 log），絕不影響同時醒來的其他班。
+// URL 形狀**與 `/live` 的 finFuturesVix 相同**，量到的才會是「未來哨兵／`/live` 會看到的東西」。
+// **不污染 `/live` 的 cf 快取**：本請求不設 `cf.cacheEverything`／`cacheTtl`，不寫入快取。
+// 誠實記一筆殘留風險：本請求的 URL 與 finFuturesVix 完全相同，**有可能讀到 `/live` 留下的
+// ≤15 秒 cf 快取**（`cacheTtl:15`）——對 5 分鐘解析度可忽略，但不是「絕對即時」。
+export async function runTickSample(env, tp, fetchFn = fetch) {
+  // 程式端二次守門（沿用本 repo「cron ＋ 程式二次守門」慣例）：非台北平日／不在 09:00–19:55 一律不採樣
+  const weekday = tp.dow >= 1 && tp.dow <= 5;
+  if (!weekday || tp.hour < TICK_START_HOUR || tp.hour >= TICK_END_HOUR) return null;
+  // 缺 token／KV binding 直接 return，**刻意不告警**：量測班不值得占用當日告警去重額度
+  if (!env.FINMIND_TOKEN || !env.FLOW_KV) return null;
+  const hm = `${tickPad2(tp.hour)}${tickPad2(tp.minute)}`;
+  const t0 = Date.now();
+  // bytes 初始值是 **null 不是 0**（2026-09-09 覆驗時發現的自打嘴巴）：fetch 例外或 clen 閘門
+  // 短路時 body 從未被讀取，那是「沒量到」；寫成 0 會被讀成「回應是空的」——正是本專案
+  // 反覆踩到的「缺資料被呈現成別的東西」。同理 st 的 0 是**刻意**的哨兵值（fetch 本身例外），
+  // 語意在 catch 那裡寫明，不與 HTTP status 混用。
+  let st = 0, bytes = null, clen = null, rows = null, err = null, ern = null, skip = null;
+  try {
+    const url = `${FIN_BASE}?dataset=TaiwanFuturesTick&data_id=TX&start_date=${tp.date}`
+      + `&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
+    const r = await fetchFn(url);
+    st = r.status;                       // 拿到回應就記真實 status；後續解析失敗不改寫它
+    // clen ＝上游宣告的 content-length：**有才記、沒有就 null，一律不臆造**（缺標頭、
+    // chunked 傳輸、或被中介改寫都會沒有）。它與下面的 bytes 是兩個獨立的量，關係見 bytes 註解。
+    const cl = r.headers && r.headers.get ? r.headers.get("content-length") : null;
+    // `>= 0` 這道（2026-09-10 覆驗的 nit）：收到負值就是上游壞掉，記成 `null`＝沒量到，
+    // 不要把一個不可能的量測值當事實寫進樣本。
+    // **這道只擋負值與 NaN，不是「只收十進位整數」**（2026-09-11 覆驗更正初稿的過寬說法）：
+    // `Number()` 會把 `"1e3"`→1000、`"0x10"`→16、`"+7"`→7、`" 5 "`→5 都收下來。那些形狀同樣
+    // 代表上游壞掉，但值本身合理、記進樣本無害，所以刻意不再收緊——**只是敘述不能承諾得比程式多**。
+    const clNum = cl != null && cl !== "" ? Number(cl) : NaN;
+    clen = Number.isFinite(clNum) && clNum >= 0 ? clNum : null;
+    // ★ 閘門第一關**必須在讀 body 之前**（2026-09-09 覆驗退回）：原本只用 `text.length` 判，
+    // 而那是**整份回應已經被讀成字串之後**——真正會 OOM 的情境（單日檔大到上百 MB）在
+    // `.text()` 當下就把 isolate 打爆，樣本一樣寫不進去，正是這道閘門說要避免的結果。
+    // 上游有給 content-length 就先用它短路；此時 body 從未讀取，`bytes` 維持 **null**
+    // ＝「沒量到」而不是 0（0 會被讀成「回應是空的」，兩者不可混講）。
+    if (clen != null && clen > TICK_MAX_PARSE_BYTES) {
+      skip = "too-large:clen";
+      if (r.body && r.body.cancel) { try { await r.body.cancel(); } catch { /* 取消失敗無妨 */ } }
+      throw TICK_SKIP;                   // 跳出 try 的其餘步驟，由下方 catch 認出這個哨兵物件
+    }
+    const text = await r.text();
+    // bytes ＝ `text.length`＝UTF-16 **字元數**。把它當位元組數是一個**假設**：前提是回應為
+    // 全 ASCII（FinMind 的 tick JSON 欄位與值都是數字與 `YYYY-MM-DD HH:MM:SS` 這類 ASCII 字串）。
+    // **何時會低估**：回應含非 ASCII 時——最典型的是 FinMind 的中文錯誤訊息（如額度／參數錯誤的
+    // `msg`），一個中文字 UTF-8 佔 3 bytes 卻只算 1 個字元，此時 bytes 會明顯小於真實位元組數。
+    // 所以 `clen` 才是真正的位元組數（上游有給的話）：**兩者相符＝全 ASCII 假設成立**，
+    // `clen > bytes` 就是回應含非 ASCII 的訊號（多半代表這筆根本不是正常的 tick 資料，
+    // 對照 `st`／`n` 一起看）；`clen` 為 null 時只剩 bytes 這個下界可用。
+    bytes = text.length;
+    if (text.length > TICK_MAX_PARSE_BYTES) {
+      // 第二關：上游沒給 content-length（chunked／被中介改寫）時的後備。body 已經讀進來了，
+      // 所以 `bytes` 有值、只是不 parse；擋掉的是「字串與解析後物件同時常駐」那一半峰值。
+      skip = "too-large:text";
+    } else {
+      const j = JSON.parse(text);
+      rows = j && j.data;
+    }
+  } catch (e) {
+    if (e === TICK_SKIP) {
+      // clen 閘門的正常路徑，不是錯誤：st 已記、bytes 刻意維持 null，不寫 err
+    } else {
+    // st 維持 0 ＝ **fetch 本身**就例外（與「HTTP 非 200」分得開）。
+    // **訊息一律過 maskTickErr**：例外訊息可能帶著含 token 的 URL，而這裡寫進去的東西會活 7 天
+    // 並由無認證的 `/tickdiag` 對外吐出（見 maskTickErr 上方註解）。另存 `ern`＝例外類別名，
+    // 類別名不含使用者資料，是遮罩之後仍然可靠的分類依據。
+    err = maskTickErr((e && e.message) || e, env.FINMIND_TOKEN);
+    ern = String((e && e.name) || "Error");
+    }
+  }
+  const val = { at: t0, st, ms: Date.now() - t0, bytes, clen, ...summarizeTickRows(rows) };
+  // 尺寸閘門觸發時 `n` 覆寫成 **null**（不是 0）：null 代表「大到沒去解析、列數未知」。
+  // **但 `n === 0` 不等於「解析過、真的沒有列」**（2026-09-09 覆驗更正這句原本的無條件敘述）：
+  // fetch 例外與 JSON 壞掉時 rows 也是 null → `n` 同樣是 0，那兩種根本沒解析成功。
+  // 判讀順序：先看 `err`／`skip`，都沒有時 `n:0` 才是「真的沒有列」。
+  if (skip) { val.skip = skip; val.n = null; }
+  if (err) { val.err = err; val.ern = ern; }
+  // 例外／空樣本**照樣寫一筆**：「那天沒樣本」和「那天抓失敗」不可混講
+  await env.FLOW_KV.put(tickSampleKey(tp.date, hm), JSON.stringify(val), { expirationTtl: TICK_SAMPLE_TTL });
+  return val;
+}
+
 // ---- 盤中分鐘 frame（Cron 每分鐘寫入 KV，資金湧入的時間序列）----
 // key = f:<台北日期>:<HH:MM>——2026-07-18 起取「喚醒時間」event.scheduledTime 的台北牆鐘。
 //   舊制取 FinMind 快照自身時戳，07-16/17 上游時戳停滯時同 key 被反覆覆寫、當日格數塌縮
@@ -1097,9 +1340,26 @@ export const HEALTH_CRONS = {
   "50 15 * * 2-6": "eve",    // 台北 23:50——晚場協調班窗（-23:55）尾聲，所有 GH 兜底 cron（-22:55）也都過了
   "30 1 * * 2-6":  "morn",   // 台北 09:30——morning/us/summary-am 全部窗口（-08:50）之後
 };
+// 台指期 tick 量測班（2026-09-09，**暫時**；見 summarizeTickRows 上方的長註解）。
+// 台北 09:00–19:55 每 5 分、週一~五（dow 為 Quartz 慣例，2-6＝週一~五），132 slot/交易日。
+// ★ 這條**必須在 dispatchRoleForCron 就被攔下並 return**，絕不可落到 scheduledRole。
+//   同分醒的既有 cron 共 **9 條**（逐分鐘展開比對，非目測）：
+//     `* 1-5`（盤中 frame）**60** 撞點、`*/5 9-14`（**哨兵**）**36** 撞點、
+//     `35 5`／`5 6`／`40 6`／`10 7`／`35 10`／`0 11`（單體班與 recheck 班）各 1、
+//     `30 1`（晨間健檢）1。撞點最多的兩條就是 frame 與哨兵，其餘七條各只有一分鐘。
+//   **假如沒被攔下**，這 132 slot 會全部落到 scheduledRole，且不是只有「重複寫 frame」一種後果：
+//     ① **96 個落 `frame`**（台北 09:00–16:55；scheduledRole 的哨兵分支只收 17:00–22:55，
+//        其餘一律 fallthrough 到 frame，所以 14:00–16:55 這段**收盤後也會寫 frame**）——
+//        其中台北 09:00–13:59 的 **60 個**還會與 frame cron 自己那次**搶同一把
+//        `f:<date>:<HH:MM>`**（key 取喚醒牆鐘的分鐘，同分鐘＝同一把）；
+//     ② **36 個落 `sentinel`**（台北 17:00–19:55，minute%5===0 恆成立）——等於在哨兵窗的前三小時
+//        **每 5 分多跑一次 `runSentinel`**（多打 FinMind 探測、多一次 dispatch 判定）。
+//   event.cron 精確比對即可分辨兩者，這也是本條必須排在 dispatchRoleForCron 最前面的原因。
+export const TICK_CRON = "*/5 1-11 * * 2-6";   // 需與 wrangler.toml crons 內該條完全一致
 // 統一路由（scheduled handler 最先判，先於 scheduledRole——晚場/am 窗的台北時刻落在
 // 哨兵窗（17-23 時 %5 分）與 :47/:07 分流範圍，不先攔截會誤入 sentinel/news/idle）
 export function dispatchRoleForCron(cron) {
+  if (cron === TICK_CRON) return { kind: "ticksample" };
   if (BACKUP_CRONS[cron]) return { kind: "backup", name: BACKUP_CRONS[cron] };
   if (HEALTH_CRONS[cron]) return { kind: "health", slot: HEALTH_CRONS[cron] };
   const role = DISPATCH_ROLES[cron];
@@ -4173,6 +4433,10 @@ export default {
       } else if (droute.kind === "health") {
         // 健檢班：不 dispatch、只盤點產物，缺件告警（失敗只 log，絕不影響其他班）
         ctx.waitUntil(runHealthCheck(env, tp, droute.slot).catch((e) => console.log("health:", e && e.message)));
+      } else if (droute.kind === "ticksample") {
+        // 台指期 tick 量測班（暫時）：只抓一次、寫一把獨立 KV key，不 dispatch 任何東西、
+        // 不接哨兵。失敗只 log，絕不影響同一分鐘醒來的其他班（各自獨立 waitUntil）
+        ctx.waitUntil(runTickSample(env, tp).catch((e) => console.log("ticksample:", e && e.message)));
       } else if (droute.kind === "summary-am") {
         ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
         // 晨間圖卡（AM slot，2026-08-10）：同窗並存的第二件事——08:05–08:15 dispatch 渲染、
@@ -4429,6 +4693,35 @@ export default {
         return json({ ...tsDiag(classifyJson.map, rows), swr: liveSwrStats() }, { "Cache-Control": "no-store" });
       } catch (e) {
         return json({ error: String(e && e.message || e), swr: liveSwrStats() }, { "Cache-Control": "no-store" });
+      }
+    }
+    if (url.pathname === "/tickdiag") {   // 唯讀 tick 量測樣本讀回（見 summarizeTickRows 上方註解）
+      // 三個「不侵入」的性質，與 /livediag 同一套：
+      //   ① **唯讀**——本路徑一個 put 都沒有（樣本只由 runTickSample 這個 cron 班寫入）；
+      //   ② **零 KV list 呼叫**——key 名由 tickSampleSlots() 依 cron 決定性重建（KV list 額度曾爆過）；
+      //   ③ 不列進根路徑 endpoints 清單（同 /livediag，低頻＋不張揚）。
+      // 節流沿用 /livediag 那組 in-isolate 計數（見 diagThrottle 上方註解，殘留風險已記載）。
+      const th = diagThrottle(Date.now(), taipeiParts().date);
+      if (!th.ok) return json({ error: "診斷路徑節流中", ...th }, { "Cache-Control": "no-store" });
+      const q = url.searchParams.get("date") || "";
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : taipeiParts().date;   // 非法值靜默退回台北今日
+      try {
+        if (!env.FLOW_KV) throw new Error("缺少 FLOW_KV binding");
+        const slots = tickSampleSlots();
+        // 132 把獨立 key 一次 get 完。額度歸屬要講對（Cloudflare 官方 Worker limits）：
+        // KV 走的是 **internal services** 那條子請求上限——**Free 1,000／Paid 預設 10,000**
+        // （不是對外 fetch 那條：Free 50／**Paid 10,000（可調到 10M）**）。本處固定 132 次，
+        // 兩種方案都遠低於上限。另註：KV get 算進「同時 6 條等待回應」的上限，132 把會**排隊**
+        // 分批完成而非失敗，延遲未實測。
+        // 單把讀失敗只讓該時點缺席，不整包失敗
+        const got = await Promise.all(slots.map((hm) =>
+          Promise.resolve(env.FLOW_KV.get(tickSampleKey(date, hm), "json")).catch(() => null)));
+        const samples = [];
+        slots.forEach((hm, i) => { if (got[i]) samples.push({ hm, ...got[i] }); });
+        return json({ schema: 1, date, slots: slots.length, n: samples.length, samples },
+          { "Cache-Control": "no-store" });
+      } catch (e) {
+        return json({ error: String((e && e.message) || e) }, { "Cache-Control": "no-store" });
       }
     }
     if (url.pathname !== "/live") {

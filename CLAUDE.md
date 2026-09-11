@@ -59,7 +59,8 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` 22 支 `.mjs`）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **25 支** `.mjs`；
+  2026-09-09 `ls worker/test/*.mjs` 實查，取代舊記的 22 支）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
   （**14 支**＝帶 cron 10 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
@@ -120,6 +121,13 @@
   低頻班 `lastweek`／`meta` 於 2026-08-30 納入 `eve`（`mode:"lowfreq"`，判準 `export function lowFreqDue`）：
   **只在台北週一檢查**（meta 另要求已過本月第一個週六＋2 天），非檢查日整項濾掉不抓也不告警；
   **刻意不納 `backupPipelines`、不新增 CF cron**（使用者裁定，理由見 `PROJECT_SUMMARY.md` 同段）
+- `ticksample` 台指期 tick 量測班（2026-09-09，**暫時班，見下節的拆除條件**）：台北平日
+  09:00–19:55 每 5 分（CF cron `*/5 1-11 * * 2-6`，`export const TICK_CRON`），
+  `export async function runTickSample` 抓一次 FinMind `TaiwanFuturesTick`(TX) 當日檔、
+  摘要成一筆寫 KV `tick:<YYYYMMDD>:<HHMM>`（TTL 7 天），**不 dispatch、不接哨兵、不下任何判準**。
+  ★ 這條**必須由 `dispatchRoleForCron` 最先攔截**，落到 `scheduledRole` 會變成 96 個 `frame`
+  （台北 09:00–16:55，其中 09:00–13:59 的 60 個還與 frame cron 搶同一把 `f:<date>:<HH:MM>`）
+  ＋36 個 `sentinel`（17:00–19:55 每 5 分多跑一次 `runSentinel`）。
 - `summary-am` 窗（06:50–08:50）另掛晨場協調班 `export async function runMorning`（見下節）
   ＋us 晨間補跑 `export async function runUsCatchup`（2026-08-13：台北 07:00–08:05 檢查
   us.json 資料日是否達最近預期美股交易日（`export function lastExpectedUsTradingDate`，
@@ -127,6 +135,75 @@
   inputs.rounds=2；KV 20 分時段桶 dedup、週日/週一晨不跑、08:05 後不觸發。
   動機：FinMind 美股常態 07:30–08:30 才入庫，05:05 主班 12 輪×10 分在 06:59 耗盡
   搆不到入庫窗。us 的 recheck／晨間健檢判準同步由 genToday 改資料日（mode `usDate`））
+
+## 台指期 tick 量測班與 `/tickdiag`（2026-09-09，**暫時班，拆除條件見下**）
+
+**只量測、不下判準。** 動機：未來若要把台指期 tick 接進哨兵，需要一個「日盤真的收完了」的判準，
+而現有的兩個直覺判準都**已知不成立**——FinMind 日曆日 D 的 TX tick 檔**同時含三段**
+（D 的 00:00–05:00 夜盤延續／08:45–13:45 日盤／15:00–24:00 當日夜盤），所以
+①`rows.length > 0` 早在台北 09:00 就為真（夜盤段先在檔裡）→ 假陽性；
+②連 `max(time) >= "13:44"` 也不安全——15:00 之後的當日夜盤列同樣滿足它。
+分辨只能看**分段**的列數與時間邊界，而那個分布**沒有人量過**（既有觀測只有台北 16:54 的一筆，N=1，
+且那筆只存在於對話、不在版控裡）。故先蒐集原始分布，判準留待有資料再定。
+
+- **CF cron 由 19 條增為 20 條**（`worker/wrangler.toml` 第 20 條 `*/5 1-11 * * 2-6`，
+  需與 `export const TICK_CRON` 逐字一致）：台北平日 09:00–19:55 每 5 分＝**132 slot/交易日**。
+  **窗必須含上午**，否則「夜盤段是否先落地」驗不到。程式端二次守門在
+  `export async function runTickSample`（非平日／時窗外／缺 token 或 KV binding 一律不採樣）。
+- **同分撞點 9 條**（逐分鐘展開比對）：`* 1-5`（frame）60、`*/5 9-14`（哨兵）36、
+  `35 5`／`5 6`／`40 6`／`10 7`／`35 10`／`0 11` 各 1、`30 1`（晨間健檢）1。
+  各帶自己的 `event.cron`，`dispatchRoleForCron` 精確比對先攔截（後果見上節 `ticksample` 條）。
+- **樣本欄位**（`export function summarizeTickRows` 是純函式、可離線測）：
+  `seg.a`/`b`/`c`＝三段列數（門檻 08:00／14:00）、`d13`＝`time∈[13:44,14:00)` 的列數
+  （＝「日盤收盤段」的直接量測值）、`mn`/`mx`＝原始時間字串字典序極值、`tk`＝實際偵到的時間欄位名、
+  `bytes`/`clen`/`ms`＝payload 大小與耗時、`st`＝HTTP status（`0`＝fetch 本身例外）。
+  **讀樣本前先看 `tk`**：`tk` 為 `null` 時三段一律 0 但 `n` 仍是全部列數，那是「有列但量不到時間」、
+  **不是**「當下真的沒有列」。**`n:0` 也不等於「真的沒有列」**——fetch 例外與 JSON 壞掉時
+  `n` 同樣是 0，判讀順序是**先看 `err`／`skip`，都沒有時 `n:0` 才是真的沒列**；
+  `skip` 非空時 `n` 為 `null`（未知）而非 0，`bytes` 在 `too-large:clen` 那關也是 `null`
+  （body 從未讀取＝沒量到，**不是 0＝回應是空的**）。
+  四種「`seg` 總和 < `n`」的成因逐條寫在 `summarizeTickRows` 上方註解。
+- **鐵律 1 相關**：請求 URL 含 `token=<FINMIND_TOKEN>`，而 workerd 的 fetch 例外訊息**會帶 URL**
+  （`TypeError: Fetch API cannot load: <url>` 是常見形狀——**這是推測、我方未實測**；
+  原本引 cloudflare/workerd #1957 是**引錯了**，那張 issue 講的是前導空白 URL 的解析不一致），
+  樣本又活 7 天且由**無認證**的 `/tickdiag` 對外吐出。
+  故例外訊息一律過 `export function maskTickErr` 雙重遮罩（token 字面量替換＋`token=` 後綴遮罩；
+  token 為空／過短時**跳過**字面量替換，否則 `split("")` 會把訊息炸成逐字元）後才寫 KV。
+  **不可宣稱「兩道任一失效另一道必定有效」**——2026-09-09 覆驗構造出反例：token 同時含
+  需百分比編碼的字元（使第一道失效）與 `'`／`)`（原本被當停止字元，使第二道提前停下）就會半遮。
+  停止字元已收窄到只剩 `&` 與空白（寧可多遮）；對現行 JWT 形狀的 token 兩道都成立，
+  但那是**目前的**事實不是結構保證，上游換發別種形狀要回來重看。
+  **改這段前先跑 `node test/tickdiag.mjs`**，那裡有「注入含假 token 的例外、斷言 KV 值不含它」的測試。
+- **尺寸閘門** `export const TICK_MAX_PARSE_BYTES`（20e6）**分兩關，順序是重點**：
+  ①`skip:"too-large:clen"`——上游有給 `content-length` 且超標時，**在讀 body 之前**就短路
+  （`bytes` 為 `null`＝從未讀取）。**這關才是真的擋 OOM 的那道**：真會打爆 isolate 的檔在
+  `.text()` 當下就爆了，事後拿 `text.length` 判等於沒判（2026-09-09 覆驗退回的正是這點）。
+  ②`skip:"too-large:text"`——上游沒給 `content-length`（chunked／被中介改寫）時的後備，
+  body 已讀進來所以 `bytes` 有值，擋掉的是「字串與解析後物件同時常駐」那一半峰值。
+  兩關**正常走完時**都不寫 `err`（**太大所以沒讀 ≠ 抓失敗**），`n` 一律 `null`。
+  ——**不是無條件**（2026-09-10 覆驗構造出反例）：第一關短路的過程中若再拋例外
+  （實測手法＝讓 `r.body` 的 getter 自己拋），樣本會同時帶 `skip` 與 `err`；那形狀反而更誠實，
+  但敘述不能寫死。**判讀陷阱**：上游謊報一個很大的 `content-length` 時，第一關照樣短路，
+  樣本與「檔案真的很大」**長得一模一樣**（`bytes:null`＋`clen` 很大＋`skip:"too-large:clen"`），
+  **沒有欄位分辨得出來**——第一關觸發時 `clen` 只能當「上游宣告的值」，不能當實際大小。
+  量測班不能把 Worker 打爆，而「大到不敢 parse」本身就是要量的答案之一。
+- **`GET /tickdiag`**（唯讀樣本讀回）：`?date=YYYY-MM-DD`（非法值靜默退回台北今日）。
+  三個性質與 `/livediag` 同一套——①**唯讀**，本路徑一個 put 都沒有；②**零 KV list**，
+  key 由 `export function tickSampleSlots()` 依 cron 決定性重建（KV list 額度曾爆過，見已知限制 1；
+  全檔 `.list(` 零命中有靜態測試守著，**連註解都不要寫出那個字面形式**）；
+  ③**刻意不列進根路徑 `endpoints` 清單**。節流沿用 `/livediag` 那組 in-isolate 計數（兩者共用額度）。
+  132 把 key 一次 get 完——額度歸屬是 **internal services 子請求上限（Free 1,000／Paid 預設 10,000）**，
+  不是對外 fetch 那條（Free 50／**Paid 10,000，可調到 10M**）。KV get 另算進「同時 6 條等待回應」
+  上限，132 把會**排隊**分批完成而非失敗，延遲未實測。
+- **⚠ 這是暫時班，拆除條件（量到就回來動手）**：以下三個未知都拿到**跨多個交易日**的穩定分布後，
+  這班就該收窄或整段移除，不要讓它長住——
+  1. **日盤收盤段最早幾點拿得到**：`d13` 首次為正的時點在多日之間穩定下來；
+  2. **夜盤段是否先落地**：`seg.a`／`seg.c` 相對 `seg.b` 的出現順序有定論（**這一項需要上午樣本**）；
+  3. **單日 payload 量級與耗時**：`bytes`／`clen`／`ms` 的量級與尾端穩定。
+  收窄＝把窗縮到真正有資訊量的那幾小時（改 `TICK_START_HOUR`／`TICK_END_HOUR` ＋ cron，兩邊同步）；
+  移除＝拿掉第 20 條 cron、`ticksample` 分流、`runTickSample`／`/tickdiag`／`test/tickdiag.mjs`。
+  **判準定案後才輪到「接哨兵」，那是另一批工作**（本批對 `SENTINEL_SIGNALS`／`signalLanded`／
+  `runSentinel`／既有 19 條 cron 一個字都沒動）。
 
 ## 晚間 LINE 圖卡：主動ETF 動作總覽（`pm-aetf-2`，2026-09-10 改版）
 
@@ -532,7 +609,9 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 21 支要個別跑（離線、免 token；2026-09-07 實查 worker/test/ 共 22 支，含 swr.mjs）
+node test/sentinel.mjs              # 其餘 24 支要個別跑（離線、免 token；2026-09-09 實查 worker/test/*.mjs 共 25 支，
+                                    #   含 swr.mjs 與新增的 tickdiag.mjs。舊記的「22 支」已過時）
+for f in test/*.mjs; do node "$f" || echo FAIL $f; done   # 一次跑完全部（同 worker-deploy.yml 的 glob）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
 
