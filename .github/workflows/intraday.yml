@@ -74,7 +74,7 @@ jobs:
               python src/build_rrg_frozen.py
             fi
           }
-          if run_frozen "$d"; then
+          if false && run_frozen "$d"; then   # B2 演練：強制失敗（此分支專用，不進 main）
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             rc=$?
@@ -164,7 +164,7 @@ jobs:
       - name: Notify failure
         # cancelled 也要告警：跑一半被取消（GitHub 端異常或誤按）同樣代表該場沒產出，
         # 而 failure() 在 cancelled 時不成立（2026-07-24 postmkt pm 場靜默消失的教訓）
-        if: failure() || cancelled()
+        if: false   # B2 演練：不開 issue（此分支專用，不進 main）
         uses: ./.github/actions/notify-failure
         with:
           pipeline: v2-intraday
