@@ -647,6 +647,11 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    get（見 `PROJECT_SUMMARY.md`「三、關鍵技術決策與踩過的雷」表「KV 額度」列）。
 2. 告警由 Worker 自己發，**Worker 整個掛掉時發不出**
    （見 `PROJECT_SUMMARY.md`「快速接手」的「排程可靠度補強」段）。
+   **這條本身仍成立，但盲區已由外部補上（2026-09-06）**：`claude-harness/tools/freshness_watchdog.py`
+   ＋`.github/workflows/freshness-watchdog.yml`（台北 23:45／09:00 兩班）**跑在 GitHub Actions、
+   不依賴本 Worker**，只讀公開資料判各站資料新鮮度，連本站 `/status` 打不通也會單獨列
+   UNREACHABLE，失敗走該 repo 的 `notify-failure` 開 issue。兩邊**互為盲區補位、並存不取代**
+   ——Worker 掛了只有它看得到，GitHub Actions 故障時只有 Worker 的健檢班看得到。
 3. 2026-07-24 盤中 frame 班整天沒落格：`series:<date>` 是 TW 班的交易日守門，
    缺它會讓**所有 TW 主觸發被靜默跳過**（見 `PROJECT_SUMMARY.md`「快速接手」的
    「2026-07-24（週五）盤中 frame 班整天沒落格」段）。根因是 CF cron dow 為 Quartz 慣例
@@ -708,5 +713,9 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    （避免白寫去重鍵把當日唯一一則用掉；`export function alertChannelReady` 判定）。
    `runSentinel` 加了第三參數 `fetchFn`（探測／dispatch／告警共用，供測試注入），生產呼叫不變。
    測試 `node test/sentinel.mjs` 有 dispatch 401／204、secret 缺失有／無通道四組案例。
-   **仍未做**：獨立於 Worker 的低頻 GH cron 看門狗（Worker 整個掛掉時上述告警一樣發不出，
-   見已知限制第 2 條），列於優化計畫批次二 #11。
+   **~~仍未做~~ 已做（2026-09-11 實查更正）**：「獨立於 Worker 的低頻 GH cron 看門狗」
+   （原列優化計畫批次二 #11）**早在 2026-09-06 就上線**——`claude-harness/tools/freshness_watchdog.py`
+   ＋`freshness-watchdog.yml`，見已知限制第 2 條的補述。**本段原文「仍未做」是過期敘述**：
+   該 repo 的 `CLAUDE.md` 同時期就寫了「與本站 Worker 健檢班互為盲區補位」，只有本檔沒跟上。
+   （**它補的是「Worker 掛掉時沒人告警」這個盲區**，不等於本節 `runSentinel` 的 dispatch 失敗
+   告警可以拿掉——後者是分鐘級、前者是每日兩班，粒度不同。）
