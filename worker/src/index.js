@@ -772,9 +772,15 @@ export async function recordFrameErr(env, dateISO, e) {
 //   - `storeFrame` 對「FinMind 回不完整清單」本來就毫無守門：`nStocks` 只在回傳值裡報告、不擋任何東西。
 function pickSeriesDup(oldP, newP) {
   const a = Number(oldP && oldP.amt), b = Number(newP && newP.amt);
-  // 「有效」＝有限且 > 0。amt 是全市場累計成交額，結構上不可能為負；為 0 只會在
-  // FinMind 回空清單時出現（B5，2026-09-12 補）。舊版把 0 當有限值走正常比較，
-  // min 歸約反而讓它勝出、鎖死該分鐘直到 KV TTL 過期，且不拋錯、不紅燈。
+  // 「有效」＝有限且 > 0（B5，2026-09-12 補）。amt 是全市場累計成交額，結構上不可能為負。
+  // 為 0 的可達路徑是「有列但 total_amount 全 ≤0」（盤前尚未撮合）——**不是**「FinMind 回空
+  // 清單」，那會先被 `if (!ts) throw new Error("snapshot 無資料")` 擋掉、根本走不到這裡
+  // （2026-09-12 覆驗更正）。舊版把 0 當有限值走正常比較，min 歸約反而讓它勝出、
+  // 鎖死該分鐘直到 KV TTL 過期，且不拋錯、不紅燈。
+  // **保護範圍**：本守門只在該分鐘**≥2 次寫入**時生效（要有「有效值」可以勝）。
+  // 單次寫入的 0 仍會落進 series——與下方上緣缺陷是同一個結構限制。
+  // **判準的真實邊界**：amt 已先過 `r1`（`amt: r1(mktAmtRaw/1e8)`），故 raw < 0.05 億
+  // 會被捨成 0.0 而歸為無效。以觀測下界 1,345.1 億計，距離約 2.7 萬倍，實務無虞。
   const va = Number.isFinite(a) && a > 0, vb = Number.isFinite(b) && b > 0;
   // ★ 有效值「恆勝」無效值——刻意不寫成「無效 → 不可比 → 後寫者勝」，那會把可交換性弄壞：
   //   {50,100,0} 依序寫入會收斂到 0，而其他順序收斂到 50。恆勝寫法則六種順序都得 50。
