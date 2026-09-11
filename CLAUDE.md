@@ -169,7 +169,7 @@
   15 天樣本 4/209 個 ETF-day（1.9%）會走回退，note 已寫「缺值時退成分股市值加總（估算）」。
 - **刻意不放**（鐵律 8）：跨 ETF 共識（「N 檔同買/同賣」，與已封鎖的 `flows-sync-1` 同型且零回測，
   屬 C 類）、`est_flow` 申贖估算（推估值，14 天實測每天僅 0–4 檔非零）、含申贖背離 judgement、
-  任何形容詞（「最積極」「動作強度」——`FX_FORBIDDEN` 的 15 字**擋不住**這類，要自己守）。
+  任何形容詞（「最積極」「動作強度」——`FX_FORBIDDEN` 的 **19 個字串**（2026-09-11 實查，原寫 15 是錯的）**擋不住**這類，要自己守）。
 - **aetf 三張卡（`pm-aetf-2/4/5`）同批補 per-card 新鮮度守門 `fxAetfStale`**（grep 該宣告字串）：
   比對 `aetfDiff.primary_date`（上游寫 `YYYY/MM/DD`，正規化成 `YYYY-MM-DD`）與資料日
   `baseline.date`，不符或**無可信資料日**一律 skip。原本三張卡只靠 `pushDailyCards` 的全域
@@ -197,6 +197,23 @@
   超前時 `laggards` 通常很大（今日 16/20），放行等於把「只剩 1 檔 ETF 的聚合」當成當日全貌，
   且會讓 aetf 卡的資料日與同一組 carousel 其餘卡不同天。
 - 測試：`node test/dailycards.mjs`（3b／3c 兩節）。**`src/build_cards_png.py` 零改動**。
+- **pm 窗線上覆驗（2026-09-11 台北 22:3x，實作當時唯一驗不到的一項）**：`GET /cards/data` 回
+  7 張（`FX_ACTIVE_CARDS` 6 張＋長文卡 `pm-summary-1`），`pm-aetf-2` 在列、資料日 `2026/09/11`。
+  fresh-context 驗收者依 `function fxCardAetf2` 的實際路徑用 raw `diff.json`／`latest.json` 重算，
+  **8 列的 `l`／`m`／`r`／`r2` 與 `foot` 四個數字逐格復現**；主對話另行獨立重算 `r` 與排序鍵，結果相同。
+  排序鍵實證：**00991A 主動淨額 −2.1 億排第 1、00406A +23.8 億排第 2**，因 Σ|val| 為 38.36 vs 23.84
+  ——**負淨額排在正淨額之前**正是 Σ|val| 生效的直接證據。`foot` 的「9 筆金額缺值」實測為
+  00404A 6 筆（`zh` 為 null）＋00406A 3 筆（臺指選擇權無收盤價）。規模欄 8 列**全走 `twse_aum_yi`**、
+  零回退。gate 證據：`primary_date`＝`baseline.date`＝`2026-09-11`、`laggards` 空。
+- **算 ETF 維度聚合時不可走 `subs[].detail[]`（2026-09-11 踩到）**：`subs` 是**次產業多對多**聚合，
+  `src/build_aetf_diff.py` 的 `for sub in {p[1] for p in info.get("p", [])}` 會把同一檔股票依其所屬
+  次產業數**重複 append**，依 `etf` 直接彙總會重複計算（實測 00991A Σval 由 −2.07 億膨脹成 −95 億，
+  名次也全亂）。**ETF 維度的唯一正確路徑是 `etfs[<code>].buy` ＋ `.sell`**——`k` 四類分類也只在那裡，
+  `subs[].detail[]` 沒有 `k`，且它 `if r["val"] is not None` 把 null 濾掉了（所以在 subs 上數 null 會得 0）。
+- **`foot` 的「另 M 檔當日無揭露資料」措辭偏寬（已知、未修）**：M 取
+  `Object.keys(aetfLatest.errors).length`，但 `errors` 的成因不只「當日無揭露」——2026-09-11 的 4 檔中
+  3 檔是「Holding **近 14 日**無資料」、`00998A` 是「過濾後無台股持股」。**數字與方向（未納入）誠實**，
+  只是歸因用語不夠精確；要修需動 Worker 並重新部署，未併入本批。
 
 ## 晨間 LINE 圖卡（AM slot，2026-08-10）
 
