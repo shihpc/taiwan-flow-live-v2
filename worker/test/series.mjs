@@ -201,17 +201,39 @@ const dupTs = (arr) => arr.length - new Set(arr.map((p) => p.t)).size;
   const tie = mergeSeriesPoint([P("09:00", 100, "先")], P("09:00", 100, "後"));
   chk("平手 → 後寫入者勝（沿用舊版同分鐘重跑冪等）", tie[0].id === "後", JSON.stringify(tie));
 
-  // (e) 「不可比」的精確界線（複核者指出舊文件把「缺欄」等同「不可比」不精確）：
-  //     只有 key 根本不存在（undefined → NaN）才不可比；null/""/0 都是**有限的 0**，
-  //     會走正常比較並以最小值勝出。此處把實際行為釘住（既有曝險，本批不修，僅揭露）。
-  for (const [bad, tag] of [[null, "null"], ["", "空字串"], [0, "0"]]) {
+  // (e) 「有效」界線（B5，2026-09-12 修）：有效＝有限且 > 0。
+  //     null/""/0 都是**有限的 0**，舊版走正常比較並以最小值勝出＝壞點鎖住該分鐘；
+  //     現在一律視為無效，**有效值恆勝**（不分先後），故好點留下。
+  for (const [bad, tag] of [[null, "null"], ["", "空字串"], [0, "0"], [-1, "負值"]]) {
     const got = mergeSeriesPoint([P("09:00", 12345, "好點")], P("09:00", bad, "壞點"));
-    chk(`amt=${tag} → Number() 得有限的 0、走正常比較並以最小值勝出（非「不可比」）`,
-      got.length === 1 && got[0].id === "壞點", JSON.stringify(got));
+    chk(`amt=${tag}（後寫）→ 無效，有效的好點恆勝`,
+      got.length === 1 && got[0].id === "好點", JSON.stringify(got));
+    const rev = mergeSeriesPoint([P("09:00", bad, "壞點")], P("09:00", 12345, "好點"));
+    chk(`amt=${tag}（先寫）→ 無效，有效的好點恆勝（與寫入順序無關）`,
+      rev.length === 1 && rev[0].id === "好點", JSON.stringify(rev));
   }
+  // (e2) 兩者皆無效 → 沿用舊版冪等：後寫者勝
+  const bothBad = mergeSeriesPoint([P("09:00", 0, "先壞")], P("09:00", null, "後壞"));
+  chk("兩者皆無效 → 後寫者勝（沿用同分鐘重跑冪等）", bothBad[0].id === "後壞", JSON.stringify(bothBad));
+  // (e3) B5 的核心：含無效值時，六種寫入順序必須收斂到同一個贏家
+  //      （若寫成「無效→不可比→後寫者勝」，{50,100,0} 會收斂到 0，可交換性就破了）
+  {
+    const vals = [[50, "A"], [100, "B"], [0, "壞"]];
+    const perm3 = (a) => (a.length <= 1 ? [a]
+      : a.flatMap((x, i) => perm3([...a.slice(0, i), ...a.slice(i + 1)]).map((r) => [x, ...r])));
+    const winners = new Set(perm3(vals.map(([v, id]) => P("09:00", v, id)))
+      .map((order) => order.reduce((acc, q) => mergeSeriesPoint(acc, q), [])[0].id));
+    chk("含無效值 {50,100,0}：窮舉 3! 種寫入順序皆收斂到最小的有效值 A",
+      winners.size === 1 && winners.has("A"), [...winners].join("/"));
+  }
+  // 非數值字串 → NaN → 同樣不算有效。B5 之前它走「不可比 → 後寫者勝」＝壞點覆蓋好點，
+  // 現在由「有效恆勝」一併關掉（原註解列為已知曝險的第一條）。
   const nan = mergeSeriesPoint([P("09:00", 12345, "好點")], { t: "09:00", amt: "abc", id: "NaN點" });
-  chk("amt 為非數值字串 → num()/Number() 得 NaN → 真正不可比 → 後寫入者勝",
-    nan[0].id === "NaN點", JSON.stringify(nan));
+  chk("amt 為非數值字串 → NaN → 無效，有效的好點恆勝（B5 前是壞點勝）",
+    nan[0].id === "好點", JSON.stringify(nan));
+  const nanFirst = mergeSeriesPoint([{ t: "09:00", amt: "abc", id: "NaN點" }], P("09:00", 12345, "好點"));
+  chk("非數值字串先寫 → 有效的好點仍勝（與寫入順序無關）",
+    nanFirst[0].id === "好點", JSON.stringify(nanFirst));
 }
 
 // ---- mergeSeriesPoint 純函式邊界 ----
