@@ -471,6 +471,13 @@ p90 4h44m／最大 **12h23m**；>4h 12.8%、>10h **2 筆(1.1%)**、>14h 0 筆。
 
 ## 盤中 RRG 盤外定格（`data/rrg_frozen.json`，2026-09-11）
 
+> **線上驗證已通過（2026-09-12 台北週六上午，使用者實機確認）**：在
+> https://shihpc.github.io/taiwan-flow-live-v2/ 的「即時一覽 → 輪動雷達」視角看到定格圖與
+> 明標文案。綁定版本＝**`dc5382c`**（線上 `index.html` 與 `git show dc5382c:index.html` 的
+> sha256 相同，`52f82231…`）。**這是真瀏覽器開真線上站的確認**——本沙箱 headless Chromium
+> 連不到外網（`ERR_CONNECTION_RESET`，走 proxy 亦同），agent 端做得到的只有「curl 抓線上資產
+> 回本機 http.server 重放」，**那不算線上驗證**，故此項由使用者親自完成。
+
 週末／國定假日／frame 過了 KV 2 天 TTL 時，`/replay` 一格也拿不到 → 前端輪動雷達原本整張圖消失
 （`index.html` 的 `function ovRrgHtml` 降級③「取不到盤中快照」）。**交易日收盤後不受影響**
 （錨點夾到 13:30）。現改為讀 `data/rrg_frozen.json` 畫「定格圖」並明標，規格見
