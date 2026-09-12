@@ -2442,7 +2442,9 @@ function ovMktTseYi(){   // 成交佔比分母（上市總額，億）：回放�
 // 2026-07-19 回饋⑤：回放儀表列優先用 series 實際分鐘值（Worker series:<date>；idx=加權指數、
 // chg=漲跌點、amt=全市場累計成交額億，皆交易所口徑）。查無該分鐘（series 漏格）→ 回 null，
 // 呼叫端退回市值加權重建近似＋保留「近似」標註。OV_REPLAY.t 為 frame 實際分鐘（回退 ≤5 分後），
-// series 與 frame 同班寫入，同分鐘對得上。
+// series 與 frame 同班寫入，同分鐘對得上——**開盤前幾分鐘除外**（2026-09-12 B5″ 起）：
+// 09:00–09:05 的序列點若違反「累計額單調遞增」會被 Worker 端的 dropNonMonotonic 丟掉，
+// 此處 find 會查不到而回 null，由既有的「市值加權近似＋『近似』標註」降級路徑接手（行為安全）。
 function ovReplaySeriesPoint(){
   if(!OV_REPLAY||!OV_DAY.series)return null;
   return OV_DAY.series.find(p=>p&&p.t===OV_REPLAY.t)||null;
