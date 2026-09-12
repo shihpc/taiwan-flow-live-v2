@@ -820,7 +820,32 @@ export function mergeSeriesPoint(arr, point) {
     out[i] = pickSeriesDup(out[i], p);
   }
   out.sort((x, y) => (x.t < y.t ? -1 : x.t > y.t ? 1 : 0));
-  return out;
+  return dropNonMonotonic(out);
+}
+// 全市場累計成交額對 t **單調遞增**，這是結構不變式、不是可調參數。「較早時點的 amt 大於
+// 某個較晚時點的 amt」＝該早點的內容取自較晚時刻＝污染（B5″，2026-09-12）。
+// **為什麼需要這一層**：B5 的有效性守門只擋 amt≤0，B5′ 的日期守門只擋「快照是前一交易日」；
+// 兩者都擋不到「日期正確、但內容取自幾分鐘後」的①型。實害：2026-09-07 的
+// `data/daysummary` 低點寫成 46724（當日其餘最低 46943.7，錯 219.7 點），比②型那筆更嚴重。
+// **免門檻**是採用它的理由——對照 `stale` 的「>3 分」需要一個沒有依據的門檻，
+// 而近 8 個交易日 `frames[].stale` 實測 52–54/54，用它當守門會丟掉約 98% 的合法點。
+//
+// ⚠ **無效 amt 的點不參與比較，也不更新 minLater**（有效＝有限且 >0，同 pickSeriesDup）。
+// 否則中間出現一個 amt=0 會讓它**之前所有點**被誤殺——那是災難級誤判，測試有釘住。
+// ⚠ **取捨（判斷、不是推導）**：違反時丟的是「較早那一點」。依據是污染機制（快照取自未來），
+// 但若某日的較晚點被低報，會誤殺合法的較早點。實測 38 個歸檔日 10,448 對相鄰點只有
+// **17 對**違反，且全部集中在 09:00–09:03；若良性違反普遍存在，全天都該散見才對。
+export function dropNonMonotonic(sorted) {
+  const ok = (v) => Number.isFinite(v) && v > 0;
+  let minLater = Infinity;
+  const keep = new Array(sorted.length).fill(true);
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const v = Number(sorted[i] && sorted[i].amt);
+    if (!ok(v)) continue;                  // 無效點：不丟、也不更新 minLater
+    if (v > minLater) { keep[i] = false; continue; }
+    minLater = v;
+  }
+  return keep.every(Boolean) ? sorted : sorted.filter((_, i) => keep[i]);
 }
 export async function appendSeries(env, d, hm, mktAmtRaw, idxRow) {
   const key = `series:${d}`;

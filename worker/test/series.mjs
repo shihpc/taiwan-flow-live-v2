@@ -291,5 +291,49 @@ const dupTs = (arr) => arr.length - new Set(arr.map((p) => p.t)).size;
   chk("seriesTail 空/undefined 不炸", seriesTail(undefined).length === 0 && seriesTail([]).length === 0);
 }
 
+// ---- B5″（2026-09-12）：單調性守門 dropNonMonotonic ----
+{
+  const P = (t, amt, id) => ({ t, amt, idx: null, chg: null, id });
+  const build = (pts) => pts.reduce((acc, p) => mergeSeriesPoint(acc, p), []);
+  const ts = (a) => a.map((p) => p.t).join(",");
+
+  // A1 單調（含相等）→ 一點不丟
+  const mono = build([P("09:00", 100, "a"), P("09:01", 100, "b"), P("09:02", 250, "c")]);
+  chk("A1 單調（含相等）→ 不丟任何點", ts(mono) === "09:00,09:01,09:02", ts(mono));
+
+  // A2 早點 amt > 晚點 → 丟早點（2026-09-07 的實際形狀：3780.2 → 2666.9）
+  const bad = build([P("09:00", 3780.2, "壞"), P("09:01", 2666.9, "好"), P("09:02", 2988.5, "好2")]);
+  chk("A2 早點>晚點 → 丟早點、保留晚點", ts(bad) === "09:01,09:02", ts(bad));
+
+  // A3 ★災難案例：中間一個無效 amt 不得誤殺它之前所有點
+  for (const [bv, tag] of [[0, "0"], [null, "null"], ["", "空字串"], ["abc", "NaN"]]) {
+    const r = build([P("09:00", 100, "a"), P("09:01", 200, "b"), P("09:02", bv, "壞"), P("09:03", 300, "c")]);
+    chk(`A3 中間 amt=${tag} → 不得誤殺之前的點（應留 4 點）`, ts(r) === "09:00,09:01,09:02,09:03", ts(r));
+  }
+
+  // A4 連續多個違反 → 全丟乾淨且結果單調
+  const multi = build([P("09:00", 900, "x"), P("09:01", 800, "y"), P("09:02", 100, "z"), P("09:03", 200, "w")]);
+  chk("A4 連續違反 → 結果單調", ts(multi) === "09:02,09:03", ts(multi));
+
+  // A5 邊界：0/1 點不拋錯
+  chk("A5 空陣列不拋錯", mergeSeriesPoint([], { t: "09:00", amt: 1 }).length === 1);
+  chk("A5 單點（即使很大）不丟", build([P("09:00", 99999, "solo")]).length === 1);
+
+  // B2 含污染點時，窮舉寫入順序必須收斂到同一結果（B5 建立的可交換性不可破壞）
+  {
+    const pts = [P("09:00", 3780.2, "壞"), P("09:01", 2666.9, "好"), P("09:02", 2988.5, "好2")];
+    const perm = (a) => (a.length <= 1 ? [a]
+      : a.flatMap((x, i) => perm([...a.slice(0, i), ...a.slice(i + 1)]).map((r) => [x, ...r])));
+    const outs = new Set(perm(pts).map((o) => ts(o.reduce((acc, q) => mergeSeriesPoint(acc, q), []))));
+    chk("B2 含污染點：窮舉 3! 種寫入順序收斂到同一結果", outs.size === 1 && outs.has("09:01,09:02"),
+      [...outs].join(" | "));
+  }
+
+  // 反向對照：若把「無效點也更新 minLater」寫錯，A3 會變成只剩 09:02,09:03。
+  // 此處以 A3 的第一組再斷言一次長度，守門若退化立刻紅。
+  const guard = build([P("09:00", 100, "a"), P("09:01", 200, "b"), P("09:02", 0, "壞"), P("09:03", 300, "c")]);
+  chk("反向對照：無效點若誤更新 minLater 會只剩 2 點，此處必須是 4 點", guard.length === 4, ts(guard));
+}
+
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);
 process.exit(fail === 0 ? 0 : 1);
