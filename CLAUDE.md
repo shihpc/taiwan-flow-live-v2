@@ -195,13 +195,86 @@
   132 把 key 一次 get 完——額度歸屬是 **internal services 子請求上限（Free 1,000／Paid 預設 10,000）**，
   不是對外 fetch 那條（Free 50／**Paid 10,000，可調到 10M**）。KV get 另算進「同時 6 條等待回應」
   上限，132 把會**排隊**分批完成而非失敗，延遲未實測。
+  **2026-09-13 新增三個欄位**（拆除提醒的讀側，見下）：`since`（＝`TICK_SAMPLE_SINCE`）／
+  `age_days`／`teardown_due`。三者都是**純算術、唯讀**，一律以**台北今日**計而不是查詢的
+  `?date=`——問的是「這班活多久了」，不是「這份樣本多舊」。既有欄位形狀不變。
+- **五個 `await` 全部逾時（2026-09-13 補，同日覆驗退回後補齊）**：`runTickSample` 共
+  **5 個 `await`**——`fetchFn(url)`／`r.body.cancel()`／`r.text()`／`env.FLOW_KV.put(...)`／
+  `alertJob(...)`（最後一個是同批「拆除提醒」新增的）。`origin/main`（`e035ba0`）版本只有
+  **4 個**（無 alertJob 那個），**四個全部無上限**。
+  **本節原本寫「原本三處無上限」「全鏈逾時」是錯的**：本批第一版只包了 fetch／body／cancel
+  三個，漏掉 `FLOW_KV.put` 與自己新增的 `alertJob`——而**漏掉的 put 正是「樣本寫不出去」
+  那一條**，錯的數字剛好蓋住了沒修好的失效模式（2026-09-13 覆驗實查退回，留此紀錄）。
+  覆驗實測：讓 `r.body.cancel()`、`FLOW_KV.put` 或 `alertJob` 任一回一個**永不 resolve** 的
+  promise，整支都卡住（400ms race 得 `HUNG`）；`put` 掛住時**連樣本都寫不出去**。影響確實有限
+  （`TICK_CRON` 獨佔那次 invocation、掛在自己的 `ctx.waitUntil`，掛住只讓那一格樣本缺席），
+  但**「樣本缺席」與「cron 沒醒」在 `/tickdiag` 讀回時分辨不出來**，正是本班一直在治的那類問題。
+  現在**五處各包一層** `export function tickWithTimeout`，門檻
+  `export const TICK_FETCH_TIMEOUT_MS`／`TICK_BODY_TIMEOUT_MS`（各 45 秒）／
+  `TICK_CANCEL_TIMEOUT_MS`（5 秒）／`TICK_KV_TIMEOUT_MS`／`TICK_ALERT_TIMEOUT_MS`（各 10 秒，
+  KV put 是 internal service 子請求、正常在毫秒級，10 秒是留兩個數量級的餘裕）。
+  - **為什麼是 `Promise.race` 而不是 `AbortSignal.timeout()`（查證後的選擇，不是憑印象）**：
+    ①Cloudflare Workers 官方文件 runtime-apis/web-standards 只寫「The `AbortController` and
+    `AbortSignal` APIs provide a common model for canceling asynchronous operations」、
+    runtime-apis/request 只記 `signal` 欄與 `enable_request_signal` 旗標，**兩頁都沒有列出
+    `AbortSignal.timeout()` 這個靜態方法**（2026-09-13 實查）。它很可能可用，但官方文件沒承諾
+    的東西不該押在合併即部署的路徑上。②就算可用，signal 只中止 **fetch**，**`r.body.cancel()`
+    不吃 signal**——而那正是實測會掛住的那一條。③`cloudflare/workerd` issue #1020 記載過
+    `AbortSignal.timeout()` 逾時丟出的 DOMException 在本機 wrangler 下 `try/catch` **抓不到**
+    （已由 PR #1177 修掉、issue 已關；該串當時建議的替代寫法是 `AbortController`＋`setTimeout`）。
+  - **誠實的代價**：`Promise.race` **不取消底層操作**，掛住的 promise 仍 pending、只是被放生；
+    換到的是「逾時後照樣把樣本寫出去」，**不是**「把連線收回來」。timer 一律在 `finally` 清掉。
+  - **`FLOW_KV.put` 逾時的語意是「未知」不是「沒寫入」**（這條不可含糊）：`Promise.race`
+    不取消底層操作，逾時只保證**這次 invocation 會結束**，那筆 put 仍可能事後由執行環境完成。
+    因此標記 `kx`（值為例外類別名，逾時即 `TickTimeout`）讀作**「這次沒等到寫入確認」**——
+    看到 `kx` 不得斷言樣本沒寫進去；反過來 `/tickdiag` 上某時點缺席也不得回推成「一定是 put
+    逾時」（TTL 過期、cron 沒醒長得一樣）。`alertJob` 逾時同理記 `ax`。
+    **`kx`／`ax` 只在回傳值與 log、不進 KV**：樣本在 put 之前就序列化好了，要記的正是那一筆
+    自己的寫入結果，塞不回自己；`ax` 發生時樣本更是早已落地，不值得為了告警結果再寫一次 KV。
+  - **逾時的樣本形狀**：`ern === "TickTimeout"`，`err` 帶得出階段（`fetch`／`body`）。
+    **`st` 依階段不同、這是刻意的**——fetch 階段逾時 `st` 維持 `0`（還沒拿到 status，與 fetch
+    本身例外同一類）；body 階段逾時 `st` 已是**真實 HTTP status**（標頭已到、卡在讀 body），
+    比硬寫回 0 誠實。**分辨階段要看 `err`，不要只看 `st`。**
+    `r.body.cancel()` 逾時另記 `cx`（值為例外類別名，逾時即 `TickTimeout`）——取消失敗本來就
+    不影響量測，**但「無妨」不等於「可以完全不留痕跡」**；它**不寫 `err`／`ern`**（cancel 卡住
+    不是抓失敗），樣本其餘欄位仍是 clen 閘門的正常形狀。
+  - **45 秒是餘裕的選擇、不是量出來的最適值**（同 pm 牌鐘 23:00 那條的立場）：下界要遠大於正常
+    耗時否則會把「單日 payload 耗時」這個要量的未知自己截斷，上界要遠小於 cron 間隔 300 秒
+    否則掛住的那格會壓到下一格（最壞 45+45+5+10+10＝**115 秒**）。cancel 給 5 秒是因為它是本地
+    連線收尾、不是網路往返，而 clen 閘門已經決定不讀 body 了。**沒有足夠的耗時分布可算最適值。**
+  - `runTickSample` 多一個第四參數 `opts`（`{fetchMs, bodyMs, cancelMs, kvMs, alertMs}`）
+    **只供測試把門檻壓成毫秒級**，生產呼叫仍是 `runTickSample(env, tp)`、一字未變。
+- **拆除提醒機制（2026-09-13 補）**：下面的拆除條件原本**只有文件、沒有機制**，沒有任何東西會
+  提醒，最可能的結局是這班長住。現在補一道最小機制——
+  - **首採樣日寫成常數 `export const TICK_SAMPLE_SINCE`（`2026-09-09`）而不是 KV**：上線日是
+    已知且不會變的事實，為它多一次 KV 讀寫是白花額度（132 slot/日；KV 額度在本 repo 爆過），
+    常數也讓判斷變成純函式 `export function tickAgeDays`／`export function tickTeardownDue`、可離線測。
+  - **門檻 `export const TICK_TEARDOWN_DUE_DAYS`＝30 個日曆日**（≈21 個交易日）。刻意用日曆日：
+    本 repo 沒有國定假日行事曆（同 `taiwan-flows` 的既定立場），日曆日是純算術、不會因缺行事曆
+    而誤判。**它是提醒門檻、不是判準**——到期只代表「該回來看樣本、決定收窄或移除」，
+    不代表資料一定夠。`age` 算不出來（日期解析失敗）時**一律不判到期**。
+  - **告警一天最多一則，但那不等於「總共一則」**：只在**當日第一格**
+    （`tp.hour === TICK_START_HOUR && tp.minute === 0`）評估，再疊 `alertJob` 既有的
+    `alerted:<date>:tick-teardown-due` 去重，兩道都在。**`tickTeardownDue` 用 `>=`，所以
+    2026-10-09（＝`TICK_SAMPLE_SINCE` + 30 日）起的每個平日都會各發一則**（`alertJob` 週末
+    直接 skip），**直到有人動手收窄或拆掉這班為止，它不會自己停**。這是刻意的常駐提醒——
+    會自己安靜下來的提醒，對一個本來就容易被遺忘的暫時班等於沒提醒。
+    評估**排在 KV put 之後**，告警出任何事都不影響樣本（這個順序有測試鎖住：反過來的話，
+    告警一掛住連樣本都寫不出去，而「告警送不出去」可以接受、「樣本缺席」不行）。
+  - **不重蹈已知限制 7 的覆轍**：`alertJob` → `sendAlert` 本身靠 secret，所以先用
+    `alertChannelReady(env)` 擋——通道未設時只 `console.error`、**不呼叫 `alertJob`**，
+    否則它會在送不出去的情況下照樣寫掉當天那把去重鍵。
+  - **硬約束不變**：本班**不 dispatch、不碰其他班**，這一項一個 dispatch 都沒加。
 - **⚠ 這是暫時班，拆除條件（量到就回來動手）**：以下三個未知都拿到**跨多個交易日**的穩定分布後，
   這班就該收窄或整段移除，不要讓它長住——
   1. **日盤收盤段最早幾點拿得到**：`d13` 首次為正的時點在多日之間穩定下來；
   2. **夜盤段是否先落地**：`seg.a`／`seg.c` 相對 `seg.b` 的出現順序有定論（**這一項需要上午樣本**）；
   3. **單日 payload 量級與耗時**：`bytes`／`clen`／`ms` 的量級與尾端穩定。
   收窄＝把窗縮到真正有資訊量的那幾小時（改 `TICK_START_HOUR`／`TICK_END_HOUR` ＋ cron，兩邊同步）；
-  移除＝拿掉第 20 條 cron、`ticksample` 分流、`runTickSample`／`/tickdiag`／`test/tickdiag.mjs`。
+  移除＝拿掉第 20 條 cron、`ticksample` 分流、`runTickSample`／`/tickdiag`／`test/tickdiag.mjs`
+  （一併拿掉 `TICK_SAMPLE_SINCE`／`TICK_TEARDOWN_DUE_DAYS`／`tickAgeDays`／`tickTeardownDue`
+  與 `tick-teardown-due` 那則告警）。**2026-09-13 起到期會自己來敲門**（見上一項），
+  但敲門的是「該回來看了」，**不是「資料已經夠了」**——夠不夠仍要人看上面三個未知的分布。
   **判準定案後才輪到「接哨兵」，那是另一批工作**（本批對 `SENTINEL_SIGNALS`／`signalLanded`／
   `runSentinel`／既有 19 條 cron 一個字都沒動）。
 
@@ -809,6 +882,33 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    只有第三輪抓到 `freshHits: 2`（另一輪撞上 30 秒節流、回應根本沒有 `swr` 欄位）。
    **所以單次讀到全 0 不代表 SWR 沒作用**，那只是抓到冷 isolate。要判 `LIVE_TTL` 必須在
    **交易時段**（有真實客戶端輪詢時）多次取樣看趨勢，非交易時段打出來的比例沒有代表性。
+
+   **「先量不動」的可執行量法（2026-09-13 使用者裁定：`LIVE_TTL` 先量、這批不動）**——
+   上面兩段只說了「要量」與「怎麼讀錯」，沒說**量到什麼才算夠、怎麼算**，補在這裡，
+   免得下一個 session 又從頭討論一次：
+   - **兩個比例**（都出自 `/livediag` 的 `swr`，`export function liveSwrStats`）：
+     ① **stale 佔比**＝`staleHits / (staleHits + freshHits)`——回答「客戶端有多常落在 stale 區」。
+     前端 `CFG.autoSec:20` > `LIVE_TTL`(15)，單一客戶端理論上每輪都落 stale；這個比例是**實證**，
+     不是拿兩個常數相減推出來的。
+     ② **合併率**＝`coalesced / rebuilds`——回答「in-flight 去重到底合併掉多少次重建」。
+     比例高＝併發確實存在、`serveLive` 那層在做事；比例接近 0 有兩種可能（真的沒併發／
+     取樣落在冷 isolate），**要靠下一條才分得開**。
+   - **取樣時段：只有台北 09:00–13:30 的樣本算數**。非交易時段沒有真實客戶端輪詢，
+     比例的分母幾乎全是自己打進去的請求，**沒有代表性**（不是「比較不準」，是問錯問題）。
+   - **取樣次數：單次讀數一律不採信，至少要三輪以上、每輪間隔數分鐘**。理由就是上一段那個
+     已實測的陷阱——連打 8 次 `/live` 後立刻打 `/livediag` 仍可能全 0，三輪只有一輪抓到。
+     **判讀規則：多輪中取「有抓到非零計數」的那些輪來看比例，全 0 的輪是冷 isolate、丟棄不計**，
+     不可把全 0 的輪當成「比例＝0」平均進去。另注意 `/livediag` 有 30 秒節流，被擋時回應
+     **根本沒有 `swr` 欄位**（不是 `swr` 全 0），那種回應也要丟棄。
+     **但「丟棄全 0 的輪」本身有選擇偏誤，用它的人要知道**：留下的是「診斷請求剛好落在忙碌
+     isolate 時」的比例，不是全隊平均。忙 isolate 的併發本來就比冷的多，所以合併率會**偏高**、
+     stale 佔比也未必代表全體客戶端。這兩個比例只能當**量級**看（有沒有在做事、大概幾成），
+     不能當精確估計；沒有跨 isolate 的彙總就拿不到全隊比例，而為此加一個常駐彙總班不划算
+     （同下一點「刻意不自動化」的立場）。
+   - **量到之後才輪到決定 25／30**（優化計畫批次二 #9）。**在那之前任何調整都是猜**——
+     `LIVE_TTL` 直接決定 `/live` 的 cf 快取行為，猜錯的代價是線上，而量它不用改任何程式。
+   - **這件事目前沒有自動化**：沒有排程在收這兩個比例，也刻意不加（為了量一個一次性的決策
+     而長出一個常駐班不划算，同 tick 量測班的教訓）。要量就是人去打，把數字記回這一節。
 7. **哨兵 dispatch 失敗與 secret 缺失：已接告警（2026-09-06）；獨立看門狗仍未做**：
    `export async function runSentinel` 內 `ghDispatch` 的 catch 現已接 `alertJob`（tag
    `sentinel-err-<signal>`，沿用每日每 tag 一則的 KV 去重；KV 仍不記、5 分後照舊重試）。
