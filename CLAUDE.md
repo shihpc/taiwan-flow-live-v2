@@ -538,6 +538,41 @@ p90 4h44m／最大 **12h23m**；>4h 12.8%、>10h **2 筆(1.1%)**、>14h 0 筆。
 - **補跑**：`--base` 可指定當時那一版 base（事後補跑時 `data/rrg_base.json` 已被重算，要用
   `git show <該日之前的 sha>:data/rrg_base.json` 取出舊版）。離線測試 `tests/test_rrg_frozen.py`。
 
+## 歸檔的真口徑鏈層欄位 `cg`／`cmkt`（`data/intraday/*.json`，2026-09-13）
+
+`src/archive_intraday.py` 在既有的 54 格 frame 迴圈裡**多算一份前端 RRG 口徑的鏈層矩陣**，
+附加成三個新欄位（既有 `date`／`generated_at`／`unit`／`series`／`times`／`frames`／`total`／
+`nstk`／`g` **一字未動**，`src/build_rrg_base.py` 吃的 `g`／`total`／`times` 不受影響——
+已對跑驗證：把新欄位塞進全部 38 份歸檔檔的副本後重跑 `build_rrg_base.build(5)`，輸出與
+現行 `data/rrg_base.json` 逐位相同）：
+
+| 欄位 | 內容 |
+|------|------|
+| `cg` | 鏈名 → 各時點累積成交額（**億**），鏈名集合＝`classify.json` 的 `c` 全集（47 條，**刻意不綁 `rrg_base.json` 那份會變的 chains**，歸檔檔要自我完備）；缺格／分母不成立記 `null`，當日零成交的鏈記 `0.0` |
+| `cmkt` | 各時點 TSE 分母（億，＝`ovReplayBuild` 的 `mkt.tseYi`） |
+| `cmeta` | `unit`／`chains`／`universe`／`hit`／`share`／`src`／`note`（口徑說明） |
+
+- **share 刻意不另存**：`share = cg[鏈][i] / cmkt[i]`，那與 `agg_frame` 內部的 `a / mkt_yi` 是
+  **同一個運算**（同兩個 double、同一次除法），故逐位相同；另存一份 share 會讓檔案再大一倍
+  （實測 share 的 JSON 字面量平均 19.7 字元 vs amt 的 9.8）。
+- **口徑實作只有一份**：`from build_rrg_frozen import agg_frame`，本檔**不自己算**。`agg_frame`
+  已與 `index.html` 的 `ovReplayBuild`／`ovAggBy`／`ovRrgAggFrame` 逐位 parity（G1 實測 12 時點 ×
+  47 鏈）。離線測試 `tests/test_archive_intraday.py` 以合成 frame 斷言 `cg` 逐位＝`agg_frame`
+  的 `amt_yi`、`cg/cmkt` 還原的 share 逐位＝其 `shares`（260 格），這是「真的重用而非重寫」的證據。
+- **與 `g` 完全不同口徑，不可混用**：`g` 是**次產業層且含上櫃／興櫃／彙總碼**，2026-09-11 實測
+  `total` 23,824 億 vs 真分母 7,038 億＝**3.39 倍**；拿它回聚合重建鏈層，端到端實測 `oddRaw`
+  逐鏈判定 45% 翻面、象限 49% 不同（Kendall 0.42，0.5＝亂數）。**這正是要多存一份的理由**。
+- **降級**：`/live` 取不到代號集合（`ovAggBy` 的走訪來源）時**只是不寫這三個欄位**，既有歸檔
+  照常完成並印 `::warning::`——KV frame TTL 只有 2 天，當天沒 commit 就永久遺失，不能讓加值
+  欄位的失敗賠掉當日唯一一次歸檔機會（同檔頭「務必維持 return 0」那段論證）。
+- **成本**：不多打任何一格 frame（只用迴圈裡已抓到的 54 格），只多一次 `GET /live`；體積實測
+  **+33,080 bytes＝+11.2%**（294,570→327,650，量法見 `src/archive_intraday.py` 檔頭做法 4）。
+- **⚠ 過去的日子無法回補**：KV frame TTL 2 天，新欄位只從 2026-09-14（週一 14:10）那一班起算，
+  要累積 **5~10 個交易日**才夠重跑 `OV_RRG_ODDMAX`／`OV_RRG_CLOSE` 的鏈層依據（見
+  `docs/rrg-spec-20260809.md` §7 第 4 條 (d)）。**上線當下無法端到端實跑**（09-11 的 frame
+  當日已過期，`/replay` 實打回「該時段無盤中資料」），故本批只驗到「與 `agg_frame` 逐位相同」，
+  **驗不到「與真值逐位相同」**。
+
 ## CSP 與注入面（2026-09-06）
 
 `index.html:13` 的 `<meta http-equiv="Content-Security-Policy">`（比照 `postmkt/index.html:10`，另加 `form-action 'none'`）。
