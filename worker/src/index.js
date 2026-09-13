@@ -439,6 +439,101 @@ export const TICK_MAX_PARSE_BYTES = 20e6;
 const TICK_SKIP = Symbol("tick-skip");
 const tickPad2 = (n) => String(n).padStart(2, "0");
 
+// ---- 逾時（2026-09-13 補；同日覆驗退回後補齊）----
+// **數字先講清楚（原本寫「三處」「全鏈」是錯的，2026-09-13 覆驗實查退回）**：
+//   · `runTickSample` 現在共 **5 個 await**：`fetchFn(url)`／`r.body.cancel()`／`r.text()`／
+//     `env.FLOW_KV.put(...)`／`alertJob(...)`，**本批把 5 個全部包上逾時**。
+//   · `origin/main`（`e035ba0`）版本共 **4 個 await**（沒有 alertJob 那個，它是本批拆除提醒
+//     新增的），**四個全部無上限**。
+//   · 本批第一版只包了前三個、漏掉 `FLOW_KV.put` 與自己新增的 `alertJob`，卻寫成「原本三處
+//     無上限」「全鏈逾時」——**漏掉的那個 put 正是「樣本寫不出去」的那一條**，等於用錯的數字
+//     蓋住了沒修好的失效模式。這一段留著當紀錄：數字要照著程式數，不要照著印象寫。
+// 問題：任何一個 await 永不 resolve 就會讓 runTickSample **整支掛住**（覆驗實測：讓
+// `r.body.cancel()` 回一個永不 resolve 的 promise，400ms race 得 HUNG；讓 `FLOW_KV.put` 或
+// `alertJob` 永不 resolve 同樣 HUNG）。影響範圍確實有限——TICK_CRON 獨佔那次
+// invocation、掛在自己的 ctx.waitUntil，掛住只讓那一格樣本缺席——但**「樣本缺席」與「cron 沒醒」
+// 在 /tickdiag 讀回時分辨不出來**，而那正是本班一直在治的那類「缺資料被呈現成別的東西」。
+//
+// 為什麼用 Promise.race 而不是 AbortSignal.timeout()（**查證後的選擇，不是憑印象**）：
+//   ① Cloudflare Workers 官方文件（runtime-apis/web-standards「AbortController and AbortSignal」段、
+//      runtime-apis/request 的 `signal` 欄）**只記載 AbortController／AbortSignal，沒有列出
+//      `AbortSignal.timeout()` 這個靜態方法**；2026-09-13 實查兩頁皆無。它很可能可用
+//      （cloudflare/workerd issue #1020 的討論裡就在用），但**官方文件沒承諾＝不該押在它身上**。
+//   ② 就算可用，signal 只能中止 **fetch**；本班要包的 5 個裡有 4 個（`r.text()`、
+//      `r.body.cancel()`、`FLOW_KV.put`、`alertJob`）**不吃 signal**——而 cancel 正是實測
+//      會掛住的那一條，put 則是「樣本寫不出去」的那一條。
+//   ③ workerd issue #1020 記載過 `AbortSignal.timeout()` 逾時丟出的 DOMException
+//      **在本機 wrangler 下 try/catch 抓不到**（已由 PR #1177 修掉、issue 已關；該串建議的
+//      替代寫法是 AbortController＋setTimeout）。對一個「保守、可回退」的量測班，
+//      選一個語意單純、在 workerd 與 node 都一定成立的寫法比較划算。
+// **誠實的代價（不可寫成「已取消」）**：Promise.race **不會取消底層操作**，掛住的那個 promise
+//   仍然 pending，只是被放生；我們換到的是「逾時後照樣把樣本寫出去」，不是「把連線收回來」。
+//   timer 一律在 finally 清掉（未清的 setTimeout 可能把 invocation 多吊著）。
+export const TICK_TIMEOUT_NAME = "TickTimeout";
+// 選值理由（**是餘裕的選擇，不是量出來的最適值**——「單日 payload 耗時」正是本班要量的未知 (3)，
+// 在拿到分布之前任何精確門檻都是猜）：兩端各留一個數量級以上的餘裕——
+//   下界：必須**遠大於**正常耗時，否則會把要量的那條分布自己截斷、製造假逾時；
+//   上界：必須**遠小於** cron 間隔 300 秒，否則掛住的那一格會壓到下一格（最壞 45+45+5＝95 秒）。
+// 45 秒同時滿足兩者。cancel 另給短門檻 5 秒：它是本地連線收尾、不是網路往返，而且 clen 閘門
+// 已經決定不讀 body 了，為了「把連線收乾淨」等 45 秒沒有意義。
+export const TICK_FETCH_TIMEOUT_MS = 45000;    // fetchFn(url) → 拿到回應標頭
+export const TICK_BODY_TIMEOUT_MS = 45000;     // r.text() → 把 body 讀成字串
+export const TICK_CANCEL_TIMEOUT_MS = 5000;    // r.body.cancel() → clen 閘門的連線收尾
+// 另外兩個門檻（2026-09-13 覆驗退回後補）。都給 10 秒，理由與 45／5 同一套「餘裕而非最適」：
+//   · KV put 是 **internal service 子請求**、不是跨網際網路往返，正常應在毫秒級；給 10 秒
+//     是留兩個數量級的餘裕，同時保證它遠小於 cron 間隔。
+//   · alertJob 內含 1 次 KV get ＋ 1 次對外 webhook ＋ 1 次 KV put，給同樣的 10 秒。
+// 最壞總和 45+45+5+10+10＝**115 秒**，仍遠小於 cron 間隔 300 秒（掛住的那格不會壓到下一格）。
+export const TICK_KV_TIMEOUT_MS = 10000;       // env.FLOW_KV.put() → 把樣本寫出去
+export const TICK_ALERT_TIMEOUT_MS = 10000;    // alertJob() → 拆除提醒告警（本班唯一的對外告警）
+// 逾時訊息**刻意只含階段名與毫秒數**（無 URL、無 token、無上游回應內容）：它會寫進活 7 天、
+// 由無認證 /tickdiag 對外吐出的樣本，形狀愈固定愈安全。仍照樣過 maskTickErr（縱深防禦）。
+export function tickWithTimeout(p, ms, stage) {
+  let timer = null;
+  const bomb = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error(`tick ${stage} 逾時（${ms}ms）`);
+      e.name = TICK_TIMEOUT_NAME;                // ern 記得到 → 逾時與其他例外分得開
+      reject(e);
+    }, ms);
+  });
+  return Promise.race([p, bomb]).finally(() => { if (timer !== null) clearTimeout(timer); });
+}
+
+// ---- 暫時班的拆除提醒（2026-09-13 補；原本拆除條件**只有文件、沒有機制**）----
+// CLAUDE.md 寫了三個未知拿到跨多交易日的穩定分布後就該收窄或移除這班，但沒有任何東西會提醒，
+// 於是它最可能的結局是「長住」。這裡補一道**最小的**機制：日期算術 ＋ 既有 alertJob。
+// 選 a（KV 記首採樣日＋逾期告警）與 b（/tickdiag 加 age 欄）的折衷，理由見 CLAUDE.md 同節：
+//   · 首採樣日**寫成常數而非 KV**——本班上線日是已知事實，不需要為了記一個不會變的值多一次 KV 讀寫
+//     （132 slot/日 × 一次 get 是白花的額度，而 KV 額度在本 repo 爆過）；常數也讓判斷變成純函式、可離線測。
+//   · 告警**一天最多一次**：只在當日第一格（TICK_START_HOUR:00）評估，再疊 alertJob 既有的
+//     `alerted:<date>:<tag>` 去重，兩道都在。**但「一天最多一則」不是「總共一則」**：
+//     tickTeardownDue 是 `age >= dueDays`，一旦到期就**每個平日各一則**（2026-10-09 起；
+//     alertJob 週末直接 skip），直到有人收窄時窗或整段拆掉這班。這是刻意的常駐提醒
+//     ——會「自己安靜下來」的提醒對一個本來就容易被遺忘的暫時班沒有用。
+//   · **不得重蹈已知限制 7 的覆轍**：alertJob → sendAlert 本身靠 secret，通道未設時要先用
+//     alertChannelReady 擋下來、只 console.error，**不呼叫 alertJob**——否則它會在送不出去的情況下
+//     照樣寫掉當天唯一那把去重鍵。
+//   · 硬約束不變：本班**不 dispatch、不碰其他班**；告警失敗也不影響樣本（評估排在 KV put 之後）。
+export const TICK_SAMPLE_SINCE = "2026-09-09";   // 本班上線日（CLAUDE.md「台指期 tick 量測班」節）
+// 30 個**日曆日** ≈ 21 個交易日。刻意用日曆日而非交易日：本 repo 沒有國定假日行事曆
+// （同 taiwan-flows 的既定立場），日曆日算式是純算術、不會因為缺行事曆而誤判；
+// 30 天足以涵蓋月結與連假邊界，也就是拆除條件要的「跨多個交易日的穩定分布」該有的樣本量。
+// 它是**提醒門檻**不是判準：到期只代表「該回來看樣本、決定收窄或移除」，不代表資料一定夠。
+export const TICK_TEARDOWN_DUE_DAYS = 30;
+// 純函式（可離線測）：dateISO 距 since 幾個日曆日。任一端解不出日期回 null（不臆造）。
+export function tickAgeDays(dateISO, since = TICK_SAMPLE_SINCE) {
+  const a = Date.parse(`${String(dateISO)}T00:00:00Z`);
+  const b = Date.parse(`${String(since)}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return Math.round((a - b) / 86400000);
+}
+// age 不明（null）一律**不**判到期：寧可不提醒，也不要用一個算不出來的值發告警。
+export function tickTeardownDue(dateISO, since = TICK_SAMPLE_SINCE, dueDays = TICK_TEARDOWN_DUE_DAYS) {
+  const age = tickAgeDays(dateISO, since);
+  return age != null && age >= dueDays;
+}
+
 // 例外訊息去識別化（鐵律 1）。**這不是防禦性補強，是必要的一道**：
 //   本班請求的 URL 內含 `token=<FINMIND_TOKEN>`，而 workerd 的 fetch 例外訊息**很可能帶上請求 URL**
 //   （`TypeError: Fetch API cannot load: <url>` 是常見形狀）——**這是推測、不是已驗證事實**，
@@ -547,7 +642,14 @@ export function summarizeTickRows(rows) {
 // **不污染 `/live` 的 cf 快取**：本請求不設 `cf.cacheEverything`／`cacheTtl`，不寫入快取。
 // 誠實記一筆殘留風險：本請求的 URL 與 finFuturesVix 完全相同，**有可能讀到 `/live` 留下的
 // ≤15 秒 cf 快取**（`cacheTtl:15`）——對 5 分鐘解析度可忽略，但不是「絕對即時」。
-export async function runTickSample(env, tp, fetchFn = fetch) {
+// `opts` 只供測試注入逾時門檻（生產呼叫 runTickSample(env, tp) 一字不變）：45／10 秒的門檻
+// 沒辦法在離線測試裡等，但「逾時仍寫得出樣本」這件事必須被測到，所以把**五個**門檻開成可覆寫。
+export async function runTickSample(env, tp, fetchFn = fetch, opts = {}) {
+  const tmoFetch = opts.fetchMs != null ? opts.fetchMs : TICK_FETCH_TIMEOUT_MS;
+  const tmoBody = opts.bodyMs != null ? opts.bodyMs : TICK_BODY_TIMEOUT_MS;
+  const tmoCancel = opts.cancelMs != null ? opts.cancelMs : TICK_CANCEL_TIMEOUT_MS;
+  const tmoKv = opts.kvMs != null ? opts.kvMs : TICK_KV_TIMEOUT_MS;
+  const tmoAlert = opts.alertMs != null ? opts.alertMs : TICK_ALERT_TIMEOUT_MS;
   // 程式端二次守門（沿用本 repo「cron ＋ 程式二次守門」慣例）：非台北平日／不在 09:00–19:55 一律不採樣
   const weekday = tp.dow >= 1 && tp.dow <= 5;
   if (!weekday || tp.hour < TICK_START_HOUR || tp.hour >= TICK_END_HOUR) return null;
@@ -559,11 +661,14 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
   // 短路時 body 從未被讀取，那是「沒量到」；寫成 0 會被讀成「回應是空的」——正是本專案
   // 反覆踩到的「缺資料被呈現成別的東西」。同理 st 的 0 是**刻意**的哨兵值（fetch 本身例外），
   // 語意在 catch 那裡寫明，不與 HTTP status 混用。
-  let st = 0, bytes = null, clen = null, rows = null, err = null, ern = null, skip = null;
+  // cx＝r.body.cancel() 的**非正常**結果（逾時／例外）的類別名，正常時不寫進樣本。
+  // 取消失敗本來就無妨（不影響量測），但「無妨」不等於「可以完全不留痕跡」——留一個
+  // 類別名就夠分辨「連線收尾卡住」與「一切正常」，而類別名不含使用者資料、遮罩後仍可靠。
+  let st = 0, bytes = null, clen = null, rows = null, err = null, ern = null, skip = null, cx = null;
   try {
     const url = `${FIN_BASE}?dataset=TaiwanFuturesTick&data_id=TX&start_date=${tp.date}`
       + `&token=${encodeURIComponent(env.FINMIND_TOKEN)}`;
-    const r = await fetchFn(url);
+    const r = await tickWithTimeout(fetchFn(url), tmoFetch, "fetch");
     st = r.status;                       // 拿到回應就記真實 status；後續解析失敗不改寫它
     // clen ＝上游宣告的 content-length：**有才記、沒有就 null，一律不臆造**（缺標頭、
     // chunked 傳輸、或被中介改寫都會沒有）。它與下面的 bytes 是兩個獨立的量，關係見 bytes 註解。
@@ -582,10 +687,14 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
     // ＝「沒量到」而不是 0（0 會被讀成「回應是空的」，兩者不可混講）。
     if (clen != null && clen > TICK_MAX_PARSE_BYTES) {
       skip = "too-large:clen";
-      if (r.body && r.body.cancel) { try { await r.body.cancel(); } catch { /* 取消失敗無妨 */ } }
+      // ★ 這一條是覆驗實測會掛住的那一條：cancel() 永不 resolve 就整支卡在這裡、樣本寫不出去。
+      if (r.body && r.body.cancel) {
+        try { await tickWithTimeout(r.body.cancel(), tmoCancel, "cancel"); }
+        catch (e) { cx = String((e && e.name) || "Error"); }   // 逾時＝TickTimeout；取消失敗仍不算抓失敗
+      }
       throw TICK_SKIP;                   // 跳出 try 的其餘步驟，由下方 catch 認出這個哨兵物件
     }
-    const text = await r.text();
+    const text = await tickWithTimeout(r.text(), tmoBody, "body");
     // bytes ＝ `text.length`＝UTF-16 **字元數**。把它當位元組數是一個**假設**：前提是回應為
     // 全 ASCII（FinMind 的 tick JSON 欄位與值都是數字與 `YYYY-MM-DD HH:MM:SS` 這類 ASCII 字串）。
     // **何時會低估**：回應含非 ASCII 時——最典型的是 FinMind 的中文錯誤訊息（如額度／參數錯誤的
@@ -621,8 +730,63 @@ export async function runTickSample(env, tp, fetchFn = fetch) {
   // 判讀順序：先看 `err`／`skip`，都沒有時 `n:0` 才是「真的沒有列」。
   if (skip) { val.skip = skip; val.n = null; }
   if (err) { val.err = err; val.ern = ern; }
+  // 逾時的樣本形狀：`ern === "TickTimeout"`，`err` 帶得出是哪一階段（fetch／body）。
+  // **st 依階段不同、這是刻意的**：fetch 階段逾時 st 維持 0（與 fetch 本身例外同一類，
+  // 本來就還沒拿到 status）；body 階段逾時 st 已是**真實 HTTP status**（標頭已到、卡在讀 body），
+  // 那比硬寫回 0 誠實得多。兩者靠 err 裡的階段名分辨，不要只看 st。
+  if (cx) val.cx = cx;
   // 例外／空樣本**照樣寫一筆**：「那天沒樣本」和「那天抓失敗」不可混講
-  await env.FLOW_KV.put(tickSampleKey(tp.date, hm), JSON.stringify(val), { expirationTtl: TICK_SAMPLE_TTL });
+  // ★ put 也要有上限（2026-09-13 覆驗退回補）：它永不 resolve 一樣讓整支掛住，而掛住的正是
+  //   「把樣本寫出去」這件事——本批宣稱要治的失效模式就是它，第一版卻偏偏漏了這一個。
+  // **誠實界線，不可寫成「沒寫入」**：Promise.race 不取消底層操作，逾時只保證**這次
+  //   invocation 會結束**；那筆 put 仍可能在事後由執行環境完成。所以 kx 的語意是
+  //   **「這次沒等到寫入確認，是否寫入未知」**——看到 kx 不得斷言樣本沒寫進去，
+  //   /tickdiag 上該時點缺席也不得回推成「一定是 put 逾時」（TTL 過期、cron 沒醒都長一樣）。
+  // kx **只出現在回傳值與 log、不會進 KV**：值在 put 之前就序列化好了，而要記的正是那一筆
+  //   自己的寫入結果，本質上塞不回自己。
+  // 行為差別（相對於原本的裸 await）：原本 put 例外會讓整支 reject、由呼叫端的 .catch 印一行；
+  //   現在記 kx 後**繼續往下**，拆除提醒的評估不再被一次寫入失敗連坐（那個評估本來就與樣本
+  //   內容無關），回傳值也仍拿得到。本函式的既定立場本來就是「失敗一律吞掉」。
+  let kx = null;
+  try {
+    await tickWithTimeout(
+      env.FLOW_KV.put(tickSampleKey(tp.date, hm), JSON.stringify(val), { expirationTtl: TICK_SAMPLE_TTL }),
+      tmoKv, "kv");
+  } catch (e) {
+    kx = String((e && e.name) || "Error");     // 逾時＝TickTimeout；其餘為原例外類別名
+    console.log("ticksample kv:", kx);
+  }
+  if (kx) val.kx = kx;
+  // 拆除提醒（見 TICK_TEARDOWN_DUE_DAYS 上方註解）：**排在樣本寫入之後**，告警出任何事都不影響量測。
+  // 這個順序是被測試鎖住的（test/tickdiag.mjs 的「順序」那組）：反過來的話，告警一掛住就會
+  // 連樣本都寫不出去——而「告警送不出去」是可以接受的降級，「樣本缺席」不是。
+  // 一天最多**評估**一次（只在當日第一格），再疊 alertJob 的 alerted:<date>:<tag> 去重。
+  // **注意「一天最多一則」不等於「總共一則」**：tickTeardownDue 用 `>=`，所以到期後的**每個
+  // 平日**都會各發一則（alertJob 週末直接 skip），直到有人動手收窄或拆掉這班為止。
+  // 這是刻意的——提醒的目的就是「別讓它長住」，發一次就消失等於沒提醒。
+  if (tp.minute === 0 && tp.hour === TICK_START_HOUR && tickTeardownDue(tp.date)) {
+    const age = tickAgeDays(tp.date);
+    const text = `⏳ 台指期 tick 量測班已跑 ${age} 個日曆日（自 ${TICK_SAMPLE_SINCE}）：`
+      + "這是**暫時班**，請回去看 /tickdiag 的樣本分布，決定收窄時窗或整段移除"
+      + "（拆除條件見 CLAUDE.md「台指期 tick 量測班」節）。本班不會自己停。";
+    if (!alertChannelReady(env)) {
+      // 已知限制 7 的教訓：通道未設時**不呼叫 alertJob**，否則它會在送不出去的情況下
+      // 照樣寫掉當天那把去重鍵，把唯一一次機會用掉。
+      console.error(`tick-teardown-due: ${text}`);
+    } else {
+      // alertJob 自帶 try/catch，失敗只回 {error}；這裡再包一層，量測班絕不因告警而變紅。
+      // ★ 也要有上限（2026-09-13 覆驗退回補）：alertJob 的 try/catch 擋得住**拋出**，擋不住
+      //   **永不 resolve**（它內部的 KV get／sendAlert／KV put 任一個掛住都一樣）。這是本批
+      //   自己新增的 await，不包等於自己種一個新的掛住點。ax＝非正常結果的例外類別名，
+      //   同樣**只在回傳值與 log**（樣本此時早已寫出，不該為了告警的結果再寫一次 KV）。
+      //   逾時語意同 kx：不保證那則告警沒送出去，只保證我們不再等它。
+      try { await tickWithTimeout(alertJob(env, tp, "tick-teardown-due", text, fetchFn), tmoAlert, "alert"); }
+      catch (e) {
+        val.ax = String((e && e.name) || "Error");
+        console.log("tick-teardown-due alert:", e && e.message);
+      }
+    }
+  }
   return val;
 }
 
@@ -4797,7 +4961,12 @@ export default {
           Promise.resolve(env.FLOW_KV.get(tickSampleKey(date, hm), "json")).catch(() => null)));
         const samples = [];
         slots.forEach((hm, i) => { if (got[i]) samples.push({ hm, ...got[i] }); });
-        return json({ schema: 1, date, slots: slots.length, n: samples.length, samples },
+        // 拆除提醒的**讀側**（唯讀、純算術，不寫任何東西）：讓打開端點的人一眼看到這班活多久了。
+        // age 一律以**台北今日**計（不是查詢的 date）——問的是「這班活多久」，不是「這份樣本多舊」。
+        const today = taipeiParts().date;
+        return json({ schema: 1, date, slots: slots.length, n: samples.length,
+          since: TICK_SAMPLE_SINCE, age_days: tickAgeDays(today),
+          teardown_due: tickTeardownDue(today), samples },
           { "Cache-Control": "no-store" });
       } catch (e) {
         return json({ error: String((e && e.message) || e) }, { "Cache-Control": "no-store" });
