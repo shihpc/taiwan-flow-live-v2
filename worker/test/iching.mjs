@@ -71,6 +71,8 @@ const SAT = taipeiParts(tpe("2026-09-12T22:30:00"));
   const r2 = await dispatchIching(env, WEEKDAY_2330, fetchFn, noSleep);
   chk("無 token → skipped no-token、不打 GitHub", r1.skipped === "no-token" && r2.skipped === "no-token" && calls.gh.length === 0);
   chk("有通道 → 當日只告警一則", calls.hook.length === 1 && calls.hook[0].includes("iching"), JSON.stringify(calls.hook));
+  chk("文案明示無 GH cron 兜底（不沿用共用的『下游 GH 兜底 cron 仍會跑』）",
+    calls.hook[0].includes("無 GH cron 兜底") && !calls.hook[0].includes("兜底 cron 仍會跑"), calls.hook[0]);
   chk("KV 去重鍵已寫", kv.m.has(alertedKey(WEEKDAY.date, "secret-missing-iching")));
   const { calls: c2, fetchFn: f2 } = mockNet([204]);
   const r3 = await dispatchIching({ FLOW_KV: mockKV() }, WEEKDAY, f2, noSleep);

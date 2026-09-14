@@ -1437,9 +1437,9 @@ async function probeSignal(env, sig, date, fetchFn = fetch) {
 export function alertChannelReady(env) {
   return !!(env.ALERT_WEBHOOK || (env.LINE_TOKEN && env.LINE_USER_ID));
 }
-export async function alertSecretMissing(env, tp, job, missing, fetchFn = fetch) {
+export async function alertSecretMissing(env, tp, job, missing, fetchFn = fetch, tail = "下游 GH 兜底 cron 仍會跑") {
   const tag = `secret-missing-${job}`;
-  const text = `❌ ${job} 停擺：缺 secret ${missing.join("、")}（wrangler secret put），本班不會 dispatch；下游 GH 兜底 cron 仍會跑`;
+  const text = `❌ ${job} 停擺：缺 secret ${missing.join("、")}（wrangler secret put），本班不會 dispatch；${tail}`;
   console.error(`${tag}: ${text}`);
   if (!alertChannelReady(env)) {
     console.error(`${tag}: 告警通道（ALERT_WEBHOOK 或 LINE_TOKEN＋LINE_USER_ID）亦未設，無法送出`);
@@ -1514,7 +1514,8 @@ const ICHING_WF = "daily.yml";
 export async function dispatchIching(env, tp = taipeiParts(), fetchFn = fetch, sleepFn = sleep) {
   if (tp.dow < 1 || tp.dow > 5) return { skipped: "weekend" };   // cron 已限週一～五，程式再守一次（Quartz dow 誤植的前例）
   if (!env.GH_DISPATCH_TOKEN) {
-    await alertSecretMissing(env, tp, "iching", ["GH_DISPATCH_TOKEN"], fetchFn);
+    await alertSecretMissing(env, tp, "iching", ["GH_DISPATCH_TOKEN"], fetchFn,
+      `${ICHING_REPO} 無 GH cron 兜底，今日不會計分（請 wrangler secret put 後手動 Run workflow）`);   // 共用文案的預設尾句對本班不成立
     return { skipped: "no-token" };
   }
   try {
