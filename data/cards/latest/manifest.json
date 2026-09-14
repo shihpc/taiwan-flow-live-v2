@@ -1,13 +1,13 @@
 {
- "date": "2026-09-11",
- "generated_at": "2026-09-12T01:43:15+08:00",
+ "date": "2026-09-14",
+ "generated_at": "2026-09-14T22:01:03+08:00",
  "images": {
-  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-09-11",
-  "v2-dash-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-dash-1.png?d=2026-09-11",
-  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-09-11",
-  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-09-11",
-  "pm-aetf-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-2.png?d=2026-09-11",
-  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-09-11"
+  "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-09-14",
+  "v2-dash-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-dash-1.png?d=2026-09-14",
+  "flows-foreign-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-foreign-1.png?d=2026-09-14",
+  "flows-trust-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/flows-trust-1.png?d=2026-09-14",
+  "pm-aetf-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-2.png?d=2026-09-14",
+  "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-09-14"
  },
  "ratios": {
   "v2-ov-6": "987:1024",
