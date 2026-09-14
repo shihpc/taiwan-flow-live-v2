@@ -7,7 +7,7 @@ import worker, { summarizeTickRows, tickSampleSlots, tickSampleKey, TICK_SAMPLE_
   runTickSample, dispatchRoleForCron, scheduledRole, taipeiParts,
   TICK_FETCH_TIMEOUT_MS, TICK_BODY_TIMEOUT_MS, TICK_CANCEL_TIMEOUT_MS, TICK_TIMEOUT_NAME,
   tickWithTimeout, TICK_SAMPLE_SINCE, TICK_TEARDOWN_DUE_DAYS, tickAgeDays,
-  tickTeardownDue, TICK_KV_TIMEOUT_MS, TICK_ALERT_TIMEOUT_MS } from "../src/index.js";
+  tickTeardownDue, TICK_KV_TIMEOUT_MS, TICK_ALERT_TIMEOUT_MS, TICK_TIME_KEYS } from "../src/index.js";
 
 let pass = 0, fail = 0;
 // 逾時那幾條會刻意放生一票永不 resolve 的 promise（Promise.race 不取消底層操作）。放生本身
@@ -58,7 +58,7 @@ const SRC = readFileSync(new URL("../src/index.js", import.meta.url), "utf-8");
   chk("邊界 13:43:59 不算 d13", s.d13 === 0, String(s.d13));
 }
 
-// ---- summarizeTickRows：時間欄位名不靠印象（依序試 time/Time/datetime/Datetime）----
+// ---- summarizeTickRows：時間欄位名不靠印象（依序試 time/Time/datetime/Datetime/date）----
 {
   chk("tk=Time", summarizeTickRows([{ Time: "09:00:00" }]).tk === "Time");
   chk("tk=datetime（且吃得下 'YYYY-MM-DD HH:MM:SS' 形狀）",
@@ -68,8 +68,54 @@ const SRC = readFileSync(new URL("../src/index.js", import.meta.url), "utf-8");
     && summarizeTickRows([{ datetime: "2026-09-09 13:50:00" }]).d13 === 1);
   chk("tk=Datetime", summarizeTickRows([{ Datetime: "09:00:00" }]).tk === "Datetime");
   const none = summarizeTickRows([{ price: 1 }, { price: 2 }]);
-  chk("四個欄位名都沒有 → tk=null 且不拋錯", none.tk === null && none.n === 2
+  chk("五個欄位名都沒有 → tk=null 且不拋錯", none.tk === null && none.n === 2
     && eq(none.seg, { a: 0, b: 0, c: 0 }), JSON.stringify(none));
+}
+
+// ---- summarizeTickRows：2026-09-14 首日實測的真實列形狀（時戳在 `date` 欄）----
+// 這一節的 fixture 不是憑印象造的：首日 132/132 格 `tk` 全為 `null`、分段整天零資訊，
+// 回頭比對 `/tickdiag` 樣本的 `dates` 欄（`{ date: "2026-09-14 08:45:00", ... }`）才發現
+// FinMind `TaiwanFuturesTick` 把**完整時戳**放在 `date`，而原本的四個鍵名一個都沒有。
+// 這支測試鎖的就是「這個形狀量得出段」，避免鍵名日後被清掉又變成整天沒資訊。
+{
+  const rows = [
+    { date: "2026-09-14 07:30:00", futures_id: "TX", contract_date: "202609", price: 24000 }, // seg.a
+    { date: "2026-09-14 08:45:00", futures_id: "TX", contract_date: "202609", price: 24005 }, // seg.b（首日實測最早的一列）
+    { date: "2026-09-14 13:20:00", futures_id: "TX", contract_date: "202609", price: 24010 }, // seg.b，不算 d13
+    { date: "2026-09-14 13:44:00", futures_id: "TX", contract_date: "202610", price: 24015 }, // seg.b + d13（下界含）
+    { date: "2026-09-14 13:59:59", futures_id: "TX", contract_date: "202610", price: 24020 }, // seg.b + d13
+    { date: "2026-09-14 14:00:00", futures_id: "TX", contract_date: "202612", price: 24025 }, // seg.c（上界不含）
+    { date: "2026-09-14 15:00:00", futures_id: "TX", contract_date: "202612", price: 24030 }, // seg.c
+  ];
+  const s = summarizeTickRows(rows);
+  chk("真實形狀：tk 偵測到 date", s.tk === "date", String(s.tk));
+  chk("真實形狀：seg 仍依 08:00 / 14:00 分段", eq(s.seg, { a: 1, b: 4, c: 2 }), JSON.stringify(s.seg));
+  chk("真實形狀：d13 = [13:44,14:00) 的列數", s.d13 === 2, String(s.d13));
+  chk("真實形狀：mn/mx 是完整時戳字串（看得出上游格式）",
+    s.mn === "2026-09-14 07:30:00" && s.mx === "2026-09-14 15:00:00", `${s.mn} / ${s.mx}`);
+  chk("真實形狀：n/ct 不受影響", s.n === 7 && s.ct === 3, `${s.n} / ${s.ct}`);
+  // 這個形狀下 `dates` 蒐集到的是**時戳**不是日期（線上樣本即如此），讀樣本時別誤判
+  chk("真實形狀：dates 蒐到的是時戳（前 5 筆、已排序）",
+    s.dates.length === 5 && s.dates[0] === "2026-09-14 07:30:00"
+    && s.dates[4] === "2026-09-14 13:59:59", JSON.stringify(s.dates));
+}
+
+// ---- summarizeTickRows：`date` 必須排在優先序**最後**（補鍵名只增不減）----
+// 上游哪天真的給出 `time`／`datetime` 時，`tk` 與分段都要以那個欄位為準；
+// `date` 只是 2026-09-14 實測下的後備。d13 是這裡的判別器：以 time(13:50) 算得 1，
+// 以 date(08:45) 算則是 0，所以這支測試分得出「到底用了哪個欄位」。
+{
+  const both = summarizeTickRows([
+    { time: "13:50:00.000000", date: "2026-09-14 08:45:00", contract_date: "202609" },
+  ]);
+  chk("同時有 time 與 date → tk 取 time", both.tk === "time", String(both.tk));
+  chk("同時有 time 與 date → 分段依 time（d13=1、mn 為 time 字串）",
+    both.d13 === 1 && both.mn === "13:50:00.000000", `${both.d13} / ${both.mn}`);
+  const dt = summarizeTickRows([{ datetime: "2026-09-14 13:50:00", date: "2026-09-14 08:45:00" }]);
+  chk("同時有 datetime 與 date → tk 取 datetime", dt.tk === "datetime", String(dt.tk));
+  chk("TICK_TIME_KEYS 的 date 在最後一位",
+    TICK_TIME_KEYS[TICK_TIME_KEYS.length - 1] === "date" && TICK_TIME_KEYS.length === 5,
+    JSON.stringify(TICK_TIME_KEYS));
 }
 
 // ---- summarizeTickRows：空／非陣列輸入不得拋錯（採樣班不能因一次壞回應整班掛掉）----

@@ -413,8 +413,13 @@ export const TICK_START_HOUR = 9;         // 台北 09:00 起（要涵蓋上午�
 export const TICK_END_HOUR = 20;          // 台北 20:00 前（19:55 為最後一輪）
 export const TICK_SAMPLE_TTL = 7 * 86400; // 樣本保留 7 天（量測用，過期自動清）
 export const tickSampleKey = (dateISO, hm) => `tick:${dateISO.replaceAll("-", "")}:${hm}`;
-// 時間欄位名不靠印象：依序試這四個，量到哪個就記哪個（`tk`）。
-export const TICK_TIME_KEYS = ["time", "Time", "datetime", "Datetime"];
+// 時間欄位名不靠印象：依序試這五個，量到哪個就記哪個（`tk`）。
+// `date` **排在最後**且是後補的（2026-09-14）：首日 132/132 格的 `tk` 全為 `null`＝整天分段零資訊，
+// 實測 FinMind `TaiwanFuturesTick` 把完整時戳放在 **`date`** 欄（形如 `2026-09-14 08:45:00`，
+// 不是純日期），而原本四個鍵名一個都不存在。放最後是為了「只增不減」——上游哪天真的出現
+// `time`／`datetime` 時 `tickTimeKeyOf` 仍會優先取它，既有樣本的 `tk` 語意不變。
+// `tickHm` 本來就吃得下這個形狀（見其上方註解），所以只補鍵名、不動解析。
+export const TICK_TIME_KEYS = ["time", "Time", "datetime", "Datetime", "date"];
 // 尺寸閘門：分兩關，值都用這個門檻，但**擋的東西不同、樣本形狀也不同**（見 runTickSample）：
 //   `skip:"too-large:clen"`＝上游宣告的 content-length 超標 → **連 body 都不讀**，`bytes` 為 `null`；
 //   `skip:"too-large:text"`＝上游沒給 content-length、讀完才發現超標 → 只跳過 `JSON.parse`，`bytes` 有值。
@@ -599,7 +604,7 @@ function tickHm(v) {
 // ★ 讀樣本時務必知道：`seg.a + seg.b + seg.c` **可以小於 `n`**，成因有四種、語意完全不同，
 //   看到總和對不上不可逕自解讀成「那些列不在任何時段」：
 //     ① 該列不是物件（`null`／字串／數字混進 `data`）→ 整列跳過，連 `ct`／`dates` 都不計；
-//     ② **整批偵不到時間欄位**（`TICK_TIME_KEYS` 四個名字全不存在或全為空）→ `tk` 記成 `null`，
+//     ② **整批偵不到時間欄位**（`TICK_TIME_KEYS` 五個名字全不存在或全為空）→ `tk` 記成 `null`，
 //        **三段一律 0、`d13` 也是 0，但 `n` 仍是全部列數**。
 //        ⚠ 所以 **`tk===null` 時 `seg` 全 0 不等於「當下真的沒有列」**——那是「有列但量不到時間」，
 //        判讀第一批樣本時必須先看 `tk`，`tk` 為 null 的樣本在時間分布上**沒有任何資訊量**，
