@@ -1503,6 +1503,33 @@ export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
   console.log(`morning: dispatched ${MORNING_REPO}/${MORNING_WF}`);
   return true;
 }
+// ---- 股市易經每日班（2026-09-14；taiwan-stock-iching docs/P2-DAILY-PLAN.md §7.5）----
+// 台北 22:30 與 23:30、週一～五各 dispatch 一次 taiwan-stock-iching/daily.yml（inputs 空＝T 為台北今日）。
+// 23:30 那班不看 22:30 的結果——daily_run 冪等：已完成→no-op；核心資料未齊→寫 waiting 後再試；週末／假日→no-op。
+// 該 repo 的 daily.yml **沒有 GitHub cron 兜底**（裁定：只 workflow_dispatch），本班就是唯一主觸發，
+// 所以 dispatch 兩次都失敗要走 alertJob（每日每 tag 一則），不像 news 只 log。cron 帶自己的 event.cron
+// 由 dispatchRoleForCron 精確攔截：22:30 落在哨兵窗（minute%5===0）、23:30 落在晚場班窗，不能靠 scheduledRole 分流。
+const ICHING_REPO = "taiwan-stock-iching";
+const ICHING_WF = "daily.yml";
+export async function dispatchIching(env, tp = taipeiParts(), fetchFn = fetch, sleepFn = sleep) {
+  if (tp.dow < 1 || tp.dow > 5) return { skipped: "weekend" };   // cron 已限週一～五，程式再守一次（Quartz dow 誤植的前例）
+  if (!env.GH_DISPATCH_TOKEN) {
+    await alertSecretMissing(env, tp, "iching", ["GH_DISPATCH_TOKEN"], fetchFn);
+    return { skipped: "no-token" };
+  }
+  try {
+    await ghDispatchWithRetry(env, ICHING_REPO, ICHING_WF, fetchFn, sleepFn);
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    console.error(`iching: dispatch ${ICHING_REPO}/${ICHING_WF} 失敗（${msg}）`);
+    await alertJob(env, tp, "iching-dispatch-err",
+      `❌ 股市易經每日班 dispatch 失敗：${msg}（${tp.date} ${String(tp.hour).padStart(2, "0")}:${String(tp.minute).padStart(2, "0")}；` +
+      `無 GH cron 兜底，請手動 Run workflow 或檢查 GH_DISPATCH_TOKEN 是否涵蓋 ${ICHING_REPO}）`, fetchFn);
+    return { dispatched: false, error: msg };
+  }
+  console.log(`iching: dispatched ${ICHING_REPO}/${ICHING_WF}`);
+  return { dispatched: true };
+}
 
 // ---- 排程備援（2026-07-20）：純靠 GitHub schedule 的每日管線，準點檢查產物新鮮度 → 未更新則補發 ----
 // 動機：GitHub Actions schedule 常延遲甚至漏發（2026-07-20 aetf 延遲 2 小時實例）。Worker 在各班
@@ -1570,11 +1597,13 @@ export const BACKUP_CRONS = {
   "35 21 * * *":   "us",           // 台北 05:35（首發 05:05＋30 分；GH 兜底 06:10）；weekend 同樣由 dow 守門
 };
 // 非單體班的排程角色（cron 字串 → 角色；晚場協調班／am summary 輪詢窗）
+export const ICHING_CRON = "30 14,15 * * 2-6";   // 股市易經每日班；需與 wrangler.toml crons 內該條完全一致（UTC 14:30／15:30＝台北 22:30／23:30）
 export const DISPATCH_ROLES = {
   "*/5 13-15 * * 2-6": "evening",      // 台北 21:00–23:55 每 5 分：pm summary→diag 鏈→mktbal 鏈→aetf2
   "50,55 22 * * *":    "summary-am",   // 台北 06:50/06:55 起手（dow 程式守門）
   "*/5 23 * * *":      "summary-am",   // 台北 07:00–07:55 主窗（morning 常態 07:1x 落地）
   "*/10 0 * * *":      "summary-am",   // 台北 08:00–08:50 尾窗兜底（morning 遲到仍趕 09:00 前）
+  [ICHING_CRON]:       "iching",       // 台北 22:30／23:30 週一～五：股市易經每日班（taiwan-stock-iching/daily.yml）
 };
 // 健檢班（2026-07-25 P1）：不 dispatch 任何東西，只「盤點當日該有的產物有沒有落地」→ 缺就告警。
 // 補的是 recheck 之後的最後一個洞：達 BK_MAX_ATTEMPTS 上限、或某條管線根本不在 Worker 管轄
@@ -4680,6 +4709,9 @@ export default {
         // 台指期 tick 量測班（暫時）：只抓一次、寫一把獨立 KV key，不 dispatch 任何東西、
         // 不接哨兵。失敗只 log，絕不影響同一分鐘醒來的其他班（各自獨立 waitUntil）
         ctx.waitUntil(runTickSample(env, tp).catch((e) => console.log("ticksample:", e && e.message)));
+      } else if (droute.kind === "iching") {
+        // 股市易經每日班主觸發（台北 22:30／23:30）：失敗已在函式內告警，這裡只 log；同分醒的哨兵／晚場班各自獨立
+        ctx.waitUntil(dispatchIching(env, tp).catch((e) => console.log("iching:", e && e.message)));
       } else if (droute.kind === "summary-am") {
         ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
         // 晨間圖卡（AM slot，2026-08-10）：同窗並存的第二件事——08:05–08:15 dispatch 渲染、

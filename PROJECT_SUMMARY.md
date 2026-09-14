@@ -22,6 +22,11 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
 
 ## 快速接手
 
+- **股市易經每日班主觸發角色 `iching`（2026-09-14）**：CF cron 第 21 條 `30 14,15 * * 2-6`（台北 22:30／23:30 週一～五）
+  → `dispatchIching` dispatch `taiwan-stock-iching/daily.yml`（`workflow_dispatch`、inputs 空）。該 repo 只 workflow_dispatch、
+  無 GH cron 兜底，故 dispatch 兩次都失敗走 `alertJob`（tag `iching-dispatch-err`）；22:30 撞哨兵窗、23:30 撞晚場班窗，
+  由 `dispatchRoleForCron` 以 `ICHING_CRON` 精確攔截。**前置**：`GH_DISPATCH_TOKEN` 的 PAT 要含 `taiwan-stock-iching`。
+  測試 `node worker/test/iching.mjs`。設計正本在 taiwan-stock-iching `docs/P2-DAILY-PLAN.md` §7.5。
 - **🔬 台指期 tick 量測班上線（2026-09-09）——暫時班，只量測、不下判準**：
   CF cron 第 20 條 `*/5 1-11 * * 2-6`（台北平日 09:00–19:55 每 5 分，132 slot/交易日）
   ＋唯讀端點 `GET /tickdiag`。程式在 `worker/src/index.js` 的 `export async function runTickSample`
