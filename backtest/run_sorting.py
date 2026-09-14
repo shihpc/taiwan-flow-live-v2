@@ -672,6 +672,8 @@ def run_s1(stock_samples, lines):
 def run_s2(stock_samples, lines):
     lines.append("\n# S2. 退出 ∩ 法人賣強度<-5% 排序")
     lines.append("篩選：退出訊號(S≥2 R≤-2% P≤0.3)＋法人賣強度<-5%")
+    lines.append(f"採用門檻＝分離度 ≥{M4_MIN_SPREAD:.2f}%，"
+                 f"**沿用 M4 的先訂門檻、非為本段新訂**（見 M4_MIN_SPREAD 註解）。")
     sig = [r for r in stock_samples
            if r["surge"] >= 2 and r["ret"] <= -0.02 and r["pos"] <= 0.3
            and not r["limd"] and r["ints"] < -0.05]
@@ -689,8 +691,17 @@ def run_s2(stock_samples, lines):
 
     if candidates:
         best = max(candidates, key=lambda x: x[1])
-        lines.append(f"**結論**：排序欄位採用 **{best[0]}**"
-                     f"（分離度 {best[1]:.2f}%，{best[3]}）")
+        # 2026-09-14（使用者裁示 B1-1）：本段原本無採用門檻，對分離度 0.01% 的候選照樣
+        # 宣告「採用」。生產端卡5 早就不排序（worker `fxCardExitSell` 註解「不排序
+        # （回測：候選欄無效）」），所以補門檻只修報告文案、不動任何卡片的出現或排序。
+        # 門檻**沿用** M4 既有的 M4_MIN_SPREAD（訂於 commit cd3ba22，早於 S2 這次檢視），
+        # 不是看著 0.01% 回頭訂的——docs/line-cards-spec.md 第 8 節明文禁止事後挑選。
+        if best[1] < M4_MIN_SPREAD:
+            lines.append(f"**結論**：最佳候選 **{best[0]}** 分離度僅 {best[1]:.2f}%"
+                         f"（{best[3]}），未達先訂門檻 {M4_MIN_SPREAD:.2f}%，卡5 不排序")
+        else:
+            lines.append(f"**結論**：排序欄位採用 **{best[0]}**"
+                         f"（分離度 {best[1]:.2f}%，{best[3]}）")
     else:
         # 同 run_s1：守門上線後這條路徑可達，缺 else 會整段沒有結論行。
         lines.append("**結論**：兩個候選皆無法切分位（樣本不足或無有效變異），卡5 不排序")
