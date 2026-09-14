@@ -116,6 +116,9 @@
 - `frame`：台北 09:00–13:59 每分鐘存 KV frame ＋ `runAlerts`
 - `news`：每日（含週末）06:07–22:07 每小時 :07 → `taiwan-stock-news/build-news.yml`
 - `morning`：平日 06:47 → 本 repo `morning.yml`
+- `iching`（2026-09-14）：台北 22:30 與 23:30 週一～五各一次 → `taiwan-stock-iching/daily.yml`（股市易經每日班主觸發；
+  該 repo 無 GH cron 兜底，dispatch 兩次都失敗走 `alertJob` tag `iching-dispatch-err`；cron `ICHING_CRON` 由 `dispatchRoleForCron`
+  精確攔截，因 22:30 撞哨兵窗、23:30 撞晚場班窗。`GH_DISPATCH_TOKEN` 須涵蓋 `taiwan-stock-iching`。測試 `node test/iching.mjs`）
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
 - `health` 健檢班：台北 23:50（`eve`）、09:30（`morn`），只盤點產物落地與否、不 dispatch。
   低頻班 `lastweek`／`meta` 於 2026-08-30 納入 `eve`（`mode:"lowfreq"`，判準 `export function lowFreqDue`）：

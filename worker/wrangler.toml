@@ -74,6 +74,10 @@ crons = [
   #   09:00-13:59 的 60 個還與 frame cron 自己搶同一把 f:<date>:<HH:MM>）＋ 36 個落 sentinel
   #   （台北 17:00-19:55，每 5 分多跑一次 runSentinel）。dow 同樣是 Quartz 慣例，2-6＝週一~五。
   "*/5 1-11 * * 2-6",        # 20) tick 量測班（台北 09:00-19:55 每 5 分；※ 需與 src/index.js 的 TICK_CRON 完全一致）
+  # 21) 股市易經每日班主觸發（2026-09-14）：台北 22:30 與 23:30 週一~五各 dispatch 一次 taiwan-stock-iching/daily.yml
+  #   （該 repo 只 workflow_dispatch、無 GH cron 兜底）。22:30 與哨兵（*/5 9-14）、23:30 與晚場班（*/5 13-15）同分醒，
+  #   各帶自己的 event.cron，dispatchRoleForCron 以 ICHING_CRON 精確攔截。dow 為 Quartz 慣例，2-6＝週一~五。
+  "30 14,15 * * 2-6",        # 21) ※ 需與 src/index.js 的 ICHING_CRON 完全一致
 ]
 
 # Workers Logs（2026-07-25）：原本 console.log 不落地，事後根本查不到「這班 cron 到底有沒有被叫起來」
@@ -102,4 +106,6 @@ LIVE_TTL = "15"   # /live 聚合結果快取秒數
 #     runBackup（daysummary/aetf/baseline/us/intraday.yml）、runAetf2（aetf.yml）、
 #     runCardsRender（cards.yml）都是 dispatch 本 repo，且 07-22 首日實測全班 conclusion success
 #     （見 PROJECT_SUMMARY「Worker 升格全系統主排程」段）——本 repo 權限早已具備，只是註解沒跟上。
+#     **2026-09-14 起再加 taiwan-stock-iching**（股市易經每日班 dispatchIching → daily.yml）：PAT 的 repository access
+#     要在 GitHub 端加上該 repo（Actions: Read and write），不需重新 secret put；未加時 dispatch 回 404/403 → alertJob。
 #     哨兵／新聞／各主觸發班用來 workflow_dispatch；未設時整段跳過、其餘功能不受影響
