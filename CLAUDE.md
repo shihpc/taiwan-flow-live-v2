@@ -331,7 +331,23 @@
   `dailycards.mjs` 的 DEP `baseline` 條目已同步。資料正常時 `pm-aetf-4/5` 輸出**逐字不變**
   （以 `03841a1` 的 `data/aetf/diff.json`＋`latest.json`＋`baseline.date=2026-09-10`，
   即 pm 窗當下的真實快照，對跑改動前後實測 IDENTICAL）。
-- **`primary_date` 會在台北午夜後跑到隔日（實測，這條會影響非 pm 窗的 `/cards/data`）**：
+- **`primary_date` 口徑 2026-09-14 由 `max()` 改眾數（平手取大），使用者裁示 A1-2**
+  （`src/build_aetf_diff.py` grep `def pick_primary`，測試 `tests/test_aetf_primary.py`）：
+  `max` 的前提是「沒有任何檔會超前多數」，該前提**已不成立**——FinMind 對
+  `00400A`／`00407A`／`00987A`／`00996A` 四檔的日期標記系統性快一天，近 14 個交易日
+  **9 天呈 16/4 分裂**（實查 `data/aetf/2*.json` 的 `src_date`）。**成因不是補位**
+  ——`docs/handoff-aetf-20260816.md:55` 記的「投信端補位造成超前」已過期，
+  14 天 `fallback_used` 全為 `None`、超前四檔的 `source` 皆 `finmind`。
+  眾數之下那 9 天的 `laggards` 由 **16 筆降為 4 筆**、`primary_date` 退回多數那一日，
+  5 個全檔同日的場次輸出**逐字不變**（14 天對跑實測）。
+  **`laggards` 每筆新增 `dir`（`ahead`／`behind`）**——眾數之下兩種都可能，把超前的檔
+  叫「落後」是語意錯誤；`etf`／`src_date` 不動，下游無人消費 `laggards`（grep 只命中
+  本檔與文件）。`fxAetfStale` **一字未改**，仍是嚴格相等。
+  **行為變化只有一處**：台北午夜後那段 `primary_date` 不再跑到隔日，故該時段
+  `/cards/data` 由「三張 aetf 卡缺席」變成「照出」；渲染（22:12）與推播（22:30）窗內
+  兩者本來就相等，**LINE 推播內容零變動**。
+- **（改口徑前的原始紀錄，保留供對照）`primary_date` 會在台北午夜後跑到隔日（實測，
+  這條會影響非 pm 窗的 `/cards/data`）**：
   它取各 ETF 揭露日的領先值，主動 ETF 一旦有人先公告隔日持股就會前進。2026-09-11 01:42
   的 aetf 班實測 `primary_date=2026/09/11`、`laggards=16`——前進的是 **4 檔**
   （`00400A`／`00407A`／`00987A`／`00996A`，`latest.json` 的 `src_date` 皆 `2026-09-11`；

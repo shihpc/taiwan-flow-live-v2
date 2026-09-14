@@ -19,12 +19,14 @@
 # 用法：python src/build_aetf_diff.py
 #
 # 註：FinMind 的 Holding date 為實際持股基準日（已無原 PCF 的 T+1 標記問題），故不再做 T+1 折算；
-#     各檔揭露時點不同時，基準日落後主基準日的檔仍列 laggards、不併入聚合（誠實分組）。
+#     各檔揭露時點不同時，基準日不等於主基準日的檔仍列 laggards、不併入聚合（誠實分組）；
+#     主基準日取「各檔最新基準日的眾數（平手取大）」，laggards 每筆帶 dir 標明超前／落後。
 
 from __future__ import annotations
 import json
 import statistics
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -177,6 +179,23 @@ def prv_date_of(e):
     return (e.get("src_date") or "").replace("-", "/")
 
 
+def pick_primary(dates):
+    """主基準日＝各檔最新基準日的眾數，平手取大（較新的日期）。
+
+    2026-09-14 由 `max()` 改為眾數（使用者裁示 A1-2）。max 的前提是「沒有任何檔會
+    超前多數」，該前提已不成立：FinMind 對國泰／凱基／台新／兆豐 4 檔的日期標記
+    系統性快一天，近 14 個交易日有 9 天呈 16/4 分裂，max 之下那 9 天的午夜後視窗
+    會把「只有 4 檔的聚合」當成當日全貌（實例：diff.json 於 2026-09-11 01:44 寫出
+    primary_date=2026/09/11、laggards=16）。眾數讓聚合站在多數那一側。
+
+    平手取大：兩邊檔數相同時取較新的日期，與原 max 行為同向，不會讓聚合倒退。
+    """
+    cnt = Counter(d for d in dates if d)
+    if not cnt:
+        return None
+    return max(cnt, key=lambda d: (cnt[d], d))
+
+
 def main():
     by = load_snapshots()
     cal = trading_calendar()   # 供收盤價擇日（不再折算 T+1）
@@ -190,7 +209,7 @@ def main():
         if closes:
             break
 
-    # 每檔取最後兩個揭露日 → d1=最新基準日；主基準日=各檔 d1 的最大值（最新交易日）
+    # 每檔取最後兩個揭露日 → d1=最新基準日；主基準日=各檔 d1 的眾數（平手取大），見 pick_primary
     prepared = {}
     for code, snaps in by.items():
         dates = sorted(snaps)
@@ -198,7 +217,7 @@ def main():
             print(f"{code}: 僅 {len(dates)} 個揭露日，跳過", flush=True)
             continue
         prepared[code] = (dates[-2], dates[-1], snaps)
-    primary = max((d1 for (_, d1, _) in prepared.values()), default=None)
+    primary = pick_primary([d1 for (_, d1, _) in prepared.values()])
 
     laggards = []
     for code, (d0, d1, snaps) in prepared.items():
@@ -206,10 +225,13 @@ def main():
         rows, summary = diff_one(code, snaps[d1], snaps[d0], closes, raws, rnames)
         summary["d0"], summary["d1"] = d0, d1
         out["etfs"][code] = summary          # 每檔明細照存（前端總覽逐檔顯示）
-        # 誠實分組：基準日落後主基準日的檔不併入 stocks/subs 聚合，另列 laggards
+        # 誠實分組：基準日不等於主基準日的檔不併入 stocks/subs 聚合，另列 laggards
+        # dir 區分超前／落後：眾數之下兩種都可能，把超前的檔叫「落後」是語意錯誤
         if d1 != primary:
-            laggards.append({"etf": code, "src_date": d1})
-            print(f"{code}: 基準日 {d1} 落後主基準日 {primary}，列 laggard 不併入聚合", flush=True)
+            direction = "ahead" if d1 > primary else "behind"
+            laggards.append({"etf": code, "src_date": d1, "dir": direction})
+            word = "超前" if direction == "ahead" else "落後"
+            print(f"{code}: 基準日 {d1} {word}主基準日 {primary}，列 laggard 不併入聚合", flush=True)
             continue
         latest_dates.append(d1)
         for r in rows:
@@ -250,7 +272,9 @@ def main():
              "etfs": out["etfs"], "stocks": stocks, "subs": subs}
     (ADIR / "diff.json").write_text(json.dumps(final, ensure_ascii=False, separators=(",", ":")),
                                     encoding="utf-8")
-    print(f"diff.json：主基準日 {primary}、聚合 {len(latest_dates)} 檔、落後 {len(laggards)} 檔、"
+    n_ahead = sum(1 for x in laggards if x["dir"] == "ahead")
+    print(f"diff.json：主基準日 {primary}、聚合 {len(latest_dates)} 檔、"
+          f"超前 {n_ahead} 檔、落後 {len(laggards) - n_ahead} 檔、"
           f"個股異動 {len(stocks)}、次產業 {len(subs)}")
 
 
