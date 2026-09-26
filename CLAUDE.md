@@ -481,12 +481,13 @@
   仍是渲染端實際生效的防線，不可因「上游已有測試」而拿掉**。
 - 測試：`node test/morningcards.mjs`（含 `fxSplitQuote` 的分句與截斷案例）。
 
-## /status 全系統資料健康端點（2026-08-11；2026-09-07 改六站＋時間感知判級）
+## /status 全系統資料健康端點（2026-08-11；2026-09-07 改六站＋時間感知判級；2026-09-26 加第七站 iching）
 
-`GET /status` 回**六站**（live／flows／news／brief／postmkt／backtest）的 `data_date`／
+`GET /status` 回**七站**（live／flows／news／brief／postmkt／backtest／iching）的 `data_date`／
 `updated_at`／紅黃綠 `level`（`export async function buildStatus`，cf 快取 5 分）。
 **schema 形狀與欄位名不動**（`schema:1`，入口站 shihpc.github.io 與 claude-harness
-`tools/freshness_watchdog.py` 共用這個資料面）；新站一律**附加在既有五站之後**，不改順序。
+`tools/freshness_watchdog.py` 共用這個資料面）；新站一律**附加在既有六站之後**，不改順序
+（2026-09-26 iching 即附加在 backtest 之後，`test/status.mjs` 以改動前的六站 JSON 逐位釘住前六站輸出）。
 判級全是可測純函式、台北時區、**國定假日不處理**；單站失敗只染紅該站、不垮端點
 （`Promise.allSettled`）。測試 `node test/status.mjs`。
 
@@ -498,6 +499,10 @@ date/generated_at；backtest 抓 `taiwan-backtest/walkforward/ledger.csv`，**�
 fetchStatusTail`；2026-09-07 curl 實測 raw.githubusercontent.com 回 206＋
 `content-range: bytes 55-174/175`，確認支援後綴範圍）再由 `export function extractTailDate`
 由後往前取第一列 `YYYY-MM-DD,`。CDN 若忽略 Range 回 200 全檔，兩支都有串流回退、不整包載入。
+iching 抓 `taiwan-stock-iching/data/web/latest.json`（`ICHING_STATUS_URL`，約 1.36MB，2026-09-26 實查
+1,357,182 bytes），同 postmkt 手法 **Range 只取檔頭**再 `extractHeadFields` 撈 `date`（sort_keys 後在前 70 bytes）；
+**該檔沒有 `generated_at`**（檔頭實查：`calibrated`／`data_version`／`date`／`generated_from`／`market`…），
+故 `updated_at` 固定 `null`——不拿 `generated_from` 之類的欄位臆造（同 backtest 立場）。
 
 **時間感知判級（2026-09-07）**：舊 `gradeMarket` 不看時間、平日一律期待「今日」資料，但各站
 盤後管線是晚上才跑——**postmkt 每個平日從 00:00 到當晚產出為止都是 yellow（約 21/24 小時）**，
@@ -516,6 +521,7 @@ fetchStatusTail`；2026-09-07 curl 實測 raw.githubusercontent.com 回 206＋
 | flows | 20 | `taiwan-flows/index.html` 的 `function lastDueTradingDay`（平日 `hour>=20` 才期待今日），同後端 `src/run_daily.py` 的 `PUBLISH_DEADLINE_HOUR = 20` |
 | postmkt | 22.5 | `postmkt/index.html` 的 `function pmStatus`：資料日為上一交易日且 `hm < "22:30"` 仍判「正常」 |
 | brief | 8 | `claude-harness/tools/freshness_watchdog.py` 的 `DAILY_CUTOFF = time(8, 0)`＋`daily_target()`／`judge_brief()`（「08:00 後 date 應＝今日；08:00 前應＝昨日」）。**2026-09-08 補上**，見下段 |
+| iching | 23.75 | **2026-09-26 使用者裁定 23:45**。該站前端**沒有**新鮮度判級可對齊，依據改取**實際 commit 時刻**：主班由本 Worker 台北 22:30 dispatch（`ICHING_CRON`），實測 commit 落在台北 22:32～22:59；補叫班 23:30 → 實測 23:34 落地；再加 raw CDN `max-age=300` ＋本端點 cf 快取 5 分，最壞約 23:44 才看得到 → 取 23.75 使「補叫班才成功」的日子也無假黃。**不得 ≥24**（`dueReached` 永不成立、那站永遠期待前一交易日、真缺料判不出來；`test/status.mjs` 有 `< 24` 斷言）。走 `gradeMarket` 的**交易日**階梯（每日班 cron 只排週一～五）；國定假日與家族同立場不處理，隔晚會誤報一次 yellow |
 
 `gradeNews` 不受影響（本來就看 `generated_at` 距今時數）。
 
@@ -589,6 +595,14 @@ p90 4h44m／最大 **12h23m**；>4h 12.8%、>10h **2 筆(1.1%)**、>14h 0 筆。
 **入口站已接上（2026-09-07，commit `be4877a`）**：shihpc.github.io 的「策略回測」卡已在 `PROJECTS`
 那筆補上 `statusId:"backtest"`（見該 repo CLAUDE.md「五張卡」表），Hub 上會顯示這顆點。
 本站 `/status` 的 backtest 站即為它的資料來源。
+
+**第七站 iching（2026-09-26，入口站接入第一步）**：`buildStatus` 的 `defs` 末尾附加
+`{ id:"iching", name:"股市易經", grade:"market", due:STATUS_DUE_HOUR.iching }`，來源與 dueHour 見上文。
+**iching 刻意不納入 claude-harness `freshness_watchdog.py`**（使用者 2026-09-26 裁定），所以與 postmkt／
+brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處要改兩處」的對應項；看門狗那邊也不會為 iching
+補位（本 Worker 掛掉時 iching 的燈沒有第二雙眼睛）。入口站 `shihpc.github.io` 的卡片 `statusId:"iching"`
+屬下一步、另案處理；本站 `/status` 已先回 7 站（2026-09-26 現況：`data_date=2026-09-24`，週六看週五 09-25
+→ 落後 1 格 yellow 是真實狀態，不是假黃）。
 
 ## 資料是姊妹站上游（跨站變更）
 

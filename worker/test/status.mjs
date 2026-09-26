@@ -295,18 +295,41 @@ const okFetch = async (u, init) => {
     return { ok: true, status: 206, text: async () =>
       "0.0,46151.2,stop,-350.8,-350.8\n2026-08-11,2026-08-10,0.00114,小漲0~1%,多0845,08:45,46500.0,46151.2,stop,-12.5,-363.3\n" };
   }
+  if (s.endsWith("/taiwan-stock-iching/main/data/web/latest.json")) {
+    // 第七站 iching（2026-09-26）：latest.json 約 1.36MB，必須帶 Range 只取檔頭（比照 postmkt：未帶 Range 回 500）。
+    // 檔頭形狀＝線上 2026-09-26 curl 實查（sort_keys、**頂層無 generated_at**、有一個容易看錯的 generated_from）。
+    // 兩個陷阱刻意放進 fixture：①generated_from 的日期**與 date 不同**（撈錯欄位就會露餡）；
+    // ②date 之後、2KB 內放一個**非頂層**的 "generated_at"（market 底下）——extractHeadFields 的 regex 不分層級、
+    // 會撈到它，所以 buildStatus 必須寫死 updated_at: null，不能用 h.generated_at。
+    if (!init || !init.headers || !init.headers.Range) return { ok: false, status: 500, text: async () => "" };
+    return { ok: true, status: 206, text: async () =>
+      '{"calibrated":true,"data_version":"fm-20260911-01","date":"2026-08-11","generated_from":"data/scores/2026-08-10.json","market":{"generated_at":"2026-08-11T00:00:00+08:00","close":' };
+  }
   return { ok: false, status: 404, json: async () => null, text: async () => "" };
 };
+// 改動前（bdcd486，六站版）同一 fixture 的 sites 輸出，逐位釘住：第七站附加後前六站不得有任何位元變化。
+// 三組分別對應下方 okFetch/TUE、eodFetch/週一 18:12、eodFetch/週一 23:00 三個整合案例。
+// 取 iching 站：找不到時記一筆乾淨的 fail 並回空物件（後續斷言照常 fail，不會 TypeError 崩掉整支測試）
+const ichingOf = (out, ctx = "") => {
+  const x = out && Array.isArray(out.sites) ? out.sites.find((y) => y && y.id === "iching") : undefined;
+  if (!x) chk(`iching 站存在於 sites ${ctx}`, false, out && out.sites ? out.sites.map((y) => y.id).join(",") : String(out));
+  return x || {};
+};
+const SIX_BEFORE_OK = '[{"id":"live","name":"即時類股動態","data_date":"2026-08-11","updated_at":"2026-08-11T13:30:00+08:00","level":"green","note":"2026-08-11 共 3 格 frame"},{"id":"flows","name":"盤後法人動態","data_date":"2026-08-11","updated_at":"2026-08-11T21:30:00+08:00","level":"green","note":"健檢 ok"},{"id":"news","name":"新聞晨報","data_date":"2026-08-11","updated_at":"2026-08-11T21:52:00+08:00","level":"green","note":"42 則新聞"},{"id":"brief","name":"每日晨報","data_date":"2026-08-11","updated_at":"2026-08-11T07:30:00+08:00","level":"green","note":"第 3 版"},{"id":"postmkt","name":"盤後分析","data_date":"2026-08-11","updated_at":"2026-08-11T21:01:04+08:00","level":"green","note":""},{"id":"backtest","name":"策略回測","data_date":"2026-08-11","updated_at":null,"level":"green","note":"walkforward 帳冊"}]';
+const SIX_BEFORE_EOD_1812 = '[{"id":"live","name":"即時類股動態","data_date":"2026-09-07","updated_at":"2026-09-07T13:30:00+08:00","level":"green","note":"2026-09-07 共 2 格 frame"},{"id":"flows","name":"盤後法人動態","data_date":"2026-09-04","updated_at":"2026-09-04T23:40:00+08:00","level":"green","note":"健檢 ok"},{"id":"news","name":"新聞晨報","data_date":"2026-09-04","updated_at":"2026-09-07T17:07:00+08:00","level":"green","note":"20 則新聞"},{"id":"brief","name":"每日晨報","data_date":"2026-09-07","updated_at":"2026-09-07T07:30:00+08:00","level":"green","note":"第 30 版"},{"id":"postmkt","name":"盤後分析","data_date":"2026-09-04","updated_at":"2026-09-04T22:05:00+08:00","level":"green","note":""},{"id":"backtest","name":"策略回測","data_date":"2026-09-04","updated_at":null,"level":"green","note":"walkforward 帳冊"}]';
+const SIX_BEFORE_EOD_2300 = '[{"id":"live","name":"即時類股動態","data_date":"2026-09-07","updated_at":"2026-09-07T13:30:00+08:00","level":"green","note":"2026-09-07 共 2 格 frame"},{"id":"flows","name":"盤後法人動態","data_date":"2026-09-04","updated_at":"2026-09-04T23:40:00+08:00","level":"yellow","note":"健檢 ok"},{"id":"news","name":"新聞晨報","data_date":"2026-09-04","updated_at":"2026-09-07T17:07:00+08:00","level":"yellow","note":"20 則新聞"},{"id":"brief","name":"每日晨報","data_date":"2026-09-07","updated_at":"2026-09-07T07:30:00+08:00","level":"green","note":"第 30 版"},{"id":"postmkt","name":"盤後分析","data_date":"2026-09-04","updated_at":"2026-09-04T22:05:00+08:00","level":"yellow","note":""},{"id":"backtest","name":"策略回測","data_date":"2026-09-04","updated_at":null,"level":"yellow","note":"walkforward 帳冊"}]';
 {
   const kv = fakeKV({ "fi:2026-08-11": ["09:01", "09:02", "13:30"] });
   const out = await buildStatus({ FLOW_KV: kv }, TUE, okFetch, NOW);
   chk("schema:1＋generated_at＋status:ok", out.schema === 1 && out.status === "ok" && /\+08:00$/.test(out.generated_at));
-  chk("六站齊全且順序 live/flows/news/brief/postmkt/backtest（既有五站順序不動，backtest 附加在後）",
-    out.sites.map((s) => s.id).join(",") === "live,flows,news,brief,postmkt,backtest",
+  chk("七站齊全且順序 live/flows/news/brief/postmkt/backtest/iching（既有六站順序不動，iching 附加在後）",
+    out.sites.map((s) => s.id).join(",") === "live,flows,news,brief,postmkt,backtest,iching",
     out.sites.map((s) => s.id).join(","));
+  chk("前六站輸出與改動前（六站版）逐位相同", JSON.stringify(out.sites.slice(0, 6)) === SIX_BEFORE_OK,
+    JSON.stringify(out.sites.slice(0, 6)));
   chk("每站欄位齊全（id/name/data_date/updated_at/level/note）",
     out.sites.every((s) => ["id", "name", "data_date", "updated_at", "level", "note"].every((k) => k in s)));
-  chk("全鮮 → 六站 green", out.sites.every((s) => s.level === "green"),
+  chk("全鮮 → 七站 green", out.sites.every((s) => s.level === "green"),
     out.sites.map((s) => `${s.id}:${s.level}`).join(" "));
   const bt = out.sites[5];
   chk("backtest：資料日＝帳冊最後一列、updated_at 為 null（帳冊無產出時刻欄，不臆造）",
@@ -316,6 +339,15 @@ const okFetch = async (u, init) => {
   chk("live 用 KV frame 索引（資料日＝今天、updated_at＝最後格）",
     live.data_date === "2026-08-11" && live.updated_at === "2026-08-11T13:30:00+08:00");
   chk("brief 判 date 而非 generated_at", out.sites[3].data_date === "2026-08-11");
+  const ic = out.sites[6] || {};
+  chk("iching：index 6、資料日取檔頭 date、updated_at 固定 null、note 空字串",
+    ic.id === "iching" && ic.name === "股市易經" && ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "",
+    JSON.stringify(ic));
+  chk("iching：data_date 取頂層 date（2026-08-11），不是 generated_from 的 2026-08-10",
+    ic.data_date === "2026-08-11" && ic.data_date !== "2026-08-10", JSON.stringify(ic));
+  chk("iching：檔頭 2KB 內有非頂層 generated_at 時 updated_at 仍 null（寫死、不用 h.generated_at）",
+    ic.updated_at === null && extractHeadFields('"date":"x","market":{"generated_at":"2026-08-11T00:00:00+08:00"').generated_at !== null,
+    JSON.stringify(ic));
 }
 {
   // 今日無 frame → 回退前一交易日 → yellow
@@ -338,8 +370,8 @@ const okFetch = async (u, init) => {
   chk("flows 失敗 → 該站 red＋note 說明＋日期 null",
     out.sites[1].level === "red" && out.sites[1].note.includes("boom") && out.sites[1].data_date === null);
   chk("postmkt 404 → 該站 red", out.sites[4].level === "red" && out.sites[4].note.includes("404"));
-  chk("其餘站不受拖累（live/news/brief 仍 green）",
-    out.sites[0].level === "green" && out.sites[2].level === "green" && out.sites[3].level === "green");
+  chk("其餘站不受拖累（live/news/brief/backtest/iching 仍 green）",
+    [0, 2, 3, 5, 6].every((i) => (out.sites[i] || {}).level === "green"), out.sites.map((x) => `${x.id}:${x.level}`).join(" "));
   chk("端點整體仍成功回應（schema/status 不變）", out.schema === 1 && out.status === "ok");
 }
 {
@@ -359,7 +391,7 @@ const okFetch = async (u, init) => {
 }
 
 {
-  // backtest 單站失敗（帳冊抓不到）→ 只染紅該站，端點與其餘五站不受影響
+  // backtest 單站失敗（帳冊抓不到）→ 只染紅該站，端點與其餘六站不受影響
   const noLedger = async (u, init) => {
     if (String(u).endsWith("/ledger.csv")) return { ok: false, status: 404, text: async () => "" };
     return okFetch(u, init);
@@ -367,8 +399,8 @@ const okFetch = async (u, init) => {
   const kv = fakeKV({ "fi:2026-08-11": ["09:01"] });
   const out = await buildStatus({ FLOW_KV: kv }, TUE, noLedger, NOW);
   chk("backtest 404 → 該站 red＋note 說明", out.sites[5].level === "red" && out.sites[5].note.includes("404"));
-  chk("backtest 失敗不垮端點：其餘五站照常 green＋schema 不變",
-    out.schema === 1 && out.status === "ok" && out.sites.slice(0, 5).every((x) => x.level === "green"));
+  chk("backtest 失敗不垮端點：其餘六站照常 green＋schema 不變",
+    out.schema === 1 && out.status === "ok" && out.sites.filter((x) => x.id !== "backtest").every((x) => x.level === "green"));
   // 帳冊抓得到但無可解析的日期列（空檔／欄位壞掉）→ red，仍不垮端點
   const emptyLedger = async (u, init) => {
     if (String(u).endsWith("/ledger.csv")) return { ok: true, status: 206, text: async () => "date,sox_date,cum_pnl\n" };
@@ -407,6 +439,8 @@ const okFetch = async (u, init) => {
     if (s2.endsWith("/daily-brief-card.json")) return { ok: true, status: 200, json: async () => ({ date: "2026-09-07", edition: 30, generated_at: "2026-09-07T07:30:00+08:00" }) };
     if (s2.endsWith("/postmkt.json")) return { ok: true, status: 206, text: async () => '{"date":"2026-09-04","generated_at":"2026-09-04T22:05:00+08:00","margin":{' };
     if (s2.endsWith("/ledger.csv")) return { ok: true, status: 206, text: async () => "date,a\n2026-09-04,1\n" };
+    if (s2.endsWith("/taiwan-stock-iching/main/data/web/latest.json")) return { ok: true, status: 206, text: async () =>
+      '{"calibrated":true,"data_version":"fm-20260911-01","date":"2026-09-04","generated_from":"data/scores/2026-09-03.json","market":{"generated_at":"2026-09-04T00:00:00+08:00","close":' };
     return { ok: false, status: 404, json: async () => null, text: async () => "" };
   };
   // live 是盤中站，週一 18:12 本來就該有當日 frame（09:00 分水嶺已過）——給今日 frame，
@@ -414,8 +448,10 @@ const okFetch = async (u, init) => {
   const kv = fakeKV({ "fi:2026-09-07": ["09:01", "13:30"] });
   const out = await buildStatus({ FLOW_KV: kv }, MON, eodFetch, MON_NOW);
   const byId = Object.fromEntries(out.sites.map((x) => [x.id, x]));
-  chk("端到端：六站全 green（假黃燈消失）", out.sites.every((x) => x.level === "green"),
+  chk("端到端：七站全 green（假黃燈消失）", out.sites.every((x) => x.level === "green"),
     out.sites.map((x) => `${x.id}:${x.level}`).join(" "));
+  chk("端到端：前六站輸出與改動前逐位相同（週一 18:12）", JSON.stringify(out.sites.slice(0, 6)) === SIX_BEFORE_EOD_1812,
+    JSON.stringify(out.sites.slice(0, 6)));
   chk("端到端：data_date 語意不動（postmkt 仍回報 2026-09-04）", byId.postmkt.data_date === "2026-09-04");
   chk("端到端：舊版同一份資料會判 yellow（證明差別來自時間感知，不是資料變了）",
     gradeMarket(byId.postmkt.data_date, MON) === "yellow" && gradeMarket(byId.flows.data_date, MON) === "yellow");
@@ -428,6 +464,10 @@ const okFetch = async (u, init) => {
     out23.sites.map((x) => `${x.id}:${x.level}`).join(" "));
   chk("端到端 23:00：backtest 轉 yellow（台北 21:07~隔日 01:07 等待窗）", b23.backtest.level === "yellow");
   chk("端到端 23:00：live 有今日 frame → 仍 green（不被鄰站拖累）", b23.live.level === "green");
+  chk("端到端 23:00：iching 停在上一交易日 → 仍 green（dueHour 23:45 未到）、updated_at null",
+    ichingOf(out23, "(23:00)").level === "green" && ichingOf(out23, "(23:00)").updated_at === null);
+  chk("端到端：前六站輸出與改動前逐位相同（週一 23:00，含三顆 yellow）", JSON.stringify(out23.sites.slice(0, 6)) === SIX_BEFORE_EOD_2300,
+    JSON.stringify(out23.sites.slice(0, 6)));
   // live 的 dueHour=9：同樣「只有上一交易日 frame」，盤前 08:00 是 green、盤後 09:30 是 yellow
   const kvFri = fakeKV({ "fi:2026-09-04": ["09:01", "13:30"] });
   const pre = await buildStatus({ FLOW_KV: kvFri }, { date: "2026-09-07", dow: 1, hour: 8, minute: 0 }, eodFetch, MON_NOW);
@@ -461,16 +501,108 @@ const okFetch = async (u, init) => {
   const out = await buildStatus({ FLOW_KV: kv }, TUE, okFetch, NOW);
   chk("頂層鍵恰為 schema/generated_at/status/sites",
     Object.keys(out).sort().join(",") === "generated_at,schema,sites,status", Object.keys(out).join(","));
-  chk("sites 為長度 6 的陣列", Array.isArray(out.sites) && out.sites.length === 6);
+  chk("sites 為長度 7 的陣列", Array.isArray(out.sites) && out.sites.length === 7);
   chk("每站鍵恰為 id/name/data_date/updated_at/level/note（無新增欄位）",
     out.sites.every((x) => Object.keys(x).sort().join(",") === "data_date,id,level,name,note,updated_at"),
     JSON.stringify(Object.keys(out.sites[5])));
   chk("level 值域仍只有 green/yellow/red",
     out.sites.every((x) => ["green", "yellow", "red"].includes(x.level)));
-  chk("六站 id/name 對照", out.sites.map((x) => `${x.id}=${x.name}`).join(",") ===
-    "live=即時類股動態,flows=盤後法人動態,news=新聞晨報,brief=每日晨報,postmkt=盤後分析,backtest=策略回測",
+  chk("七站 id/name 對照", out.sites.map((x) => `${x.id}=${x.name}`).join(",") ===
+    "live=即時類股動態,flows=盤後法人動態,news=新聞晨報,brief=每日晨報,postmkt=盤後分析,backtest=策略回測,iching=股市易經",
     out.sites.map((x) => `${x.id}=${x.name}`).join(","));
-  chk("JSON 可序列化且無 undefined", JSON.parse(JSON.stringify(out)).sites.length === 6);
+  chk("JSON 可序列化且無 undefined", JSON.parse(JSON.stringify(out)).sites.length === 7);
+}
+
+// ---- 第七站 iching（2026-09-26）：dueHour=23.75（台北 23:45，使用者裁定）----
+// 依據＝實際 commit 時刻（該站前端無新鮮度判級可對齊）：主班 Worker 22:30 dispatch、實測 commit
+// 台北 22:32～22:59；補叫班 23:30 → 實測 23:34 落地；加 raw CDN max-age=300 ＋ /status cf 快取 5 分，
+// 最壞約 23:44 才看得到 → 取 23.75 讓補叫班日也無假黃。走 gradeMarket 的交易日階梯（每日班只在交易日產出）。
+{
+  const DUE = STATUS_DUE_HOUR.iching;
+  chk("STATUS_DUE_HOUR.iching === 23.75（23:45）且 < 24（≥24 會讓 dueReached 永不成立、缺料判不出來）",
+    DUE === 23.75 && DUE < 24, JSON.stringify(STATUS_DUE_HOUR));
+  chk("STATUS_DUE_HOUR 既有四值不動", STATUS_DUE_HOUR.live === 9 && STATUS_DUE_HOUR.flows === 20
+    && STATUS_DUE_HOUR.postmkt === 22.5 && STATUS_DUE_HOUR.brief === 8);
+  chk("STATUS_DUE_HOUR 鍵恰為 live/flows/postmkt/brief/iching",
+    Object.keys(STATUS_DUE_HOUR).join(",") === "live,flows,postmkt,brief,iching");
+  const tue = (h, m = 0) => ({ date: "2026-08-11", dow: 2, hour: h, minute: m });
+  chk("dueReached：23:44 未到、23:45 到、23:59 到",
+    dueReached(tue(23, 44), DUE) === false && dueReached(tue(23, 45), DUE) === true && dueReached(tue(23, 59), DUE) === true);
+  // 純函式層：資料日＝前一交易日
+  chk("iching 平日 23:44 停在前一交易日 → green", gradeMarket("2026-08-10", tue(23, 44), DUE) === "green");
+  chk("iching 平日 23:45 仍停在前一交易日 → yellow", gradeMarket("2026-08-10", tue(23, 45), DUE) === "yellow");
+  chk("iching 平日 23:45 有今日 → green", gradeMarket("2026-08-11", tue(23, 45), DUE) === "green");
+  chk("iching 平日 00:00（隔日凌晨）停在前一交易日 → green（下一個 dueHour 還沒到）",
+    gradeMarket("2026-08-10", { date: "2026-08-11", dow: 2, hour: 0, minute: 0 }, DUE) === "green");
+  // 階梯整段前移一格（同 postmkt 那組）：dueHour 前預期日＝前一交易日 08-10，08-07 相對它只落後 1 格 → yellow；
+  // 過了 23:45 預期日＝08-11，08-07 落後 2 格 → red；08-06 在 dueHour 前就已落後 2 格 → red。
+  chk("iching 落後 2 交易日：dueHour 前 yellow、dueHour 後 red；落後 3 交易日一律 red",
+    gradeMarket("2026-08-07", tue(12), DUE) === "yellow" && gradeMarket("2026-08-07", tue(23, 50), DUE) === "red"
+    && gradeMarket("2026-08-06", tue(12), DUE) === "red");
+  chk("iching 週六／週日看週五 → green；停在週四 → yellow",
+    gradeMarket("2026-08-07", SAT, DUE) === "green" && gradeMarket("2026-08-07", SUN, DUE) === "green"
+    && gradeMarket("2026-08-06", SAT, DUE) === "yellow");
+  chk("iching 無日期 → red", gradeMarket(null, tue(12), DUE) === "red");
+
+  // 端到端（buildStatus 層）：證明 defs 的 grade:"market" else 分支確實把 d.due 傳進 gradeMarket
+  // ——若漏傳（dueHour 退回 0＝一律期待今日），23:44 那組會變 yellow。
+  // 資料日 2026-09-04（週五）＝前一交易日；台北 2026-09-07（週一）23:44 / 23:45、隔日 09-08 23:45。
+  const icFetch = (date) => async (u, init) => {
+    if (String(u).endsWith("/taiwan-stock-iching/main/data/web/latest.json")) {
+      if (!init || !init.headers || !init.headers.Range) return { ok: false, status: 500, text: async () => "" };
+      return { ok: true, status: 206, text: async () =>
+        `{"calibrated":true,"data_version":"fm-20260911-01","date":"${date}","generated_from":"data/scores/2000-01-01.json","market":{"generated_at":"${date}T00:00:00+08:00","close":` };
+    }
+    return okFetch(u, init);
+  };
+  const kv = fakeKV({ "fi:2026-09-07": ["09:01", "13:30"] });
+  const at = (date, dow, h, m) => ({ date, dow, hour: h, minute: m });
+  const ms = (tp) => Date.parse(`${tp.date}T${String(tp.hour).padStart(2, "0")}:${String(tp.minute).padStart(2, "0")}:00+08:00`);
+  const g = async (tp, fetchFn) => ichingOf(await buildStatus({ FLOW_KV: kv }, tp, fetchFn, ms(tp)), `(${tp.date} ${tp.hour}:${tp.minute})`);
+  const f0904 = icFetch("2026-09-04");
+  const a = await g(at("2026-09-07", 1, 23, 44), f0904);
+  chk("端到端 iching 週一 23:44 資料日＝前一交易日 → green（dueHour 已由 d.due 接線）",
+    a.level === "green" && a.data_date === "2026-09-04" && a.updated_at === null, JSON.stringify(a));
+  const b = await g(at("2026-09-07", 1, 23, 45), f0904);
+  chk("端到端 iching 週一 23:45 仍停在前一交易日 → yellow", b.level === "yellow" && b.data_date === "2026-09-04" && b.updated_at === null, JSON.stringify(b));
+  const c = await g(at("2026-09-08", 2, 23, 45), f0904);
+  chk("端到端 iching 隔日（週二）23:45 仍停在 09-04 → red（落後 2 交易日）", c.level === "red", JSON.stringify(c));
+  const d = await g(at("2026-09-07", 1, 23, 45), icFetch("2026-09-07"));
+  chk("端到端 iching 週一 23:45 有今日 → green（data_date 取 date、非 generated_from 的 2000-01-01；updated_at null）",
+    d.level === "green" && d.data_date === "2026-09-07" && d.updated_at === null, JSON.stringify(d));
+  // 週末：看週五（2026-09-12 週六／09-13 週日）
+  const w1 = await g(at("2026-09-12", 6, 12, 0), icFetch("2026-09-11"));
+  const w2 = await g(at("2026-09-13", 0, 23, 50), icFetch("2026-09-11"));
+  const w3 = await g(at("2026-09-12", 6, 12, 0), icFetch("2026-09-10"));
+  chk("端到端 iching 週六／週日資料＝週五 → green；停在週四 → yellow",
+    w1.level === "green" && w2.level === "green" && w3.level === "yellow", `${w1.level} ${w2.level} ${w3.level}`);
+  // 來源 404／500 → 只染紅 iching，其餘六站不受影響（allSettled）
+  for (const st of [404, 500]) {
+    const bad = async (u, init) => String(u).endsWith("/taiwan-stock-iching/main/data/web/latest.json")
+      ? { ok: false, status: st, text: async () => "" } : okFetch(u, init);
+    const kvT = fakeKV({ "fi:2026-08-11": ["09:01"] });
+    const o = await buildStatus({ FLOW_KV: kvT }, TUE, bad, NOW);
+    const oi = ichingOf(o, `(${st})`);
+    chk(`iching 來源 ${st} → 該站 red＋note 帶狀態碼＋日期 null`,
+      oi.level === "red" && String(oi.note).includes(String(st)) && oi.data_date === null, JSON.stringify(oi));
+    chk(`iching 來源 ${st} 時仍在 index 6`, o.sites[6] === oi);
+    chk(`iching 來源 ${st} 不垮端點：前六站照常 green、schema 不變`,
+      o.schema === 1 && o.status === "ok" && o.sites.slice(0, 6).every((x) => x.level === "green"));
+  }
+  // 抓得到但檔頭撈不到頂層 date（形狀壞掉）→ red、data_date null、updated_at null。
+  // fixture 仍帶 generated_from 與非頂層 generated_at：兩者都不得被拿來補 data_date／updated_at。
+  const noDate = async (u, init) => String(u).endsWith("/taiwan-stock-iching/main/data/web/latest.json")
+    ? { ok: true, status: 206, text: async () => '{"calibrated":true,"generated_from":"data/scores/2026-08-11.json","market":{"generated_at":"2026-08-11T00:00:00+08:00","close":' } : okFetch(u, init);
+  const o2 = await buildStatus({ FLOW_KV: fakeKV({ "fi:2026-08-11": ["09:01"] }) }, TUE, noDate, NOW);
+  const o2i = ichingOf(o2, "(no date)");
+  chk("iching 檔頭無頂層 date → red＋data_date null＋updated_at null（不拿 generated_from／巢狀 generated_at 補）",
+    o2i.level === "red" && o2i.data_date === null && o2i.updated_at === null, JSON.stringify(o2i));
+  // 必須帶 Range（1.36MB 大檔不整包抓）：okFetch 的 iching 分支對未帶 Range 回 500，上方整合案例全鮮即為證；
+  // 這裡再直接看請求標頭，讓「拿掉 Range」這種退化在兩處都會紅。
+  const seen = [];
+  const spy = async (u, init) => { if (String(u).endsWith("/taiwan-stock-iching/main/data/web/latest.json")) seen.push(init && init.headers && init.headers.Range); return okFetch(u, init); };
+  await buildStatus({ FLOW_KV: fakeKV() }, TUE, spy, NOW);
+  chk("iching 請求帶檔頭 Range（bytes=0-N）", seen.length === 1 && /^bytes=0-\d+$/.test(String(seen[0])), JSON.stringify(seen));
 }
 
 console.log(`status.mjs: ${pass} pass, ${fail} fail`);
