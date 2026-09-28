@@ -4574,7 +4574,13 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
     { id: "live", name: "即時類股動態", grade: "market", due: STATUS_DUE_HOUR.live, run: () => statusSiteLive(env, tp) },
     { id: "flows", name: "盤後法人動態", grade: "market", due: STATUS_DUE_HOUR.flows, run: async () => {
       const j = await fetchStatusJson(fetchFn, FLOWS_STATUS);   // 353B 小檔
-      return { data_date: j.date || null, updated_at: j.checked_at || null, note: `健檢 ${j.status || "unknown"}` };
+      // data_date 取 actual_date（data/daily 最新檔＝實際落地的交易日），不取 date：
+      // date 是「本次預期的交易日」，缺料日（status missing，例 2026-09-25 國定假日）會是一個
+      // 根本沒有資料的日子。舊檔無 actual_date 時退回 date（2026-09-28）。
+      const dd = j.actual_date || j.date || null;
+      const st = j.status || "unknown";
+      const exp = j.expected_date && j.expected_date !== dd && st !== "ok" ? `（預期 ${j.expected_date}）` : "";
+      return { data_date: dd, updated_at: j.checked_at || null, note: `健檢 ${st}${exp}` };
     } },
     { id: "news", name: "新聞晨報", grade: "news", run: async () => {
       const j = await fetchStatusJson(fetchFn, NEWS_URL);   // ~200KB，<300KB 門檻內

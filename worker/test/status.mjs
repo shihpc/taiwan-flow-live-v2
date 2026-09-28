@@ -605,5 +605,27 @@ const SIX_BEFORE_EOD_2300 = '[{"id":"live","name":"即時類股動態","data_dat
   chk("iching 請求帶檔頭 Range（bytes=0-N）", seen.length === 1 && /^bytes=0-\d+$/.test(String(seen[0])), JSON.stringify(seen));
 }
 
+{
+  // flows 改讀 actual_date（2026-09-28）：2026-09-25 國定假日的真實 status.json 形狀
+  // （2026-09-28 raw 實查，欄位原樣）。date＝預期日 09-25（根本沒資料），actual_date＝09-24。
+  const holiday = { date: "2026-09-25", status: "missing", expected_date: "2026-09-25", actual_date: "2026-09-24",
+    checked_at: "2026-09-26T03:32:12.570807+08:00" };
+  const withFlows = (j) => async (u, init) => String(u).includes("/taiwan-flows/")
+    ? { ok: true, status: 200, json: async () => j } : okFetch(u, init);
+  const kv = () => fakeKV({ "fi:2026-08-11": ["09:01"] });
+  const f1 = (await buildStatus({ FLOW_KV: kv() }, TUE, withFlows(holiday), NOW)).sites[1];
+  chk("flows 缺料日 → data_date 取 actual_date（不取預期日 date）", f1.data_date === "2026-09-24", JSON.stringify(f1));
+  chk("flows 缺料日 → note 寫出預期日", f1.note === "健檢 missing（預期 2026-09-25）", f1.note);
+  chk("flows updated_at 仍為 checked_at", f1.updated_at === holiday.checked_at);
+  const f2 = (await buildStatus({ FLOW_KV: kv() }, TUE, withFlows({ date: "2026-08-11", status: "ok",
+    expected_date: "2026-08-11", actual_date: "2026-08-11", checked_at: "2026-08-11T21:30:00+08:00" }), NOW)).sites[1];
+  chk("flows ok 且兩日相同 → 與舊輸出逐字相同", JSON.stringify(f2) === JSON.stringify({ id: "flows", name: "盤後法人動態",
+    data_date: "2026-08-11", updated_at: "2026-08-11T21:30:00+08:00", level: "green", note: "健檢 ok" }), JSON.stringify(f2));
+  const f3 = (await buildStatus({ FLOW_KV: kv() }, TUE, withFlows({ date: "2026-08-11", status: "ok", checked_at: "x" }), NOW)).sites[1];
+  chk("flows 舊檔無 actual_date → 退回 date", f3.data_date === "2026-08-11" && f3.note === "健檢 ok");
+  const f4 = (await buildStatus({ FLOW_KV: kv() }, TUE, withFlows({ status: "error" }), NOW)).sites[1];
+  chk("flows 兩個日期欄都缺 → data_date null", f4.data_date === null && f4.note === "健檢 error", JSON.stringify(f4));
+}
+
 console.log(`status.mjs: ${pass} pass, ${fail} fail`);
 if (fail) process.exit(1);

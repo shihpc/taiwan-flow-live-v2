@@ -492,7 +492,8 @@
 （`Promise.allSettled`）。測試 `node test/status.mjs`。
 
 **來源**：live 讀本站 KV `fi:<date>` frame 索引；flows 抓 `taiwan-flows/data/status.json`
-（小檔）；news／brief 抓 `taiwan-stock-news` 的 `news.json`／`daily-brief-card.json`；
+（小檔；**`data_date` 取 `actual_date`＝實際落地的最新交易日，缺才退回 `date`**——`date` 是「預期交易日」，
+缺料日會是一個沒有資料的日子，2026-09-25 國定假日入口站因此顯示成 09/25，2026-09-28 改；非 ok 時 note 附「（預期 <date>）」）；news／brief 抓 `taiwan-stock-news` 的 `news.json`／`daily-brief-card.json`；
 postmkt 因 `postmkt.json` 逾 1.6MB，以 **Range 只取檔頭**（`bytes=0-N`）regex 撈
 date/generated_at；backtest 抓 `taiwan-backtest/walkforward/ledger.csv`，**是 CSV 不是 JSON
 且逐日追加會一直長**，以 **Range 只取檔尾**（後綴範圍 `bytes=-4096`，`async function
