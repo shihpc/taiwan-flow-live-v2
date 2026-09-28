@@ -37,7 +37,8 @@ class HolidayError(Exception):
 
 
 def http_fetch(url: str = SOURCE_URL, timeout: int = 30):
-    req = urllib.request.Request(url, headers={"User-Agent": "taiwan-flow-live-v2 build_holidays",
+    # 同族慣例：帶普通瀏覽器 UA（postmkt build_summary.py:41-43；cards 管線曾被 Cloudflare 依 UA 全擋）
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                                                "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))

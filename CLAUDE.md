@@ -284,8 +284,8 @@
     已知且不會變的事實，為它多一次 KV 讀寫是白花額度（132 slot/日；KV 額度在本 repo 爆過），
     常數也讓判斷變成純函式 `export function tickAgeDays`／`export function tickTeardownDue`、可離線測。
   - **門檻 `export const TICK_TEARDOWN_DUE_DAYS`＝30 個日曆日**（≈21 個交易日）。刻意用日曆日：
-    本 repo 沒有國定假日行事曆（同 `taiwan-flows` 的既定立場），日曆日是純算術、不會因缺行事曆
-    而誤判。**它是提醒門檻、不是判準**——到期只代表「該回來看樣本、決定收窄或移除」，
+    日曆日是純算術、不依賴國定假日行事曆（2026-09-28 起本 repo 已有 `data/twse_holidays.json`，
+    但提醒門檻刻意不接它：行事曆讀不到時也不會誤判）。**它是提醒門檻、不是判準**——到期只代表「該回來看樣本、決定收窄或移除」，
     不代表資料一定夠。`age` 算不出來（日期解析失敗）時**一律不判到期**。
   - **告警一天最多一則，但那不等於「總共一則」**：只在**當日第一格**
     （`tp.hour === TICK_START_HOUR && tp.minute === 0`）評估，再疊 `alertJob` 既有的
