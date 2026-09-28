@@ -59,15 +59,16 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **25 支** `.mjs`；
-  2026-09-09 `ls worker/test/*.mjs` 實查，取代舊記的 22 支）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **27 支** `.mjs`；
+  2026-09-28 `ls worker/test/*.mjs` 實查（含同日新增的 `holidays.mjs`），取代舊記的 25 支）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
-  （**14 支**＝帶 cron 10 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
+  （**15 支**＝帶 cron 11 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
-  （每月 1 日重生比對班）；無 cron 4 支：`backtest.yml`（離線煙霧＋規格守門）、
+  （每月 1 日重生比對班）＋`holidays.yml`（2026-09-28，每週日台北 10:17 抓 TWSE 休市行事曆 →
+  `data/twse_holidays.json`，家族共用，規格 `docs/holiday-calendar.md`；**無 Worker 主觸發、只有 GH cron**）；無 cron 4 支：`backtest.yml`（離線煙霧＋規格守門）、
   `canon.yml`（守 CLAUDE.md 頂端 CANON 區塊）、`pages.yml`（部署）、
   `worker-deploy.yml`（動到 `worker/**` 即跑全部測試後 `wrangler deploy`））。
-  **14 支全裝 notify-failure（2026-09-06 覆驗）**：`.github/actions/notify-failure/action.yml`
+  **15 支全裝 notify-failure（2026-09-06 覆驗 14 支；2026-09-28 新增的 `holidays.yml` 同樣掛 `pipeline: v2-holidays`）**：`.github/actions/notify-failure/action.yml`
   與 `claude-harness/templates/notify-failure/action.yml` 逐字相同（`diff` 空），每支 workflow
   每個 job 的末步都是 `uses: ./.github/actions/notify-failure`＋`if: failure() || cancelled()`
   ＋`with: pipeline: v2-<name>`，workflow 頂層 `permissions` 皆含 `issues: write`
@@ -488,13 +489,34 @@
 **schema 形狀與欄位名不動**（`schema:1`，入口站 shihpc.github.io 與 claude-harness
 `tools/freshness_watchdog.py` 共用這個資料面）；新站一律**附加在既有六站之後**，不改順序
 （2026-09-26 iching 即附加在 backtest 之後，`test/status.mjs` 以改動前的六站 JSON 逐位釘住前六站輸出）。
-判級全是可測純函式、台北時區、**國定假日不處理**；單站失敗只染紅該站、不垮端點
-（`Promise.allSettled`）。測試 `node test/status.mjs`。
+判級全是可測純函式、台北時區；單站失敗只染紅該站、不垮端點
+（`Promise.allSettled`）。測試 `node test/status.mjs`＋`node test/holidays.mjs`。
+
+**國定假日（2026-09-28 起處理，批次一，規格 `docs/holiday-calendar.md`）**：取代舊的「國定假日不處理」。
+`buildStatus` 與七站**併發**讀本 repo `data/twse_holidays.json`（`export const HOLIDAYS_URL`，raw main，
+`export async function loadHolidayCal`，cf 快取 1 小時），`export function parseHolidayCal` 轉成
+`{closed:Set, years:Set}`，再當**選填最末參數** `cal` 傳給 `lastExpectedTradingDate`／`prevExpectedTradingDate`／
+`gradeMarket`／`gradeBacktest`／`statusSiteLive`。休市日＝週末 ∪ `closed`；**某年不在 `years`＝該年未知 → 只排週末**
+（`export function holidayClosed` 先查年度再查日期）。平日假日比照週末：預期資料日直接退到前一交易日（不看 dueHour）；
+週末退到的週五若是假日再往前跳；backtest 參考日為假日時比照週末分支。**live 站也接 cal**——否則 09-28 這種假日
+會去查 `fi:09-28`／`fi:09-25` 兩個必然空的鍵而判 red。news（時數口徑）與 brief（日曆日、每日出刊）不受影響。
+- **fail-open**：讀不到／非 2xx／壞 JSON／形狀不合（`schema≠1`、缺陣列、無合法年度）→ `cal=null`＝與改動前逐字相同的
+  「只排週末」，**不拋例外、不染紅任何站**（`holidays.mjs` 以 404／拋錯／壞檔三種對跑）。`data/twse_holidays.json`
+  由 `holidays.yml` 上線後產生，**在它第一次 commit 到 main 之前本端點一律走 fail-open**。
+- **預設參數＝舊行為**：`cal` 省略／`null`／空集合時，`holidays.mjs` 以改動前原始碼的逐字副本對跑 21 天×48 時點×
+  7 個資料日偏移×5 個 dueHour 的網格，差異 0；`status.mjs` 一字未改全過。
+- **回應形狀一個鍵都不加**：`status.mjs` 釘住頂層鍵恰為 `schema/generated_at/status/sites`，所以載入狀態不進 JSON，
+  改由 `buildStatus` 的選填第五參數 `meta`（出參）帶出，`/status` 路由寫成回應標頭
+  **`x-holidays`**（`loaded; years=2026` 或 `unloaded; HTTP 404`），未載入時另 `console.log` 一行（`wrangler tail` 看得到）。
+- **仍會誤報的情形**：颱風臨時停市（TWSE 事後才補進行事曆）；跨年後到第一個週日 `holidays.yml` 跑完前，新年度不在
+  `years` 內（依契約退回只排週末，元旦前後可能誤報一次）。
+- **批次一只改 `/status` 路徑**：`runSentinel`／`runHealthCheck`／`runTickSample`／`runMorning` 與前端 `prevWeekday` 等
+  都不讀行事曆（批次二另案）；它們若呼叫到上述共用函式，因不傳 `cal` 行為不變。
 
 **來源**：live 讀本站 KV `fi:<date>` frame 索引；flows 抓 `taiwan-flows/data/status.json`
 （小檔；**`data_date` 取 `actual_date`＝實際落地的最新交易日，缺才退回 `date`**——`date` 是「預期交易日」，
 缺料日會是一個沒有資料的日子，2026-09-25 國定假日入口站因此顯示成 09/25，2026-09-28 改；非 ok 且 `expected_date`≠`data_date` 時 note 附「（預期 <expected_date>）」。**燈號因此會變**：缺料日由
-「假綠」（舊版拿預期日比 `>=`）轉為落後一格的 yellow，刻意的修正；國定假日仍不處理，假日隔天會多報一格）；news／brief 抓 `taiwan-stock-news` 的 `news.json`／`daily-brief-card.json`；
+「假綠」（舊版拿預期日比 `>=`）轉為落後一格的 yellow，刻意的修正；**行事曆載入後**，假日本身不再算一格（09-25 假日 → 09-26 看 09-24 為 green），行事曆 fail-open 時仍是舊的落後一格 yellow）；news／brief 抓 `taiwan-stock-news` 的 `news.json`／`daily-brief-card.json`；
 postmkt 因 `postmkt.json` 逾 1.6MB，以 **Range 只取檔頭**（`bytes=0-N`）regex 撈
 date/generated_at；backtest 抓 `taiwan-backtest/walkforward/ledger.csv`，**是 CSV 不是 JSON
 且逐日追加會一直長**，以 **Range 只取檔尾**（後綴範圍 `bytes=-4096`，`async function
@@ -523,7 +545,7 @@ iching 抓 `taiwan-stock-iching/data/web/latest.json`（`ICHING_STATUS_URL`，�
 | flows | 20 | `taiwan-flows/index.html` 的 `function lastDueTradingDay`（平日 `hour>=20` 才期待今日），同後端 `src/run_daily.py` 的 `PUBLISH_DEADLINE_HOUR = 20` |
 | postmkt | 22.5 | `postmkt/index.html` 的 `function pmStatus`：資料日為上一交易日且 `hm < "22:30"` 仍判「正常」 |
 | brief | 8 | `claude-harness/tools/freshness_watchdog.py` 的 `DAILY_CUTOFF = time(8, 0)`＋`daily_target()`／`judge_brief()`（「08:00 後 date 應＝今日；08:00 前應＝昨日」）。**2026-09-08 補上**，見下段 |
-| iching | 23.75 | **2026-09-26 使用者裁定 23:45**。該站前端**沒有**新鮮度判級可對齊，依據改取**實際 commit 時刻**：主班由本 Worker 台北 22:30 dispatch（`ICHING_CRON`），實測 commit 落在台北 22:32～22:59；補叫班 23:30 → 實測 23:34 落地；再加 raw CDN `max-age=300` ＋本端點 cf 快取 5 分，最壞約 23:44 才看得到 → 取 23.75 使「補叫班才成功」的日子也無假黃。**不得 ≥24**（`dueReached` 永不成立、那站永遠期待前一交易日、真缺料判不出來；`test/status.mjs` 有 `< 24` 斷言）。走 `gradeMarket` 的**交易日**階梯（每日班 cron 只排週一～五）；國定假日與家族同立場不處理，隔晚會誤報一次 yellow |
+| iching | 23.75 | **2026-09-26 使用者裁定 23:45**。該站前端**沒有**新鮮度判級可對齊，依據改取**實際 commit 時刻**：主班由本 Worker 台北 22:30 dispatch（`ICHING_CRON`），實測 commit 落在台北 22:32～22:59；補叫班 23:30 → 實測 23:34 落地；再加 raw CDN `max-age=300` ＋本端點 cf 快取 5 分，最壞約 23:44 才看得到 → 取 23.75 使「補叫班才成功」的日子也無假黃。**不得 ≥24**（`dueReached` 永不成立、那站永遠期待前一交易日、真缺料判不出來；`test/status.mjs` 有 `< 24` 斷言）。走 `gradeMarket` 的**交易日**階梯（每日班 cron 只排週一～五）；國定假日自 2026-09-28 起由行事曆排除（fail-open 時退回只排週末、隔晚誤報一次 yellow） |
 
 `gradeNews` 不受影響（本來就看 `generated_at` 距今時數）。
 
@@ -611,6 +633,8 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 `taiwan-stock-news` 讀 `data/morning.json`；`postmkt` 讀 `data/aetf/latest.json`（含
 `stocks[code][3]` 市值欄）。**改輸出格式屬跨站變更**
 （見 `PROJECT_SUMMARY.md`「五、目前待辦與已知限制」）。
+**`data/twse_holidays.json`（2026-09-28）是家族共用休市行事曆的唯一來源**（契約見 `docs/holiday-calendar.md` §1）：
+本 repo Worker `/status`、taiwan-flows、claude-harness 看門狗以 raw URL 讀它；`schema`／`years`／`closed` 改形狀＝跨站變更。
 
 **aetf 入池口徑 2026-08-29 放寬**（`src/build_aetf.py:54` `list_active_etfs`，commit `5d046c0`）：
 由「`category=='domestic'` 且 `type=='twse'` 且 A 結尾」改為「**A 結尾且 `category != 'foreign'`**」
@@ -894,7 +918,7 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 24 支要個別跑（離線、免 token；2026-09-09 實查 worker/test/*.mjs 共 25 支，
+node test/sentinel.mjs              # 其餘 26 支要個別跑（離線、免 token；2026-09-28 實查 worker/test/*.mjs 共 27 支，
                                     #   含 swr.mjs 與新增的 tickdiag.mjs。舊記的「22 支」已過時）
 for f in test/*.mjs; do node "$f" || echo FAIL $f; done   # 一次跑完全部（同 worker-deploy.yml 的 glob）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗

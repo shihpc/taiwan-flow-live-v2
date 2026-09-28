@@ -4351,7 +4351,7 @@ async function syncKey(code) {
 //                   23:34 落地；再加 raw CDN `max-age=300` ＋本端點 cf 快取 5 分，最壞約 23:44 才看得到，
 //                   取 23.75 讓「補叫班才成功」的日子也不出假黃。**不得 ≥24**（dueReached 永不成立，
 //                   那站會永遠期待前一交易日、真的缺料也判不出來）。每日班只在交易日產出（cron 週一～五），
-//                   走 gradeMarket 的交易日階梯；國定假日與家族同立場不處理（隔晚誤報一次 yellow）。
+//                   走 gradeMarket 的交易日階梯；國定假日自 2026-09-28 起由休市行事曆排除（fail-open 時隔晚誤報一次 yellow）。
 //                   來源 `data/web/latest.json` **無 generated_at**（實查檔頭），updated_at 固定 null。
 // **brief 的假黃（2026-09-08 補修）**：晨報 07:30 才產製，舊 gradeBrief 平日一律期待「今日」，
 // 於是每天 00:00~07:30 必然 yellow（線上實打：台北 2026-09-09 00:29 打 /status 得 brief
@@ -4366,7 +4366,9 @@ async function syncKey(code) {
 // 會讓「週日還停在週五版」（已漏兩期）被寬待成 yellow——claude-harness 的 judge_brief 對同一
 // 情境早就判 STALE（tests/test_freshness_watchdog.py 有此案例）。修正後週末與平日同一把尺。
 // 只有 level 會因此從假 yellow 轉 green；data_date／updated_at 的欄位語意一律不動，schema 形狀不變。
-// 國定假日仍不處理（維持全家族既有立場，repo 無行事曆來源）：假日晚間會誤報一次落後，屬已知可接受。
+// 國定假日（2026-09-28 批次一起處理，docs/holiday-calendar.md）：/status 的市場類與 backtest 判級接受
+// 選填的休市行事曆 cal（見下方 parseHolidayCal），休市日＝週末 ∪ cal.closed；cal 缺席／讀不到／該年不在
+// cal.years ＝ fail-open 退回「只排週末」，輸出與改動前逐字相同。brief／news 不受影響（日曆日／時數口徑）。
 export const STATUS_DUE_HOUR = { live: 9, flows: 20, postmkt: 22.5, brief: 8, iching: 23.75 };
 
 // 日期加減（YYYY-MM-DD 字串運算，不碰本地時區）
@@ -4383,12 +4385,15 @@ export function dueReached(tp, dueHour = 0) {
 // 最近預期交易日：平日＝今天（但**未到該站的發布時點 dueHour 前退成前一個交易日**）、
 // 週末＝上週五。dueHour 為台北小時、可含小數（22.5 ＝ 22:30），預設 0 ＝不看時間、一律
 // 期待今日——那是 2026-09-07 之前的舊行為，只保留給回歸比對用，buildStatus 每站都明確給值。
-// 國定假日不處理（簡化：連假日仍以平日計，假日當天會誤判 yellow/red，屬已知可接受誤差）。
-export function lastExpectedTradingDate(tp, dueHour = 0) {
+// cal＝選填休市行事曆（2026-09-28）：平日國定假日比照週末，退到前一個交易日（不看 dueHour——
+// 該交易日的資料早已過發布時點）；週末退到的週五若是假日再往前跳。省略 cal＝只排週末（舊行為）。
+export function lastExpectedTradingDate(tp, dueHour = 0, cal = null) {
   if (tp.dow >= 1 && tp.dow <= 5) {
-    return dueReached(tp, dueHour) ? tp.date : prevExpectedTradingDate(tp.date);
+    if (holidayClosed(tp.date, cal)) return prevExpectedTradingDate(tp.date, cal);
+    return dueReached(tp, dueHour) ? tp.date : prevExpectedTradingDate(tp.date, cal);
   }
-  return addDaysISO(tp.date, tp.dow === 6 ? -1 : -2);   // 週六退1天、週日退2天到週五
+  const fri = addDaysISO(tp.date, tp.dow === 6 ? -1 : -2);   // 週六退1天、週日退2天到週五
+  return holidayClosed(fri, cal) ? prevExpectedTradingDate(fri, cal) : fri;
 }
 // 最近預期「日曆日」（brief 用）：不分平日週末，dueHour 後＝今日、之前＝昨日。
 // 與 lastExpectedTradingDate 共用同一個 dueReached 時點判斷，差別只在往前一格是日曆日不是交易日
@@ -4396,17 +4401,50 @@ export function lastExpectedTradingDate(tp, dueHour = 0) {
 export function lastExpectedDailyDate(tp, dueHour = 0) {
   return dueReached(tp, dueHour) ? tp.date : addDaysISO(tp.date, -1);
 }
-// 往前一個預期交易日（跳過週末；同樣不處理國定假日）
-export function prevExpectedTradingDate(dateISO) {
+// 往前一個預期交易日（跳過週末；給了 cal 時另跳過其涵蓋年度內的休市日）
+export function prevExpectedTradingDate(dateISO, cal = null) {
   let d = dateISO;
-  do { d = addDaysISO(d, -1); } while (["0", "6"].includes(String(new Date(d + "T00:00:00Z").getUTCDay())));
+  do { d = addDaysISO(d, -1); } while (["0", "6"].includes(String(new Date(d + "T00:00:00Z").getUTCDay()))
+    || holidayClosed(d, cal));
   return d;
+}
+// ---- 休市行事曆（docs/holiday-calendar.md §1／§2，2026-09-28 批次一）----
+// 唯一來源＝本 repo data/twse_holidays.json（src/build_holidays.py＋holidays.yml 產出）。
+// cal 形狀 { closed: Set<"YYYY-MM-DD">, years: Set<number> }（也接受陣列）。
+// **某年不在 cal.years＝該年未知 → 只排週末**（不得當成「該年沒假日」）：holidayClosed 先看年度再看日期。
+// 週末由呼叫端自己判，這裡只回「平日以外的排定休市」；closed 內含週末日期也無妨（取聯集）。
+export const HOLIDAYS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/twse_holidays.json";
+const calHas = (c, v) => (c instanceof Set ? c.has(v) : Array.isArray(c) ? c.includes(v) : false);
+export function holidayClosed(dateISO, cal) {
+  if (!cal || typeof dateISO !== "string") return false;
+  return calHas(cal.years, Number(dateISO.slice(0, 4))) && calHas(cal.closed, dateISO);
+}
+// JSON → cal；形狀不合（schema≠1、缺陣列、years 無任何合法年度）回 null＝呼叫端 fail-open。
+export function parseHolidayCal(j) {
+  if (!j || typeof j !== "object" || j.schema !== 1 || !Array.isArray(j.years) || !Array.isArray(j.closed)) return null;
+  const years = new Set(j.years.filter((y) => Number.isInteger(y) && y >= 2000 && y <= 2100));
+  if (!years.size) return null;
+  const closed = new Set(j.closed.filter((d) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)));
+  return { closed, years };
+}
+// 讀行事曆：**永不拋例外**。讀不到／非 2xx／壞檔／形狀不合 → { cal: null, err }（fail-open＝只排週末）。
+// cf 快取 1 小時（同檔其他 raw 靜態依賴的手法；該檔一週才更新一次）；/status 本身另有 5 分快取。
+export async function loadHolidayCal(fetchFn = fetch) {
+  try {
+    const r = await fetchFn(HOLIDAYS_URL, { cf: { cacheTtl: 3600, cacheEverything: true }, signal: timeoutSignal() });
+    if (!r || !r.ok) return { cal: null, err: `HTTP ${r ? r.status : "?"}` };
+    const cal = parseHolidayCal(await r.json());
+    return cal ? { cal, err: null } : { cal: null, err: "bad-shape" };
+  } catch (e) {
+    return { cal: null, err: String(e && e.message || e) };
+  }
 }
 // 市場資料類判級（live/flows/postmkt）：資料日 ≥ 最近預期交易日 → green；
 // 落後 1 個交易日 → yellow；更舊或無日期 → red。
 // dueHour＝該站的預期發布時點（見段首 STATUS_DUE_HOUR）；省略＝舊的「不看時間」行為。
-export function gradeMarket(dataDate, tp, dueHour = 0) {
-  return gradeLadder(dataDate, lastExpectedTradingDate(tp, dueHour), prevExpectedTradingDate);
+// cal＝選填休市行事曆（省略＝只排週末，舊行為）。
+export function gradeMarket(dataDate, tp, dueHour = 0, cal = null) {
+  return gradeLadder(dataDate, lastExpectedTradingDate(tp, dueHour, cal), (d) => prevExpectedTradingDate(d, cal));
 }
 // 共用階梯：達預期日 → green；落後 1 格 → yellow；更舊或無日期 → red。
 // 「往前一格」由呼叫端給（市場類＝前一交易日、brief＝前一日曆日），階梯本身只有這一套。
@@ -4466,7 +4504,8 @@ export function gradeBrief(dataDate, tp, dueHour = 0) {
 //   該句無實測支撐、已於 2026-09-07 同批更正。
 // 落後一個交易日以上一律 red；週末看 refDay 的上一個平日（該站的「休市定格」對應本端點 green，
 // 與 gradeMarket 週末看上週五同一立場）。無法解析的日期 → red（端點無 unknown 級，見 CLAUDE.md）。
-// 國定假日不處理，與其餘各站同立場。
+// 國定假日（2026-09-28）：給了 cal 時，參考日為休市日比照週末（看前一交易日）、「前一交易日」跳過休市日；
+// 省略 cal＝只排週末（舊行為）。三個門檻數值（−12h／09:07／19:07）不動。
 // 台北時鐘 → 參考時鐘（−12 小時），回 { day, hm }
 export function backtestRefClock(tp) {
   const back = tp.hour < 12;
@@ -4474,13 +4513,13 @@ export function backtestRefClock(tp) {
   return { day: back ? addDaysISO(tp.date, -1) : tp.date,
     hm: `${String(h).padStart(2, "0")}:${String(tp.minute || 0).padStart(2, "0")}` };
 }
-export function gradeBacktest(lastDate, tp) {
+export function gradeBacktest(lastDate, tp, cal = null) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(lastDate == null ? "" : lastDate))) return "red";
   const { day, hm } = backtestRefClock(tp);
   const dow = new Date(day + "T00:00:00Z").getUTCDay();
-  if (dow === 0 || dow === 6) return lastDate >= prevExpectedTradingDate(day) ? "green" : "red";
+  if (dow === 0 || dow === 6 || holidayClosed(day, cal)) return lastDate >= prevExpectedTradingDate(day, cal) ? "green" : "red";
   if (lastDate >= day) return "green";
-  if (lastDate < prevExpectedTradingDate(day)) return "red";   // 落後一個交易日以上
+  if (lastDate < prevExpectedTradingDate(day, cal)) return "red";   // 落後一個交易日以上
   return hm < "09:07" ? "green" : hm < "19:07" ? "yellow" : "red";
 }
 // epoch ms → ISO8601 +08:00（秒級）
@@ -4551,9 +4590,11 @@ async function fetchStatusTail(fetchFn, url, bytes = 4096) {
 // 正常情形下今日尚無 frame，自然退到上一交易日；只有「連兩個交易日 KV 全空」時兩者才分歧，
 // 那時不帶會回 null→red、帶了會回更舊的日期→yellow，**不帶不會誤綠**。
 // 資料日的取法不受時間感知影響（時間感知只作用在 gradeMarket 的判級）。
-async function statusSiteLive(env, tp) {
-  const exp = lastExpectedTradingDate(tp);
-  for (const d of [exp, prevExpectedTradingDate(exp)]) {
+// cal（2026-09-28）：休市行事曆，讓假日當天查的是「前兩個交易日」而不是假日本身（否則 09-28 假日會查
+// fi:09-28／fi:09-25 兩個必然空的鍵而判 red）。省略＝只排週末。
+async function statusSiteLive(env, tp, cal = null) {
+  const exp = lastExpectedTradingDate(tp, 0, cal);
+  for (const d of [exp, prevExpectedTradingDate(exp, cal)]) {
     const fi = env.FLOW_KV ? await env.FLOW_KV.get(`fi:${d}`, "json") : null;
     if (fi && fi.length) {
       const lastHm = fi.reduce((a, b) => (b > a ? b : a));   // 索引為 HH:MM 字串，取最大值最穩
@@ -4562,8 +4603,14 @@ async function statusSiteLive(env, tp) {
   }
   return { data_date: null, updated_at: null, note: "近兩個交易日 KV 無 frame" };
 }
-// /status 主體：七站併發、單站失敗只染紅該站
-export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) {
+// /status 主體：七站併發、單站失敗只染紅該站。
+// 休市行事曆（2026-09-28）：與七站併發讀取（live 站需要它決定查哪兩個 fi 鍵，故在 run 內 await）；
+// 讀不到一律 fail-open（cal=null＝只排週末），不影響任何一站、不拋例外。
+// **回應 JSON 形狀一個鍵都不加**：test/status.mjs 釘住頂層鍵恰為 schema/generated_at/status/sites
+// （入口站與 harness 看門狗共用的 schema:1 契約），所以載入狀態走選填的第五參數 meta（出參），
+// 由 /status 路由寫成回應標頭 `x-holidays`（例 `loaded; years=2026` 或 `unloaded; HTTP 404`）。
+export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now(), meta = null) {
+  const calP = loadHolidayCal(fetchFn);
   const FLOWS_STATUS = "https://raw.githubusercontent.com/shihpc/taiwan-flows/main/data/status.json";
   const NEWS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/news.json";
   const BRIEF_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/daily-brief-card.json";
@@ -4571,7 +4618,7 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
   const BACKTEST_URL = "https://raw.githubusercontent.com/shihpc/taiwan-backtest/main/walkforward/ledger.csv";
   const ICHING_STATUS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-iching/main/data/web/latest.json";
   const defs = [
-    { id: "live", name: "即時類股動態", grade: "market", due: STATUS_DUE_HOUR.live, run: () => statusSiteLive(env, tp) },
+    { id: "live", name: "即時類股動態", grade: "market", due: STATUS_DUE_HOUR.live, run: async () => statusSiteLive(env, tp, (await calP).cal) },
     { id: "flows", name: "盤後法人動態", grade: "market", due: STATUS_DUE_HOUR.flows, run: async () => {
       const j = await fetchStatusJson(fetchFn, FLOWS_STATUS);   // 353B 小檔
       // data_date 取 actual_date（data/daily 最新檔＝實際落地的交易日），不取 date：
@@ -4613,6 +4660,7 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
     } },
   ];
   const results = await Promise.allSettled(defs.map((d) => d.run()));
+  const { cal, err: calErr } = await calP;
   const sites = defs.map((d, i) => {
     const r = results[i];
     if (r.status !== "fulfilled") {
@@ -4622,10 +4670,14 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now()) 
     const v = r.value;
     const level = d.grade === "news" ? gradeNews(v.updated_at, nowMs)
       : d.grade === "brief" ? gradeBrief(v.data_date, tp, d.due)
-      : d.grade === "backtest" ? gradeBacktest(v.data_date, tp)
-      : gradeMarket(v.data_date, tp, d.due);
+      : d.grade === "backtest" ? gradeBacktest(v.data_date, tp, cal)
+      : gradeMarket(v.data_date, tp, d.due, cal);
     return { id: d.id, name: d.name, data_date: v.data_date, updated_at: v.updated_at, level, note: v.note || "" };
   });
+  const holidays = cal ? { loaded: true, years: [...cal.years].sort((a, b) => a - b), err: null }
+    : { loaded: false, years: [], err: calErr };
+  if (!cal) console.log(`/status 休市行事曆未載入（${calErr}），國定假日只排週末（fail-open）`);
+  if (meta && typeof meta === "object") meta.holidays = holidays;
   return { schema: 1, generated_at: isoTaipei(nowMs), status: "ok", sites };
 }
 
@@ -4960,8 +5012,11 @@ export default {
       const hit = await cache.match(cacheKey);
       if (hit) return hit;
       try {
-        const body = await buildStatus(env, taipeiParts(), fetch);
-        const resp = json(body, { "Cache-Control": "public, max-age=300" });
+        const meta = {};
+        const body = await buildStatus(env, taipeiParts(), fetch, Date.now(), meta);
+        const h = meta.holidays;
+        const xh = h && h.loaded ? `loaded; years=${h.years.join(",")}` : `unloaded; ${String(h && h.err || "?").replace(/[^\x20-\x7e]/g, "?").slice(0, 80)}`;
+        const resp = json(body, { "Cache-Control": "public, max-age=300", "x-holidays": xh });
         ctx.waitUntil(cache.put(cacheKey, resp.clone()));
         return resp;
       } catch (e) {   // buildStatus 內已 allSettled，理論上不拋；此處為最後保險

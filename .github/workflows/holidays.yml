@@ -1,0 +1,55 @@
+name: holidays
+# 家族共用國定假日行事曆（2026-09-28 批次一）：TWSE OpenAPI holidaySchedule → data/twse_holidays.json。
+# 規格正本 docs/holiday-calendar.md §1。消費端（本 repo Worker /status、taiwan-flows、claude-harness
+# 看門狗）以 raw URL 讀這支產物，讀不到一律 fail-open 退回「只排週末」。
+# - 失敗不覆寫：build_holidays.py 抓取失敗／形狀不對／休市 0 筆 → 不寫檔、exit 1 → 本 job 紅＋notify-failure。
+# - 內容無變化（忽略 fetched_at）時 builder 不寫檔 → git diff 空 → 不 commit。
+#   不用 tools/noop_guard.py：它只忽略頂層 generated_at／built_at，本檔的時戳鍵是 fetched_at。
+# - 不 dispatch pages：批次一沒有任何前端讀此檔（Worker 走 raw.githubusercontent.com）。
+# 時段選定理由：每週日 02:17 UTC＝台北週日 10:17。本 repo 既有帶 cron 的 workflow 全排在平日或
+# 週六 08:00（meta）、週一 09:00（lastweek）、週日 22:10 UTC（us），週日上午沒有任何班；
+# 分鐘取 :17 避開整點塞車。TWSE API 只回當年度，跨年後第一個週日才會補進新年度——
+# 那幾天新年度不在 years 內，消費端依契約退回只排週末（元旦前後可能誤報一次，已知、接受）。
+on:
+  schedule:
+    - cron: '17 2 * * 0'   # 每週日 02:17 UTC = 10:17 台北
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: holidays
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: build twse_holidays.json
+        run: python src/build_holidays.py
+      - name: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/twse_holidays.json
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "twse_holidays $(date -u +%FT%TZ)"
+          pushed=0
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push; then pushed=1; break; fi
+            sleep 4
+          done
+          if [ "$pushed" != "1" ]; then echo "::error::push failed after 5 retries"; exit 1; fi
+      - name: Notify failure
+        # cancelled 也要告警（failure() 在 cancelled 時不成立，2026-07-24 postmkt 教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-holidays
