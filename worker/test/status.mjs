@@ -623,6 +623,11 @@ const SIX_BEFORE_EOD_2300 = '[{"id":"live","name":"即時類股動態","data_dat
     data_date: "2026-08-11", updated_at: "2026-08-11T21:30:00+08:00", level: "green", note: "健檢 ok" }), JSON.stringify(f2));
   const f3 = (await buildStatus({ FLOW_KV: kv() }, TUE, withFlows({ date: "2026-08-11", status: "ok", checked_at: "x" }), NOW)).sites[1];
   chk("flows 舊檔無 actual_date → 退回 date", f3.data_date === "2026-08-11" && f3.note === "健檢 ok");
+  // 燈號（驗收建議補）：09-26 週六 10:00 拿 09-25 missing 形狀。舊版 data_date＝09-25 會被 >= 判成
+  // green（缺料卻亮綠）；新版 09-24 落後週五一格 → yellow。國定假日仍不處理（另案）。
+  const SAT0926 = { date: "2026-09-26", dow: 6, hour: 10, minute: 0 };
+  const f5 = (await buildStatus({ FLOW_KV: kv() }, SAT0926, withFlows(holiday), Date.parse("2026-09-26T10:00:00+08:00"))).sites[1];
+  chk("flows 缺料日 → 週六 level yellow（不再假綠）", f5.level === "yellow" && f5.data_date === "2026-09-24", JSON.stringify(f5));
   const f4 = (await buildStatus({ FLOW_KV: kv() }, TUE, withFlows({ status: "error" }), NOW)).sites[1];
   chk("flows 兩個日期欄都缺 → data_date null", f4.data_date === null && f4.note === "健檢 error", JSON.stringify(f4));
 }
