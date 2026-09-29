@@ -42,9 +42,36 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 | taiwan-backtest（2026-09-29 追加） | `walkforward/walkforward_daily.py`／`shadow_daily.py` 經 `walkforward/twse_holidays.py` 讀行事曆，休市日在任何 API 呼叫前跳過、不記帳；讀不到 fail-open 只排週末。三份帳冊既有 2026-09-25 列已刪 | 假日不再記「空手、0 損益」列；前端 `ledgerStatus` 屬批次二未改 |
 | taiwan-flow-live-v2 intraday（2026-09-29 追加） | `src/twse_holidays.py`（本地 `data/twse_holidays.json` 優先、壞/缺才退 raw URL）供 `archive_intraday.py`／`build_rrg_frozen.py`／`build_rrg_base.py` 共用；`intraday.yml` 步驟未改 | 休市日不歸檔、不定格（exit 0、無 commit）、基準選日剔除休市日檔；fail-open 只排週末。起因：09-25／09-28 KV 殘留 frame 被當成當日歸檔（見 CLAUDE.md「盤中 RRG 盤外定格」）。Worker 端 frame 寫 KV／`runBackup`／`runHealthCheck` 屬批次二 |
 
-**批次二（本批不做，另案）**：各站前端（postmkt `pmStatus` 等、taiwan-flows `siteStatus`、v2 `prevWeekday`／`ovRrgTaipeiToday`、
-taiwan-backtest `ledgerStatus`）、Worker 其他班（`runSentinel` 假日空打、`runHealthCheck` 假日告警、`runTickSample`、`runMorning`）、
-v2 `build_baseline.py` 假日空等。
+**批次二**：見 §5（2026-09-29 開工）。
+
+## 5. 批次二（2026-09-29，使用者核可開工）
+
+**總原則：休市日「比照週末」**——每個消費點在國定假日的行為，與它在週六／週日的既有行為相同；各點自己沒有週末分支的，
+就比照「非交易日」的既有處理。**不新增任何判級、門檻或訊號**（鐵律 8：純描述性／排程性修正），**不改資料欄位與 schema**。
+讀不到行事曆一律 fail-open（＝改動前行為），不拋例外、不紅燈、不告警。
+
+### 5a. taiwan-flow-live-v2（Worker＋後端＋本站前端）
+| 消費點 | 完成定義 |
+|---|---|
+| Worker frame 存 KV（`frame` 角色，`storeFrame` 一帶） | 休市日不寫 frame／`series:<date>`／`fi:<date>`——**假歸檔的上游**（09-25／09-28 KV 殘留快照）。行事曆沿用 `loadHolidayCal`（cf 快取），每分鐘一次 frame 不得因此多打 raw（確認快取命中路徑） |
+| `runSentinel` | 休市日不探測 FinMind、不 dispatch（比照週末：`scheduledRole` 本來就不排週末） |
+| `runHealthCheck`（eve／morn） | 休市日不對「當日應有產物」告警（比照週末的既有處理）；假日隔天的晨間健檢以「前一交易日」為準 |
+| `runTickSample`、`runMorning`、`runBackup`／`backupPipelines`、`runAlerts`、其餘平日才跑的班 | 逐一盤點：凡是以「平日」為前提、會在休市日空打 API／dispatch／告警者，比照週末跳過；盤點結果（哪些改、哪些刻意不改與理由）寫進 CLAUDE.md。**iching dispatch 不在本批**（另一 session 負責） |
+| `src/build_baseline.py` 假日空等 | 休市日不空等（比照週末），沿用 `src/twse_holidays.py` |
+| 前端 `index.html`：`prevWeekday`／`liveStatus`／`liveDataDate` 後備／`ovRrgTaipeiToday`（週末走定格）／`ovRrgBaseDays` | 同源讀 `data/twse_holidays.json`（非阻塞、失敗 fail-open）；休市日頂列顯示「休市定格」、輪動雷達直接走定格（比照週末），前一交易日跳過休市日 |
+
+### 5b. 其他站前端
+| 站 | 消費點 | 完成定義 |
+|---|---|---|
+| postmkt | `pmStatus`、`dayDiff`／`dateStatus`、`myChgDateInfo`（第五軸落後交易日數）、`rrgdLagDays` 等以「平日」算交易日差者 | 同源讀 `../taiwan-flow-live-v2/data/twse_holidays.json`（CSP `connect-src 'self'` 已涵蓋、不改 CSP）；交易日差與「最近應有資料日」跳過休市日；讀不到 fail-open |
+| taiwan-flows | `lastDueTradingDay`、`siteStatus` | 同上；休市日頂列比照週末顯示「休市定格」而非「等待資料發布」 |
+| taiwan-backtest | `ledgerStatus` | 參考日為休市日比照週末（與看門狗 `judge_backtest`、Worker `gradeBacktest` 同一語意）；三個門檻數值不動（`check_backtest_thresholds.py` 仍 PASS） |
+
+### 5c. 驗收
+- 各 repo 離線測試全綠；新測試以 09-25（週五假日）／09-28（週一假日）／09-26 週六／09-29 平日重演，且含 fail-open 案例。
+- 行事曆讀不到時，所有消費點的輸出與改動前**逐字相同**（前端以 Playwright 固定時鐘＋同一組 mock 對跑 innerHTML；後端／Worker 以既有測試不改為證）。
+- 前端改動後 postmkt 16 tab／flows 8 tab／v2 7 tab／backtest 各頁 console 零 error、375／390／1280 無頁面級水平捲軸。
+- 上線後驗證：下一個國定假日（2026-10-09 國慶）當天，Worker 不寫 frame、哨兵不探測、各站頂列顯示休市而非缺漏。
 
 ## 4. 驗證
 
