@@ -1837,8 +1837,9 @@ export async function runSummaryDispatch(env, tp, slot, fetchFn = fetch, opts = 
     const series = env.FLOW_KV ? await env.FLOW_KV.get(`series:${today}`, "json") : null;
     if (!series || !series.length) return { slot, skipped: "non-trading-day" };
   } else if (tp.dow < 1 || tp.dow > 5) {
-    // am：06:5x-08:5x 當日 series 尚未誕生，只用台北 dow 守週末；國定假日不在 Worker 重複
-    // 實作（summary.yml 進場即查 TWSE 休市行事曆，誤發成本=一次秒退 runner，每年 2-4 次可接受）
+    // am：06:5x-08:5x 當日 series 尚未誕生，只用台北 dow 守週末。國定假日（2026-09-29 起）由
+    // scheduled handler 的休市守門在呼叫本函式之前擋掉（見 holidayToday）；本函式直呼時（/sumcheck、
+    // 測試）不讀行事曆，summary.yml 進場另查 TWSE 休市行事曆當第二道
     return { slot, skipped: "non-trading-day" };
   }
   const key = sumfiredKey(today, slot);
@@ -2277,17 +2278,29 @@ export function healthUrl(t, today) {
 // 沒有任何 frame/series，所有 TW 主觸發被守門靜默跳過、系統退化成只剩延遲的 GH cron，
 // 若健檢也照守門就同樣不會叫）。改成：series 缺只當「提示」寫進告警，照樣盤點照樣叫。
 // 代價＝國定假日會誤報一次（每年約 10 次，訊息會標「無盤中 series，可能為休市」，一眼可辨），
-// 換到的是「真故障一定叫得出來」。
+// 換到的是「真故障一定叫得出來」。**2026-09-29 起**國定假日改由行事曆判定（opts.marketClosed，見下），
+// 上述誤報只剩行事曆讀不到（fail-open）或颱風臨時停市的日子。
+// 國定假日（2026-09-29 批次二，§5a）：scheduled handler 查到今天是平日的國定假日時帶 opts.marketClosed=true。
+// 比照週末（週末 cron dow 2-6 根本不醒）＝不對「當日應有的台股產物」告警：只留**不依台股交易日**的項目——
+// HEALTH_NON_TW（us＝美股日曆、lastweek／meta＝週頻／月頻低頻班，GH cron 不看台股休市照跑）。
+// 濾完一項不剩就整班 return（不讀 series、不抓、不告警、不寫 jobstat＝跟週末一樣零副作用）。
+// 假日隔天的健檢不需特別處理：eve／morn 每一項都是「今日」產物（genToday／date＝今日／{ymd} 檔），
+// 沒有任何一項拿「前一交易日」當基準，所以 09-29 照常比對 09-29 即可。
+// 省略 opts.marketClosed（既有呼叫、行事曆讀不到 fail-open）＝改動前行為逐字不變。
+export const HEALTH_NON_TW = new Set(["us", "lastweek", "meta"]);
 export async function runHealthCheck(env, tp, slot, fetchFn = fetch, opts = {}) {
   const today = tp.date;
+  const closed = !!opts.marketClosed;
+  // 低頻班：今天不到期就整項濾掉（不抓、不計入 checked、不可能誤報）
+  const targets = (healthTargets(env)[slot] || [])
+    .filter((t) => t.mode !== "lowfreq" || lowFreqDue(t.name, today))
+    .filter((t) => !closed || HEALTH_NON_TW.has(t.name));
+  if (closed && !targets.length) return { slot, date: today, skipped: "market-closed" };
   let noSeries = false;
-  if (env.FLOW_KV) {
+  if (env.FLOW_KV && !closed) {
     const series = await env.FLOW_KV.get(`series:${today}`, "json");
     noSeries = !series || !series.length;
   }
-  // 低頻班：今天不到期就整項濾掉（不抓、不計入 checked、不可能誤報）
-  const targets = (healthTargets(env)[slot] || [])
-    .filter((t) => t.mode !== "lowfreq" || lowFreqDue(t.name, today));
   const rows = await Promise.all(targets.map(async (t) => {
     const obj = await fetchProduct(healthUrl(t, today), fetchFn).catch(() => null);
     return { name: t.name, ...healthVerdict(t, obj, today) };
@@ -2299,7 +2312,8 @@ export async function runHealthCheck(env, tp, slot, fetchFn = fetch, opts = {}) 
   if (missing.length) {
     // series 缺＝要嘛休市、要嘛盤中 frame 班故障（後者會連帶讓所有 TW 主觸發靜默跳過），
     // 兩種都該讓使用者一眼看到，所以直接寫進告警文字。
-    const note = noSeries ? "（無盤中 series，可能為休市或 frame 班故障）" : "";
+    const note = closed ? "（今日台股休市，只檢查美股／低頻班）"
+      : noSeries ? "（無盤中 series，可能為休市或 frame 班故障）" : "";
     await alertJob(env, tp, `health-${slot}`,
       `🩺 ${slot === "eve" ? "日終" : "晨間"}健檢：${missing.length}/${rows.length} 項未落地${note} — ${label.join("、")}`, fetchFn);
   }
@@ -4429,14 +4443,59 @@ export function parseHolidayCal(j) {
 }
 // 讀行事曆：**永不拋例外**。讀不到／非 2xx／壞檔／形狀不合 → { cal: null, err }（fail-open＝只排週末）。
 // cf 快取 1 小時（同檔其他 raw 靜態依賴的手法；該檔一週才更新一次）；/status 本身另有 5 分快取。
-export async function loadHolidayCal(fetchFn = fetch) {
+// timeoutMs 選填（2026-09-29 批次二加）：排程角色用較短的 HOLIDAY_SCHED_TIMEOUT_MS，免得 raw 卡住時拖慢每分鐘 frame；
+// 省略＝FIN_FETCH_TIMEOUT_MS＝/status 的既有行為。
+export async function loadHolidayCal(fetchFn = fetch, timeoutMs = FIN_FETCH_TIMEOUT_MS) {
   try {
-    const r = await fetchFn(HOLIDAYS_URL, { cf: { cacheTtl: 3600, cacheEverything: true }, signal: timeoutSignal() });
+    const r = await fetchFn(HOLIDAYS_URL, { cf: { cacheTtl: 3600, cacheEverything: true }, signal: timeoutSignal(timeoutMs) });
     if (!r || !r.ok) return { cal: null, err: `HTTP ${r ? r.status : "?"}` };
     const cal = parseHolidayCal(await r.json());
     return cal ? { cal, err: null } : { cal: null, err: "bad-shape" };
   } catch (e) {
     return { cal: null, err: String(e && e.message || e) };
+  }
+}
+// ---- 排程角色的「今天是不是國定假日」（docs/holiday-calendar.md §5a，2026-09-29 批次二）----
+// 總原則「休市日比照週末」：scheduled handler 在平日才有意義的角色（frame／哨兵／tick／TW 單體班／晚場班／
+// 晨間 TW 班／健檢的台股項）進場前問一次這支，是國定假日就比照週末不跑（週末本來就由 cron dow 或各函式
+// 自己的 dow 守門擋掉，**這支刻意只回「平日的國定假日」**，週末一律回 holiday:false、連行事曆都不讀，
+// 讓週末路徑逐字維持改動前的樣子）。
+// **fail-open**：行事曆讀不到／壞檔／年度未涵蓋 → holiday:false ＝ 照改動前行為跑（照寫 frame、照探測）。
+// 快取有兩層、各管各的：
+//   ① loadHolidayCal 的 `cf.cacheTtl: 3600`：Cloudflare 邊緣對這個 raw 子請求的快取（命中時不回源 raw，
+//      但**仍是一次子請求**、仍算進 invocation 的子請求數；workers.dev 上 cf 快取對第三方 origin 的實際
+//      命中行為我方未實測，只能當「可能省回源」看）。
+//   ② 本段的 isolate 記憶化 holidayMemo：同一個 isolate 內成功後 HOLIDAY_MEMO_OK_MS（30 分）內**連子請求都不發**；
+//      失敗記 HOLIDAY_MEMO_FAIL_MS（5 分）——失敗期間 fail-open 照寫 frame，且不會每分鐘都去撞一次掛掉的 raw。
+//   每分鐘 frame 因此是「每個 isolate 每 30 分至多 1 次子請求」，不是每分鐘一次；isolate 重啟就歸零重抓（無害）。
+//   同一分鐘多個 scheduled 事件並發（frame＋tick＋備援同分醒）共用 holidayInflight，不會各打一次。
+// 逾時取 HOLIDAY_SCHED_TIMEOUT_MS（5 秒）而非 /status 的 20 秒：frame 要在同一分鐘內寫完，raw 卡住時
+// 寧可 5 秒後 fail-open 照寫。
+export const HOLIDAY_MEMO_OK_MS = 30 * 60e3;
+export const HOLIDAY_MEMO_FAIL_MS = 5 * 60e3;
+export const HOLIDAY_SCHED_TIMEOUT_MS = 5000;
+let holidayMemo = null;       // { at, cal, err }
+let holidayInflight = null;
+export function resetHolidayMemo() { holidayMemo = null; holidayInflight = null; }   // 測試用
+export async function holidayCalCached(fetchFn = fetch, nowMs = Date.now()) {
+  if (holidayMemo && nowMs - holidayMemo.at < (holidayMemo.cal ? HOLIDAY_MEMO_OK_MS : HOLIDAY_MEMO_FAIL_MS))
+    return { cal: holidayMemo.cal, err: holidayMemo.err, memo: true };
+  if (!holidayInflight) {
+    holidayInflight = loadHolidayCal(fetchFn, HOLIDAY_SCHED_TIMEOUT_MS)
+      .then((r) => { holidayMemo = { at: nowMs, cal: r.cal, err: r.err }; return r; })
+      .finally(() => { holidayInflight = null; });
+  }
+  const r = await holidayInflight;
+  return { cal: r.cal, err: r.err, memo: false };
+}
+// tp＝taipeiParts；回 { holiday, err }。**永不拋例外**（loadHolidayCal 本身不拋，這裡再兜一層）。
+export async function holidayToday(tp, fetchFn = fetch, nowMs = Date.now()) {
+  if (!tp || tp.dow === 0 || tp.dow === 6) return { holiday: false, err: null };   // 週末交給既有守門
+  try {
+    const { cal, err } = await holidayCalCached(fetchFn, nowMs);
+    return { holiday: holidayClosed(tp.date, cal), err: cal ? null : err };
+  } catch (e) {
+    return { holiday: false, err: String((e && e.message) || e) };
   }
 }
 // 市場資料類判級（live/flows/postmkt）：資料日 ≥ 最近預期交易日 → green；
@@ -4773,6 +4832,21 @@ export default {
   //   每天每小時 :07（台北 06–22 時）→ dispatch taiwan-stock-news 新聞管線
   async scheduled(event, env, ctx) {
     const tp = taipeiParts(new Date(event.scheduledTime));
+    // 國定假日比照週末（docs/holiday-calendar.md §5a，2026-09-29 批次二；角色盤點表見 CLAUDE.md
+    // 「休市日（國定假日）各排程角色」節）。lazy：只有平日才有意義的角色才會 await 它（news／iching／us
+    // 不問），同一次事件至多問一次；週末直接 false（交給各角色既有的 dow 守門）。讀不到行事曆＝false＝照舊跑。
+    // 刻意在 handler 本體 await 後 return，而不是把各 run* 包進 .then：被守門的呼叫式因此逐字保留
+    // （test/frames.mjs、test/tickdiag.mjs 以原始碼字串釘住生產呼叫形狀），各 run* 函式本身零改動。
+    let holP = null;
+    const isHoliday = () => (holP ??= holidayToday(tp).then((h) => {
+      if (h.err) console.log("holiday-cal 未載入（fail-open，照平日跑）:", h.err);
+      return h.holiday;
+    }));
+    const holidaySkip = async (label) => {
+      if (!(await isHoliday())) return false;
+      console.log(`${label}: ${tp.date} 國定假日，比照週末不跑`);
+      return true;
+    };
     // 主排程/備援/晚場/am 路由（最先判斷，先於 scheduledRole——晚場與 am 窗的台北時刻
     // 落在哨兵窗（17-23 時 %5 分）/:07/:47 分流範圍，不先攔截會誤入 sentinel/news/idle）。
     // event.cron 精確比對，與既有 frame/哨兵/news/morning cron 各自的 event 互不干擾。
@@ -4780,20 +4854,38 @@ export default {
     if (droute) {
       if (droute.kind === "backup") {
         const bpipe = backupPipelineForCron(event.cron, env);
+        // TW 班（tw:true）國定假日不跑（其 series 守門本來也會擋，這裡連那次 KV get 都省）；
+        // us 班（tw:false）是美股日曆，台股休市照跑，不問行事曆
+        if (bpipe && bpipe.tw && await holidaySkip(`backup ${bpipe.name}`)) return;
         ctx.waitUntil(runBackup(env, tp, bpipe).catch((e) => console.log("backup:", e && e.message)));
       } else if (droute.kind === "evening") {
+        if (await holidaySkip("evening")) return;   // 整條晚場鏈（pm summary／diag／mktbal／aetf2／圖卡渲染與推播）
         ctx.waitUntil(runEvening(env, tp).catch((e) => console.log("evening:", e && e.message)));
       } else if (droute.kind === "health") {
         // 健檢班：不 dispatch、只盤點產物，缺件告警（失敗只 log，絕不影響其他班）
+        // 國定假日帶 marketClosed：只留美股／低頻班項目（見 runHealthCheck 上方註解）；平日呼叫式不變
+        if (await isHoliday()) {
+          ctx.waitUntil(runHealthCheck(env, tp, droute.slot, undefined, { marketClosed: true })
+            .catch((e) => console.log("health:", e && e.message)));
+          return;
+        }
         ctx.waitUntil(runHealthCheck(env, tp, droute.slot).catch((e) => console.log("health:", e && e.message)));
       } else if (droute.kind === "ticksample") {
         // 台指期 tick 量測班（暫時）：只抓一次、寫一把獨立 KV key，不 dispatch 任何東西、
         // 不接哨兵。失敗只 log，絕不影響同一分鐘醒來的其他班（各自獨立 waitUntil）
+        if (await holidaySkip("ticksample")) return;
         ctx.waitUntil(runTickSample(env, tp).catch((e) => console.log("ticksample:", e && e.message)));
       } else if (droute.kind === "iching") {
         // 股市易經每日班主觸發（台北 22:30／23:30）：失敗已在函式內告警，這裡只 log；同分醒的哨兵／晚場班各自獨立
         ctx.waitUntil(dispatchIching(env, tp).catch((e) => console.log("iching:", e && e.message)));
       } else if (droute.kind === "summary-am") {
+        // us 晨間補跑是美股日曆，台股國定假日照跑（不受下面守門影響）；am summary（summary.yml 進場查到休市
+        // 會秒退＝空跑一台 runner）與晨間圖卡比照週末不跑
+        const hol = await holidaySkip("summary-am／morning-cards");
+        if (hol) {
+          ctx.waitUntil(runUsCatchup(env, tp).catch((e) => console.log("us-catchup:", e && e.message)));
+          return;
+        }
         ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
         // 晨間圖卡（AM slot，2026-08-10）：同窗並存的第二件事——08:05–08:15 dispatch 渲染、
         // 08:20–08:50 推播；runMorning 內部各步已 try/catch，絕不影響上面的 summary-am
@@ -4812,14 +4904,22 @@ export default {
       return;
     }
     if (role === "morning") {
+      if (await holidaySkip("morning")) return;
       ctx.waitUntil(dispatchMorning(env).catch((e) => console.log("morning dispatch:", e && e.message)));
       return;
     }
     if (role === "sentinel") {
-      // 哨兵整段獨立 try/catch（runSentinel 內部已逐步吞錯），不影響既有功能
+      // 哨兵整段獨立 try/catch（runSentinel 內部已逐步吞錯），不影響既有功能。
+      // 國定假日比照週末：不探測 FinMind、不 dispatch、不寫 sentinel:<date>:* KV、不告警
+      if (await holidaySkip("sentinel")) return;
       ctx.waitUntil(runSentinel(env, tp).catch((e) => console.log("sentinel:", e && e.message)));
       return;
     }
+    // ★ 國定假日：frame／runAlerts／flow:last 全部不跑（比照週末——frame cron dow 2-6 本來就不在週末醒）。
+    // 這是 09-25／09-28 假歸檔的上游：休市日 FinMind 快照是前一交易日的收盤，照寫會在 KV 留下一整天
+    // f:<date>:<HH:MM>＋fi:<date>（series 另有 wrongDay 守門擋掉），被 intraday.yml 當成當日歸檔。
+    // 行事曆讀不到 → isHoliday()=false → 照舊寫（fail-open）。每分鐘的成本見 holidayCalCached 上方註解。
+    if (await holidaySkip("frame（含 runAlerts／flow:last）")) return;
     // frame key 由喚醒時間決定（scheduledTime）；失敗除 log 外寫 err:<date> 可見化（不再靜默斷檔）
     // 第九期：frame 存成功後接離線提醒偵測（同一班、不加 cron）；偵測失敗只 log，不影響 frame
     ctx.waitUntil(storeFrame(env, event.scheduledTime)

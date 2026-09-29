@@ -59,8 +59,8 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **27 支** `.mjs`；
-  2026-09-28 `ls worker/test/*.mjs` 實查（含同日新增的 `holidays.mjs`），取代舊記的 25 支）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **28 支** `.mjs`；
+  2026-09-29 `ls worker/test/*.mjs` 實查（含 09-28 的 `holidays.mjs` 與 09-29 的 `holidays2.mjs`），取代舊記的 27 支）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
   （**15 支**＝帶 cron 11 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
@@ -139,6 +139,44 @@
   inputs.rounds=2；KV 20 分時段桶 dedup、週日/週一晨不跑、08:05 後不觸發。
   動機：FinMind 美股常態 07:30–08:30 才入庫，05:05 主班 12 輪×10 分在 06:59 耗盡
   搆不到入庫窗。us 的 recheck／晨間健檢判準同步由 genToday 改資料日（mode `usDate`））
+
+## 休市日（國定假日）各排程角色（2026-09-29 批次二，規格 `docs/holiday-calendar.md` §5a）
+
+**總原則＝休市日比照週末**：平日才有意義的角色，遇行事曆所列的**平日國定假日**時，行為＝它在週六／週日的既有行為
+（多數是「cron dow 2-6 根本不醒」＝零副作用）。**不新增判級／門檻／訊號、不改任何資料欄位與 schema**。
+- **判定只有一處**：`worker/src/index.js` 的 `export async function holidayToday`（台北日期；**週末一律回 false、連行事曆都不讀**，
+  週末仍交給各角色既有的 dow 守門，週末路徑逐字不變）→ `export async function holidayCalCached`（isolate 記憶化）→
+  既有 `loadHolidayCal`（cf `cacheTtl: 3600`）＋`holidayClosed`。**守門放在 `scheduled` handler 本體**（`await` 後 `return`），
+  各 `run*` 函式一行未改——被守門的呼叫式因此逐字保留（`test/frames.mjs`／`test/tickdiag.mjs` 以原始碼字串釘住它們）。
+- **每分鐘 frame 的成本**：兩層快取各管各的——①`cf.cacheTtl` 是 Cloudflare 邊緣對 raw 子請求的快取（命中時不回源，
+  但**仍是一次子請求**；workers.dev 上對第三方 origin 的實際命中行為**未實測**）；②`holidayCalCached` 的 isolate 記憶化：
+  成功後 `HOLIDAY_MEMO_OK_MS`（30 分）內**連子請求都不發**，失敗記 `HOLIDAY_MEMO_FAIL_MS`（5 分，期間 fail-open 照寫 frame、
+  不會每分鐘去撞掛掉的 raw）；同分鐘多個事件並發共用 in-flight。逾時 `HOLIDAY_SCHED_TIMEOUT_MS`（5 秒，/status 仍是 20 秒）。
+  所以是「每個 isolate 每 30 分至多 1 次」，不是每分鐘一次（`test/holidays2.mjs` 以連續 4 分鐘 frame 斷言只讀 1 次）。
+- **fail-open**：行事曆 404／壞檔／拋錯／年度未涵蓋 → `holiday:false` → 照改動前跑（照寫 frame、照探測），log 一行
+  `holiday-cal 未載入`。颱風臨時停市（行事曆事後才補）當天照舊會跑。
+
+| 角色（入口） | 休市日行為 | 改／不改與理由 |
+|---|---|---|
+| `frame`（每分鐘，`storeFrame`＋`runAlerts`＋13:25–13:40 `storeFlowLast`） | **不跑**：不打 FinMind 快照、不寫 `f:`／`fi:`／`series:`／`flow:last`／`err:`、不偵測提醒 | **改**。09-25／09-28 假歸檔的上游（休市日快照＝前一交易日收盤，照寫會留整天 stale frame）；比照週末 cron 不醒 |
+| `sentinel`（17:00–22:55 每 5 分，`runSentinel`） | 不探測、不 dispatch、不寫 `sentinel:<date>:*`、不告警 | **改**（比照週末：`scheduledRole` 週末本來就不回 sentinel） |
+| `ticksample`（`runTickSample`） | 不抓 tick、不寫 `tick:` KV、當日不評估拆除提醒 | **改**（週末 cron 不醒）；`/tickdiag` 該日 132 格缺席＝預期 |
+| 單體班 TW 四條＋recheck（daysummary／intraday／aetf／baseline，`runBackup`） | 不讀 KV、不抓產物、不 dispatch、不告警 | **改**（多一道；原本 `series:<date>` 守門在 frame 不寫後本來也會擋，現在連那次 KV get 都省） |
+| 單體班 us＋recheck（`runBackup` us） | **照跑** | **不改**：美股日曆，台股休市與它無關 |
+| `evening`（21:00–23:55，`runEvening`：pm summary→diag→mktbal→aetf2→圖卡渲染→`pushDailyCards`） | 整條不跑 | **改**（原 series 守門本來也會擋；`pushDailyCards` 另有 baseline.date 閘門，同樣不必動） |
+| `health` eve（23:50，`runHealthCheck`） | 帶 `opts.marketClosed`：只留 `HEALTH_NON_TW`（us／lastweek／meta）；**濾完一項不剩就零副作用 return**（週五假日即此）；週一假日仍檢查 lastweek／meta | **改**。低頻班是週頻／月頻 GH cron、不看台股休市，丟掉會讓週一假日那週漏檢；台股日產物不告警 |
+| `health` morn（09:30） | 同上，只剩 us | **改**；假日隔天（09-29）不需特別處理——eve／morn 每一項都是「今日」產物，沒有一項以「前一交易日」為基準 |
+| `summary-am` 窗（`runSummaryDispatch` am＋`runMorning`＝晨間圖卡渲染／推播） | 不 dispatch summary.yml、不渲染、不推 LINE | **改**（週末兩者都有 dow 守門；summary.yml 進場查到休市會秒退＝空跑 runner） |
+| `summary-am` 窗的 `runUsCatchup` | **照跑** | **不改**：美股日曆（它自己的週日／週一守門不動） |
+| `morning`（06:47，`dispatchMorning`） | 不 dispatch | **改**（比照週末：`scheduledRole` 週末不回 morning）。`morning.yml` 的 GH cron（`0 22 * * 0-4`）不看行事曆、照舊會產出，只是少了 Worker 的準點加速 |
+| `news`（每日 :07） | 照跑 | **不改**：本來就含週末（新聞是日曆日） |
+| `iching`（22:30／23:30） | 照跑 | **不在本批**（另一 session 負責；該 repo `daily_run` 自己判休市） |
+| `alertJob` 本體 | 不變 | **不改**：它只看週末 dow；休市日會呼叫它的只剩 us／低頻班／news／iching，都不屬台股交易日類 |
+
+測試 `node test/holidays2.mjs`（直接打 `export default` 的 `scheduled`，stub 全域 fetch＋KV＋ctx）：22 個角色×09-25／09-28
+逐一斷言零 FinMind／零 dispatch／零告警／零 KV；09-29 與行事曆 404／壞檔／拋錯（fail-open）時，fetch 集合與 KV 操作集合
+**與改動前（`git show 94c5773:worker/src/index.js`）對跑逐項相同**；09-26 週六 dow `*` 的角色與改動前相同且不讀行事曆；
+記憶化／in-flight／年度未涵蓋。非 git 環境取不到舊版時對跑段落印 WARN 略過。
 
 ## 台指期 tick 量測班與 `/tickdiag`（2026-09-09，**暫時班，拆除條件見下**）
 
@@ -510,8 +548,8 @@
   **`x-holidays`**（`loaded; years=2026` 或 `unloaded; HTTP 404`），未載入時另 `console.log` 一行（`wrangler tail` 看得到）。
 - **仍會誤報的情形**：颱風臨時停市（TWSE 事後才補進行事曆）；跨年後到第一個週日 `holidays.yml` 跑完前，新年度不在
   `years` 內（依契約退回只排週末，元旦前後可能誤報一次）。
-- **批次一只改 `/status` 路徑**：`runSentinel`／`runHealthCheck`／`runTickSample`／`runMorning` 與前端 `prevWeekday` 等
-  都不讀行事曆（批次二另案）；它們若呼叫到上述共用函式，因不傳 `cal` 行為不變。
+- **批次一只改 `/status` 路徑**；排程角色與前端的休市處理是**批次二（2026-09-29）**，見「休市日（國定假日）各排程角色」節
+  與「頂列」節。排程角色走 `holidayToday`（isolate 記憶化），**不**傳 `cal` 給上述判級函式，`/status` 的行為不受批次二影響。
 
 **來源**：live 讀本站 KV `fi:<date>` frame 索引；flows 抓 `taiwan-flows/data/status.json`
 （小檔；**`data_date` 取 `actual_date`＝實際落地的最新交易日，缺才退回 `date`**——`date` 是「預期交易日」，
@@ -683,11 +721,10 @@ intraday.yml 照 cron `10 6 * * 1-5` 觸發（實際 commit 落在台北 19:43�
   09-18／09-21／09-22／09-23／09-24（與 `97f688f` 那版同一組日子；各格數值不同，因 level 取自重算當下的
   `baseline.json`（`date=2026-09-24`），`97f688f` 當時用的是前一日那版）；`rrg_frozen.json` 從 `97f688f`
   **逐字還原**（`date=2026-09-24`、`base_days`＝09-17~09-23，不含當日、不含假日）。
-- **本批刻意未動（批次二）**：Worker 端 frame 班在假日照樣寫 KV（殘留 frame 的來源）；Worker `runBackup` 的
-  intraday 補發與 `runHealthCheck` eve 盤點**不讀行事曆**——修正後假日不再有 `intraday/<date>.json`，健檢會像
-  事故前一樣在假日列 `intraday(無檔)`（訊息附「無盤中 series，可能為休市」提示，既有已接受的誤報）；
-  `runBackup` 在 `series:<date>` 存在時可能於 14:40／15:10 補發 intraday.yml，那兩班會被本守門優雅擋下（exit 0）。
-  前端 `ovRrgTaipeiToday` 的「國定假日不處理」亦屬批次二。測試 `tests/test_intraday_holidays.py`。
+- **批次一當時未動、2026-09-29 批次二已補**：Worker frame 班休市日不再寫 KV（殘留 frame 的**上游**已斷）、
+  `runBackup` TW 班與 `runHealthCheck` 休市日比照週末（見「休市日（國定假日）各排程角色」節）、前端 `ovRrgTaipeiToday`
+  休市日直接走定格。本節三支腳本的守門**保留**（行事曆 fail-open、或 KV 仍有更早殘留時的第二道）。
+  測試 `tests/test_intraday_holidays.py`。
 
 **守門的次生效應（可接受的降級，2026-09-12 覆驗補記）**：若某日首班的 `build rrg frozen`
 因網路等原因失敗、但同班 `build rrg base` 成功並 commit，則**該日任何補跑都會被守門擋下**
@@ -752,8 +789,11 @@ intraday.yml 照 cron `10 6 * * 1-5` 觸發（實際 commit 落在台北 19:43�
   （`const T=`→`T=`、`const {rows,valid}=`→`({rows,valid}=)`）；逐字未動的是兩句早退文案與
   `ovRrgEnsure`／`ovRrgAnchorMin`。**行為**不變的證據＝四情境 `#main` innerHTML 與 G1 之前逐字相同）
   （那兩句在平日是真的）：rows 為空 → 先試定格檔 → 定格檔讀不到／內容湊不出
-  3 個可用取樣點才退回原降級③文案。**國定假日不處理**（同 `liveStatus` 立場），平日假日 10:01 前
-  仍會看到「盤前時段」。用詞與 `liveStatus` 五值對齊：週末＝**休市定格**、其餘＝**收盤定格**。
+  3 個可用取樣點才退回原降級③文案。**國定假日（2026-09-29 批次二起）比照週末**：`ovRrgTaipeiToday` 多回 `hol`
+  （同源 `data/twse_holidays.json`，見「頂列」節的行事曆說明），休市日直接走定格、不打 `/replay?t=`，文案寫
+  「國定假日休市」、定格種類＝**休市定格**；行事曆未載入（載入前的首次渲染或 fail-open）仍是舊行為——平日假日
+  10:01 前會看到「盤前時段」、之後由降級③接手並標**收盤定格**。`ovRrgBaseDays` 的基準新鮮度同批改扣國定假日
+  （示警文案依行事曆是否載入二選一）。
   **盤中與交易日收盤後走不到定格路徑**（那時 rows 非空），
   即時路徑逐字不變（2026-09-11 Playwright 以同一組 mock ＋ 固定時鐘，對跑改動前後的 `#main`
   innerHTML **逐字相同**）。CSP 不需改（同源 `data/*.json` 已被 `connect-src 'self'` 涵蓋）。
@@ -907,7 +947,7 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 |------|--------|------|
 | `ts` 時分 ≥ 09:00 | `ts` 的日期 | **`ts` 為合法時戳時實務上只走這條**——但這是「指數時戳只會是 09:00 後的盤中／收盤值」的**推論、非官方保證**。依據＝`PROJECT_SUMMARY.md`「觀測紀錄」表 **8 筆樣本（#1–#6 ＋ A、B）的 `ts_index` 全部 ≥09:00**（`13:33`、`10:30:45`、`11:31:15`…），無任何 <09:00 樣本；**不是**舊語意那兩筆 08:30 殘留觀測（那是 09:00 門檻位置的由來，不是這條推論的證據）。指數列不參與盤後定價／興櫃交易，非交易日給正確的前一交易日、收盤後鎖當日 13:33、盤中隨盤跳動（僅落後個股 max 4–5 秒，實測） |
 | `ts` 時分 < 09:00 | `flow_last.date`（須早於 `ts` 日期），無則 `ts` 日期的前一平日 | **這個子情形在新語意下走不到——但那是推論、不是保證**（2026-09-08 覆驗更正：原寫「已成死碼」是**過強的斷言**）。舊語意（個股 max(date)）在非交易日會是 08:30 盤前殘留，才需要這條後備。留作 `ts` 形狀劣化（上游指數列缺漏／退回舊形狀）時的降級路徑 |
-| `ts` 為 null（`001`／`101` 兩列指數皆缺） | `flow_last.date`，無則「—」 | **後備分支整體是活路徑**：`ts` 為 null 時就會走到它（覆驗情境④a 實測：`ts=null` ＋ `flow_last.date=今日` → 資料日由它推得），所以**不可把整條後備稱作死碼**。上游嚴重劣化才會發生。已知失效：定格班漏寫時 `flow_last.date` 偏舊；國定假日不處理（前一平日會誤報，與 taiwan-flows 同立場） |
+| `ts` 為 null（`001`／`101` 兩列指數皆缺） | `flow_last.date`，無則「—」 | **後備分支整體是活路徑**：`ts` 為 null 時就會走到它（覆驗情境④a 實測：`ts=null` ＋ `flow_last.date=今日` → 資料日由它推得），所以**不可把整條後備稱作死碼**。上游嚴重劣化才會發生。已知失效：定格班漏寫時 `flow_last.date` 偏舊；「前一平日」（`prevWeekday`）自 2026-09-29 起在行事曆載入後另跳國定假日，未載入時只排週末 |
 
 **可見文案一律稱「指數時間」，不得再寫「最後成交」**（2026-09-08 改，四處：`renderTopline` 資料日 tooltip、
 `liveStatus` 收盤定格／盤中兩個 tooltip、`insightHtml` 摘要分析 crumb）。`ts` 為 `null` 時經共用函式
@@ -936,8 +976,16 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 
 本站更新＝`generated_at`（Worker 牆鐘 UTC Z）轉台北到分。狀態五值（台北時區、交易日只排週末）：**查詢失敗（未知）**＝boot 兩次
 都拿不到可用 payload（後續自動刷新失敗沿用上一份、不改狀態）；**延遲**＝`generated_at` 距今 >3 分（沿用舊門檻）；**休市定格**＝
-週末，或平日 09:00 後資料日≠今日（國定假日／開盤首分鐘尚無成交／上游未更新，三者無法區分）；**收盤定格**＝平日資料日＝今日且
+週末、**行事曆所列的國定假日**（2026-09-29 起，tooltip 寫「國定假日休市（名稱）」），或平日 09:00 後資料日≠今日（行事曆未載入時的國定假日／開盤首分鐘尚無成交／上游未更新，三者無法區分）；**收盤定格**＝平日資料日＝今日且
 ≥13:35（同 `ovMarketPhase`），或平日 09:00 前握著上一交易日；**盤中**＝平日 09:00–13:35 且資料日＝今日。
+**休市行事曆（2026-09-29 批次二）**：`boot()` 以 `twseCalLoad()` **非阻塞**讀同源 `data/twse_holidays.json`
+（CSP `connect-src 'self'` 已涵蓋），`twseCalParse`／`twseHoliday` 與 Worker `parseHolidayCal`／`holidayClosed` 同一套規則。
+**載入前先以只排週末渲染**；載入成功且**近 30 日（含今日）內有休市日**才重繪一次（其餘日子行事曆改變不了任何顯示，省一次重繪）。
+讀不到／壞檔／形狀不合＝fail-open，**不重繪、畫面與改動前逐字相同**。消費點：`prevWeekday`（`liveDataDate` 後備）、`liveStatus`、
+`ovRrgTaipeiToday`、`ovRrgBaseDays`。驗證（Playwright 固定台北時鐘 09-25 10:30／09-28 21:00／09-26 10:00／09-29 10:30，`/live` 與
+`/replay` 以 route mock）：行事曆 404／壞檔時 `#tsline`、`#main`（即時一覽與輪動雷達）與改動前 `94c5773` 逐字相同；
+行事曆正常時假日頂列「休市定格」＋國定假日 tooltip、輪動雷達 `/replay?t=` 請求 0 次並走休市定格；09-29 僅差「基準已過期」
+誤報消失（09-23→09-29 扣兩個假日後由 4 降為 2 個交易日）。
 驗證（2026-09-06，Playwright `page.clock`＋`/live` route 七情境：收盤後凍結檔／盤中／週日有無 `flow_last`／平日盤前殘留／延遲／500）
 全數符合預期、pageerror 零。**若日後 `/livediag` 觀測到殘留時戳 ≥09:00 的形狀，要回來改 `liveDataDate` 的分水嶺。**
 
@@ -947,7 +995,7 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 26 支要個別跑（離線、免 token；2026-09-28 實查 worker/test/*.mjs 共 27 支，
+node test/sentinel.mjs              # 其餘 27 支要個別跑（離線、免 token；2026-09-29 實查 worker/test/*.mjs 共 28 支，
                                     #   含 swr.mjs 與新增的 tickdiag.mjs。舊記的「22 支」已過時）
 for f in test/*.mjs; do node "$f" || echo FAIL $f; done   # 一次跑完全部（同 worker-deploy.yml 的 glob）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗

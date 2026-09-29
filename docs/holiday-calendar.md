@@ -60,6 +60,17 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 | `src/build_baseline.py` 假日空等 | 休市日不空等（比照週末），沿用 `src/twse_holidays.py` |
 | 前端 `index.html`：`prevWeekday`／`liveStatus`／`liveDataDate` 後備／`ovRrgTaipeiToday`（週末走定格）／`ovRrgBaseDays` | 同源讀 `data/twse_holidays.json`（非阻塞、失敗 fail-open）；休市日頂列顯示「休市定格」、輪動雷達直接走定格（比照週末），前一交易日跳過休市日 |
 
+**5a 實作註記（2026-09-29，分支 `claude/investment-site-optimization-nac77h`；驗收條件本身未改）**：
+| 消費點 | 狀態 | 落點 |
+|---|---|---|
+| Worker frame 存 KV | 已實作 | `worker/src/index.js` `scheduled` handler 的 frame 分支（`holidaySkip`）；行事曆走 `holidayCalCached`（isolate 記憶化 30 分／失敗 5 分＋in-flight 共用，其下仍是 `loadHolidayCal` 的 cf 快取）——連續每分鐘 frame 同一 isolate 只讀 1 次（`test/holidays2.mjs` 實測） |
+| `runSentinel` | 已實作 | handler 的 sentinel 分支 |
+| `runHealthCheck` | 已實作 | `opts.marketClosed` → 只留 `HEALTH_NON_TW`（us／lastweek／meta）；全濾光即零副作用 return。假日隔天：eve／morn 每項都是「今日」產物，無需改基準 |
+| `runTickSample`、`runMorning`、`runBackup`（TW 班）、`runAlerts`、晚場班、am summary、`dispatchMorning` | 已實作（跳過） | handler 各分支；盤點表與「刻意不改」（us 班／`runUsCatchup`／news／iching／`alertJob`）理由見 CLAUDE.md「休市日（國定假日）各排程角色」節 |
+| `src/build_baseline.py` | 已實作 | `fresh_wait_skip`＋收集交易日迴圈跳過休市日（`src/twse_holidays.py`）；測試 `tests/test_baseline_holidays.py` |
+| 前端 `index.html` | 已實作 | `twseCalLoad`／`twseCalParse`／`twseHoliday`；`prevWeekday`／`liveStatus`／`ovRrgTaipeiToday`（`hol`）／`ovRrgBaseDays`。載入前只排週末、近 30 日有休市日才重繪一次 |
+| 上線後驗證（5c 末條，2026-10-09） | **未做**（需部署後當日實測） | — |
+
 ### 5b. 其他站前端
 | 站 | 消費點 | 完成定義 |
 |---|---|---|

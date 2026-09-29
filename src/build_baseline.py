@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fin  # noqa: E402
+import twse_holidays  # noqa: E402
 
 OUT = fin.ROOT / "data" / "baseline.json"
 NDAYS = 21          # 破20日新低需要 D-1..D-20；y2 的爆量分母需要 D-2..D-6
@@ -185,7 +186,19 @@ def build_subs_y(s1, s2, stats):
     return out
 
 
+def fresh_wait_skip(today_iso: str, cal) -> str | None:
+    """今天要不要**跳過** freshness 空等（回原因字串＝跳過；None＝要等）。
+
+    2026-09-29 批次二（docs/holiday-calendar.md §5a）：休市日比照週末——週末本來就不空等
+    （抓回最近日＝上一交易日屬正常），國定假日資料日同樣永遠不會推進，舊版會白等 40 分。
+    判定共用 src/twse_holidays.py（週末 ∪ 行事曆 closed）；cal 為 None（行事曆讀不到／
+    年度未涵蓋）＝fail-open，只排週末＝改動前行為。
+    """
+    return twse_holidays.closed_reason(today_iso, cal)
+
+
 def main():
+    cal = twse_holidays.load()   # 讀不到回 None＝只排週末（fail-open，不拋）
     cl = classify()
     keep = {c for c, v in cl.items() if v.get("t") in ("twse", "tpex") and c[:1].isdigit()}
     members = {}
@@ -214,6 +227,8 @@ def main():
         probe += 1
         if date.fromisoformat(ds).weekday() >= 5:
             continue
+        if twse_holidays.is_closed(ds, cal):   # 國定假日比照週末：不打 API（打了也是空的）
+            continue
         m = day_prices(ds)
         if not m:
             continue
@@ -227,11 +242,14 @@ def main():
     # FinMind 入庫時間不定，排程 20:41 起跑仍可能撲空（法人最新資料日 < 今日），
     # 導致連買日數整組往前錯一天。若今天是週一~五且最新資料不含今日 → 每 10 分
     # 重試、最多 40 分；逾時照原邏輯繼續（連買日數少算今日一天，但不中斷產出）。
-    # 假日考量：今天可能是「平日的休市日」（國定假日），資料日永遠不會推進——
-    # 重試僅在週一~五啟用且逾時必定放行，最多多等 40 分、不會無限空等；
-    # 週末不啟用（抓回最近日=上一交易日屬正常，不空等）。
+    # 假日考量：週末與國定假日（2026-09-29 起讀行事曆，見 fresh_wait_skip）都不啟用
+    # （抓回最近日=上一交易日屬正常，不空等）。行事曆讀不到時退回只排週末：國定假日
+    # 仍會白等最多 40 分（逾時必定放行），同改動前。
     today_iso = date.today().isoformat()
-    if date.today().weekday() < 5:
+    skip_why = fresh_wait_skip(today_iso, cal)
+    if skip_why:
+        print(f"今日 {today_iso} 休市（{skip_why}），不做 freshness 空等", flush=True)
+    else:
         deadline = time.time() + 40 * 60   # 價格＋法人兩項共用同一個 40 分預算
         while True:
             # 檢查呼叫是新增的額外查詢，任何暫時性失敗只視為「未就緒」續等，

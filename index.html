@@ -302,9 +302,41 @@ function fmtTaipeiMin(iso){
   return new Date(t).toLocaleString("sv-SE",{timeZone:"Asia/Taipei"}).slice(0,16);
 }
 function taipeiNowStr(ms){return new Date(ms==null?Date.now():ms).toLocaleString("sv-SE",{timeZone:"Asia/Taipei"});}
-function prevWeekday(d){   // YYYY-MM-DD → 前一個平日（僅排週末）
+// ---- 休市行事曆（docs/holiday-calendar.md §5a，2026-09-29 批次二）----
+// 同源讀 data/twse_holidays.json（CSP connect-src 'self' 已涵蓋、不改 CSP）。**非阻塞**：boot 不 await，
+// 載入前一律「只排週末」渲染（＝改動前行為）；載入成功且近 30 日內有休市日才重繪一次（見 twseCalLoad）。
+// **fail-open**：404／壞檔／schema≠1／年度不在 years → TWSE_CAL 維持 null 或 twseHoliday 回 false＝只排週末，
+// 畫面與改動前逐字相同、不拋例外、不重繪。解析規則與 Worker parseHolidayCal／holidayClosed 同一套。
+let TWSE_CAL=null;   // {closed:Set, years:Set, names:{}}
+function twseCalParse(j){
+  if(!j||typeof j!=="object"||j.schema!==1||!Array.isArray(j.years)||!Array.isArray(j.closed))return null;
+  const years=new Set(j.years.filter(y=>Number.isInteger(y)&&y>=2000&&y<=2100));
+  if(!years.size)return null;
+  const closed=new Set(j.closed.filter(d=>typeof d==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(d)));
+  const names=(j.names&&typeof j.names==="object")?j.names:{};
+  return {closed,years,names};
+}
+// 平日的排定休市日（週末由呼叫端自己判）；年度未涵蓋一律 false
+function twseHoliday(d){
+  return !!(TWSE_CAL&&typeof d==="string"&&TWSE_CAL.years.has(Number(d.slice(0,4)))&&TWSE_CAL.closed.has(d));
+}
+function twseHolidayName(d){ const n=TWSE_CAL&&TWSE_CAL.names[d]; return typeof n==="string"?n:""; }
+function twseCalLoad(){
+  loadJSON("data/twse_holidays.json").then(j=>{
+    const c=twseCalParse(j); if(!c)return;          // 形狀不合＝fail-open，不重繪
+    TWSE_CAL=c;
+    // 只在「近 30 日內（含今日）有休市日」時重繪一次：其餘日子行事曆改變不了任何顯示
+    // （prevWeekday／ovRrgBaseDays 回溯不超過這個範圍的實務量級），省一次整頁重繪。
+    const today=taipeiNowStr().slice(0,10), t0=Date.parse(today+"T00:00:00Z");
+    let near=false;
+    for(let i=0;i<=30&&!near;i++)near=twseHoliday(new Date(t0-i*864e5).toISOString().slice(0,10));
+    if(!near)return;
+    if(state.live&&!(OV_REPLAY&&state.tab==="ov"))render(); else renderTopline();
+  }).catch(()=>{});                                  // 讀不到＝fail-open（只排週末），靜默
+}
+function prevWeekday(d){   // YYYY-MM-DD → 前一個交易日（排週末；行事曆載入後另排國定假日）
   let t=Date.parse(d+"T00:00:00Z"); if(isNaN(t))return null;
-  do{t-=864e5;}while([0,6].includes(new Date(t).getUTCDay()));
+  do{t-=864e5;}while([0,6].includes(new Date(t).getUTCDay())||twseHoliday(new Date(t).toISOString().slice(0,10)));
   return new Date(t).toISOString().slice(0,10);
 }
 // /live 的 ts 自 2026-09-08 起＝**指數列時戳**（加權指數 001 的 date，退櫃買指數 101），
@@ -356,6 +388,9 @@ function liveStatus(live,err,nowMs){
   const d=liveDataDate(live)||"—";
   if(!isNaN(age)&&age>180)return {txt:"延遲",cls:"tb-lag",title:`快照產出於 ${Math.round(age/60)} 分鐘前（generated_at），Worker 或上游可能卡住；資料日 ${d}`};
   if(dow===0||dow===6)return {txt:"休市定格",cls:"tb-mut",title:`週末休市，資料停在最近交易日 ${d}`};
+  // 國定假日比照週末（行事曆載入後才生效；未載入＝落到下面既有分支，同改動前）
+  if(twseHoliday(today)){const nm=twseHolidayName(today);
+    return {txt:"休市定格",cls:"tb-mut",title:`國定假日休市${nm?`（${nm}）`:""}，資料停在最近交易日 ${d}`};}
   // 括號內為指數時間（見 idxTsText）；ts 為 null 時顯「—」而非字面 null
   if(d===today)return hm>="13:35"?{txt:"收盤定格",cls:"tb-mut",title:`今日 ${d} 已收盤，資料定格（指數時間 ${idxTsText(live)}）`}
                               :{txt:"盤中",cls:"tb-ok",title:`盤中即時（指數時間 ${idxTsText(live)}）`};
@@ -1463,7 +1498,8 @@ function ovRrgBaseDays(){
   const today=Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate());
   const last=Date.parse(to+"T00:00:00Z");
   let gap=0;
-  if(!isNaN(last))for(let t=last+864e5;t<=today;t+=864e5){const w=new Date(t).getUTCDay();if(w>=1&&w<=5)gap++;}
+  // 行事曆載入後另扣國定假日（未載入＝只扣週末，同改動前）
+  if(!isNaN(last))for(let t=last+864e5;t<=today;t+=864e5){const w=new Date(t).getUTCDay();if(w>=1&&w<=5&&!twseHoliday(new Date(t).toISOString().slice(0,10)))gap++;}
   return {from:ds[0],to,n:ds.length,gap,stale:gap>OV_RRG_BASE_STALE};
 }
 function ovRrgBaseAt(name,hm){
@@ -1647,7 +1683,8 @@ function ovRrgFrozenLoad(){
 // 的既有立場，站內沒有行事曆來源）——平日的國定假日仍會走牆鐘那條降級文案。
 function ovRrgTaipeiToday(){
   const today=taipeiNowStr().slice(0,10);
-  return {today,dow:new Date(today+"T00:00:00Z").getUTCDay()};
+  // hol：平日的國定假日（2026-09-29 批次二；行事曆未載入恆為 false＝改動前行為）
+  return {today,dow:new Date(today+"T00:00:00Z").getUTCDay(),hol:twseHoliday(today)};
 }
 // 回 {T,rows,valid,bd,date}；檔案未載入、或湊不出 3 個可用取樣點 → 回 null，呼叫端退回原降級文案。
 function ovRrgFrozenView(){
@@ -1753,13 +1790,15 @@ function ovRrgHtml(){
   // **平日路徑一行不動**（含國定假日：站內無行事曆來源，維持 liveStatus 的「不處理」立場，
   // 平日假日在 ${RRG_T0} 之前仍會看到「盤前時段」，之後由降級③的定格 fallback 接手）。
   let frz=null, T=null, rows=null, valid=null;
-  const tpToday=ovRrgTaipeiToday(), wknd=(tpToday.dow===0||tpToday.dow===6);
+  // wknd＝「今天休市」：台北週末，或行事曆所列的平日國定假日（2026-09-29 起比照週末直接走定格、不打 /replay）
+  const tpToday=ovRrgTaipeiToday(), wknd=(tpToday.dow===0||tpToday.dow===6)||tpToday.hol;
+  const closedWhy=tpToday.hol?"國定假日休市":"台北週末休市";
   if(wknd){
     ovRrgFrozenLoad();
     frz=ovRrgFrozenView();
     if(!frz){
       if(!OV_RRG_FRZ&&!OV_RRG_FRZ_ERR)return `<div class="loading">盤外定格資料載入中…</div>`+dailyLink;
-      return `<div class="loading">非交易日（台北週末休市）：今日沒有盤中分鐘快照，輪動軌跡改讀盤外定格檔，但${escI(OV_RRG_FRZ_ERR||"定格檔的內容不足以繪製軌跡")}。</div>`+dailyLink;
+      return `<div class="loading">非交易日（${closedWhy}）：今日沒有盤中分鐘快照，輪動軌跡改讀盤外定格檔，但${escI(OV_RRG_FRZ_ERR||"定格檔的內容不足以繪製軌跡")}。</div>`+dailyLink;
     }
     T=frz.T; rows=frz.rows; valid=frz.valid;
   }else{
@@ -1938,7 +1977,7 @@ function ovRrgHtml(){
   // 其餘（平日的國定假日／盤中快照過 TTL）＝「收盤定格」。兩者都要標資料日與「不是即時盤面」。
   const frzKind=wknd?"休市定格":"收盤定格";
   const frzNote=frz
-    ? `<div class="ovrrghint" style="color:var(--accent);font-weight:700">${escI(frz.date)} <b>${frzKind}</b>：${wknd?"台北週末休市，今日沒有盤中快照":"目前為非交易時段（國定假日，或盤中快照已過保存期限），取不到即時盤中快照"}——本圖是 <u>${escI(frz.date)} 收盤（${escI(ovMin2Hm(OV_RRG_TMAX))}）</u>的定格軌跡，<u>不是即時盤面</u>。</div>`
+    ? `<div class="ovrrghint" style="color:var(--accent);font-weight:700">${escI(frz.date)} <b>${frzKind}</b>：${wknd?`${closedWhy}，今日沒有盤中快照`:"目前為非交易時段（國定假日，或盤中快照已過保存期限），取不到即時盤中快照"}——本圖是 <u>${escI(frz.date)} 收盤（${escI(ovMin2Hm(OV_RRG_TMAX))}）</u>的定格軌跡，<u>不是即時盤面</u>。</div>`
     : "";
   const chart=`<div class="ovrrgchart">${replayNote}${frzNote}<div class="ovquad"><div class="ovquadzoom" id="ovQuadZoom">`+
     `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">${svg}${tails}${bubs}${lbls}</svg>`+
@@ -1948,7 +1987,7 @@ function ovRrgHtml(){
   // 過舊時明顯示警——排程連續失敗時 base 會靜默沿用舊基準，RS-Ratio 仍照算而誤導。
   const baseTxt=bd?`前 ${bd.n} 個交易日（${escI(bd.from)}～${escI(bd.to)}）`:"前數個交易日（基準檔未載明日期）";
   const baseWarn=bd&&bd.stale
-    ? `<div class="ovrrghint" style="color:var(--up);font-weight:700">⚠ 基準已過期：最後一個基準日 ${escI(bd.to)} 距今約 ${bd.gap} 個交易日（未扣國定假日，實際只會更久），可能是夜間基準表排程連續失敗。此時 RS-Ratio 比較的是舊常態，請降低採信度。</div>`
+    ? `<div class="ovrrghint" style="color:var(--up);font-weight:700">⚠ 基準已過期：最後一個基準日 ${escI(bd.to)} 距今約 ${bd.gap} 個交易日（${TWSE_CAL?"已扣行事曆所列國定假日":"未扣國定假日，實際只會更久"}），可能是夜間基準表排程連續失敗。此時 RS-Ratio 比較的是舊常態，請降低採信度。</div>`
     : "";
   const foot=`<div class="ovtfoot">${frz?`<b>${escI(frz.date)} ${frzKind}</b>（非即時盤面）。`:""}軌跡＝最近 ${nDraw} 個時點（每 ${OV_RRG_STEP} 分一格，最新 ${escI(valid[valid.length-1].hm)}）。`+
     `x＝RS-Ratio：100 表示該鏈成交佔比與${baseTxt}同時點的常態相同；y＝RS-Mom：100 表示近 ${OV_RRG_LAG} 分鐘相對強弱沒有變化。`+
@@ -2709,6 +2748,7 @@ async function loadJSON(u,mode){return (await fetch(u,{cache:mode||FETCH_CACHE.d
 async function boot(){
   try{state.cl=(await loadJSON("data/classify.json")).map;}catch(e){document.getElementById("main").innerHTML='<div class="loading">無法載入 classify.json：'+escI(e&&e.message||e)+'</div>';return;}
   ovRrgBaseLoad();   // 輪動雷達基準表（data/rrg_base.json）：不 await，缺檔只影響該視角
+  twseCalLoad();     // 休市行事曆（data/twse_holidays.json）：不 await，讀不到＝只排週末（fail-open）
   await pull(false);
   if(!state.live){await new Promise(s=>setTimeout(s,6000));await pull(false);}  // 首拉失敗重試一次，避免卡「載入中」
   if(!state.live){state.liveErr=true;renderTopline();}   // 兩次都拿不到可用 payload → 頂列「查詢失敗（未知）」
