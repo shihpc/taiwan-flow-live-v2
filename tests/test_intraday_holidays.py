@@ -47,6 +47,7 @@ try:
 
     @pytest.fixture(autouse=True)
     def _auto_restore():
+        FAILED.clear()      # pytest 下各 test 獨立計失敗，避免一個根因連帶讓後面全紅（驗收建議）
         yield
         _restore()
 except ImportError:  # 直跑時不需要 pytest
@@ -206,6 +207,44 @@ def test_base_drops_holiday_files():
     done()
 
 
+def test_base_build_passes_calendar():
+    """build() 必須把行事曆傳給 load_days——只測 load_days(…, cal) 抓不到「build 忘了傳」
+    （驗收變異 M1：build 內改成 load_days(k) 時原測試全綠）。"""
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    orig = bb.load_days
+
+    def spy(k, cal=None):
+        seen.append(cal)
+        raise _Stop
+
+    with tempfile.TemporaryDirectory() as td:
+        _set_cal(Path(td), GOOD_CAL)
+        bb.load_days = spy
+        try:
+            try:
+                bb.build(5, Path(td) / "out.json")
+            except _Stop:
+                pass
+        finally:
+            bb.load_days = orig
+    check("rrg_base build() 把行事曆傳給 load_days",
+          len(seen) == 1 and seen[0] is not None and th.is_closed("2026-09-25", seen[0]))
+    done()
+
+
+def test_schema_float_one_accepted():
+    """schema 1.0 照收，與 Worker／taiwan-flows／看門狗／回測一致（驗收建議）。"""
+    with tempfile.TemporaryDirectory() as td:
+        _set_cal(Path(td), {**GOOD_CAL, "schema": 1.0})
+        cal = th.load()
+        check("schema 1.0 照收、09-25 判休市", cal is not None and th.is_closed("2026-09-25", cal))
+    done()
+
+
 def test_fail_open():
     def http404(url, timeout):
         raise RuntimeError("HTTP 404")
@@ -215,7 +254,7 @@ def test_fail_open():
         ("本地壞 JSON＋遠端壞 JSON", "{not json", lambda u, t: b"<html>"),
         ("年度未涵蓋（years=[2025]）", {**GOOD_CAL, "years": [2025]}, http404),
         ("schema 為 True（bool 須排除）", {**GOOD_CAL, "schema": True}, http404),
-        ("schema 為 1.0（須恰為整數）", {**GOOD_CAL, "schema": 1.0}, http404),
+        ("schema 為 2", {**GOOD_CAL, "schema": 2}, http404),
         ("closed 形狀不合", {**GOOD_CAL, "closed": "2026-09-25"}, http404),
     ]
     for label, doc, fetch in cases:
@@ -246,6 +285,8 @@ if __name__ == "__main__":
     test_archive_skips_holidays()
     test_frozen_skips_holidays()
     test_base_drops_holiday_files()
+    test_base_build_passes_calendar()
+    test_schema_float_one_accepted()
     test_fail_open()
     if FAILED:
         print(f"\nFAIL {len(FAILED)}：" + "、".join(FAILED))

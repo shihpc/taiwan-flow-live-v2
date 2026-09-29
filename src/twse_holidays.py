@@ -56,11 +56,11 @@ class TwseHolidays:
 
 
 def parse(doc: object, src: str = "") -> TwseHolidays | None:
-    """驗 §1 契約；任一處不合回 None。schema 必須恰為整數 1（排除 bool：Python 的 True == 1）。"""
+    """驗 §1 契約；任一處不合回 None。schema 必須等於 1 且不是 bool（Python 的 True == 1）；1.0 照收，與家族其他四端一致。"""
     if not isinstance(doc, dict):
         return None
     schema = doc.get("schema")
-    if isinstance(schema, bool) or schema != 1 or not isinstance(schema, int):
+    if isinstance(schema, bool) or schema != 1:   # 1.0 照收：與 Worker（=== 1）／taiwan-flows／看門狗／回測一致
         return None
     years, closed, names = doc.get("years"), doc.get("closed"), doc.get("names") or {}
     if not isinstance(years, list) or not years or \

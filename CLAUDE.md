@@ -676,7 +676,7 @@ intraday.yml 照 cron `10 6 * * 1-5` 觸發（實際 commit 落在台北 19:43�
   不產檔 → `build rrg base` 因 `data/intraday/` 無新檔照舊跳過 → commit 無 diff 照舊 exit 0；不紅燈、
   不引入 `continue-on-error`。
 - **讀哪份行事曆**：**先讀本地 `data/twse_holidays.json`**（本 repo 即產出端，checkout 後就在磁碟上，免網路），
-  本地缺檔／壞檔才退 raw URL（逾時 10 秒）。**fail-open**：兩者都不可用、schema 不是恰為整數 1（`True`／`1.0` 皆拒）、
+  本地缺檔／壞檔才退 raw URL（逾時 10 秒）。**fail-open**：兩者都不可用、schema 不等於 1 或為 bool（`True` 拒收、`1.0` 照收，與家族其他四端一致）、
   `years`／`closed` 形狀不合、或目標年度不在 `years` → 退回**只排週末**＝改動前行為，**不拋例外、不失敗**。
   此時平日國定假日若 KV 又有殘留 frame，仍會寫出假歸檔（同事故當時），`closed` 未收的颱風臨時停市亦同。
 - **資料清理（同批）**：刪兩份假檔；`rrg_base.json` 以 `build_rrg_base.py` 正規路徑重算，`days`＝
