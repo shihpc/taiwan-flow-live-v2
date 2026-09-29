@@ -67,9 +67,10 @@ const m2hm = m => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m %
 
 // ── 2. 資料：歸檔檔、當日 base、當日定格檔（交叉驗證用） ────────────────────
 const HOLIDAYS = ["2026-09-25", "2026-09-28"];
-const days = fs.readdirSync(path.join(ROOT, "data/intraday"))
-  .filter(f => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).map(f => f.slice(0, 10)).sort()
-  .filter(d => d >= "2026-09-14");
+// 重算範圍釘死為這 9 個交易日（不以 glob 取 ≥09-14）：在任何 commit 上重跑輸出皆相同，
+// 除非這 9 天的歸檔檔或 index.html 的被抽函式／常數有變。要納入新日子請另開一版報告。
+const days = ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
+  "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24"];
 
 function baseSeen(d) {
   const sha = git("rev-list", "--first-parent", "-1", `--before=${d}T01:00:00Z`, "origin/main").trim();
@@ -153,7 +154,12 @@ for (const d of days) {
   const med = (xs => { const s = [...xs].sort((x, y) => x - y), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; })(baseHm.map(inc));
   const mult = { "13:00": inc("13:00") / med, "13:10": inc("13:10") / med, "13:20": inc("13:20") / med, "13:30": inc("13:30") / med };
   const firstJump = ["13:10", "13:20", "13:30"].find(h => mult[h] >= 1.3) || null;
-  res.push({ d, flat, baseSha: sha, baseDays: base.days, bad, clean, fzDiff, fzBase, seen, cmkt: { medInc: med, mult, firstJump } });
+  // 同一算法改用歸檔 total（全市場口徑，元）——供 §7(c)「total 對 13:30 低估」的同日直接比對
+  const ti = {}; a.times.forEach((t, i) => { ti[t] = a.total[i]; });
+  const incT = hm => ti[hm] - ti[m2hm(hm2m(hm) - 10)];
+  const medT = (xs => { const s = [...xs].sort((x, y) => x - y), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; })(baseHm.map(incT));
+  const totMult1330 = incT("13:30") / medT;
+  res.push({ d, flat, baseSha: sha, baseDays: base.days, bad, clean, fzDiff, fzBase, seen, cmkt: { medInc: med, mult, firstJump }, total: { medIncYi: medT / 1e8, mult1330: totMult1330 } });
 }
 
 // ── 3. 彙整與輸出（Markdown 片段，直接貼進報告） ─────────────────────────────
@@ -174,7 +180,7 @@ L.push(`z 結構上可算（有 ≥4 筆 30 分位移）的最早錨點：${hms.
 L.push(`| 錨點 | ${ok.map(r => r.d.slice(5)).join(" | ")} | 合計 |`);
 L.push(`|---|${ok.map(() => "---").join("|")}|---|`);
 ANCHORS.forEach((m, i) => {
-  const cells = ok.map(r => { const s = r.seen[i]; return s.close ? `**${s.raw}**（0）` : `${s.raw}`; });
+  const cells = ok.map(r => { const s = r.seen[i]; return s.close ? `**${s.raw}**（${s.odd}）` : `${s.raw}`; });
   const tot = ok.reduce((s, r) => s + r.seen[i].raw, 0);
   L.push(`| ${m2hm(m)}${m >= C.CLOSE ? " ⛔" : ""} | ${cells.join(" | ")} | ${tot} |`);
 });
@@ -263,6 +269,15 @@ for (const r of ok) for (const s of r.seen) if (!s.close && s.extraRaw > C.ODDMA
 // D4 補：若把 13:00 本身也算進搜尋範圍
 const inc13 = {}; for (const r of ok) { const k = ["13:00", "13:10", "13:20", "13:30"].find(h => r.cmkt.mult[h] >= 1.3) || "無"; inc13[k] = (inc13[k] || 0) + 1; }
 L.push(`\ncmkt 跳升點若把 13:00 也納入搜尋：${Object.entries(inc13).map(([k, v]) => `${k}:${v}天`).join("，")}；11:30–13:00 的 10 分增額中位數（億）：${ok.map(r => r.cmkt.medInc.toFixed(1)).join("／")}`);
+
+// D4 補：13:30 倍數，真分母 cmkt vs 歸檔 total（同 9 天、同算法：基準＝11:30–13:00 的 10 分增額中位數）
+L.push(`\n13:30 增額倍數，同日對照（同算法，只換分母）：`);
+L.push(`\n| 日期 | cmkt（mkt.tseYi） | 歸檔 total（全市場） | total／cmkt |`);
+L.push(`|---|---|---|---|`);
+for (const r of ok) L.push(`| ${r.d} | ${r.cmkt.mult["13:30"].toFixed(2)} | ${r.total.mult1330.toFixed(2)} | ${(r.total.mult1330 / r.cmkt.mult["13:30"]).toFixed(2)} |`);
+const mc = P(ok.map(r => r.cmkt.mult["13:30"]), 0.5), mt = P(ok.map(r => r.total.mult1330), 0.5), mr = P(ok.map(r => r.total.mult1330 / r.cmkt.mult["13:30"]), 0.5);
+L.push(`| **中位數** | ${mc.toFixed(2)} | ${mt.toFixed(2)} | ${mr.toFixed(2)} |`);
+L.push(`\n歸檔 total 的 11:30–13:00 10 分增額中位數（億）：${ok.map(r => r.total.medIncYi.toFixed(1)).join("／")}`);
 
 const txt = L.join("\n");
 console.log(txt);
