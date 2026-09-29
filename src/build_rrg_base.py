@@ -62,6 +62,9 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import twse_holidays  # noqa: E402  休市日判定唯一一份（行事曆消費端，fail-open）
+
 ROOT = Path(__file__).resolve().parent.parent
 INTRADAY = ROOT / "data" / "intraday"
 CLASSIFY = ROOT / "data" / "classify.json"
@@ -107,10 +110,18 @@ def chain_levels(cmap: dict) -> dict[str, float]:
     return {c: v / tot for c, v in lv.items()}
 
 
-def load_days(k: int) -> tuple[list[dict], list[tuple[str, float]]]:
-    """回傳 (最近 k 個有效日檔（舊→新）, 被剔除的殘檔 [(date, cover)])。"""
+def load_days(k: int, cal=None) -> tuple[list[dict], list[tuple[str, float]]]:
+    """回傳 (最近 k 個有效日檔（舊→新）, 被剔除的殘檔 [(date, cover)])。
+
+    cal＝twse_holidays.load() 的結果（None＝fail-open 只排週末）。休市日的檔一律剔除
+    （2026-09-29 補：09-25／09-28 假歸檔覆蓋率 100%，MIN_COVER 擋不住；歸檔端已不再寫，
+    這裡再擋一次防既有殘檔或手動補跑回流），在 dropped 裡記 cover=-1 以示區別。
+    """
     valid, dropped = [], []
     for f in sorted(INTRADAY.glob("????-??-??.json")):
+        if twse_holidays.is_closed(f.stem, cal):
+            dropped.append((f.stem, -1.0))
+            continue
         d = json.loads(f.read_text(encoding="utf-8"))
         tot = d.get("total") or []
         cover = (sum(1 for v in tot if v) / len(tot)) if tot else 0.0
@@ -163,7 +174,7 @@ def build(k: int, out_path: Path) -> int:
         print("::error::baseline.json 算不出任何 twse 鏈水準（a5 全空？）", file=sys.stderr)
         return 1
 
-    days, dropped = load_days(k)
+    days, dropped = load_days(k, twse_holidays.load())
     if len(days) < MIN_DAYS:
         print(f"::error::有效交易日僅 {len(days)} 天（<{MIN_DAYS}），資料不足以建基準表，不寫檔"
               f"（掃描 {INTRADAY}，剔除殘檔 {len(dropped)} 檔）", file=sys.stderr)
@@ -210,8 +221,9 @@ def build(k: int, out_path: Path) -> int:
 
     kb = out_path.stat().st_size / 1024
     if dropped:
-        print("剔除殘檔（時點覆蓋率 <%.0f%%）：%s"
-              % (MIN_COVER * 100, "、".join(f"{d}({c*100:.0f}%)" for d, c in dropped)))
+        print("剔除殘檔（時點覆蓋率 <%.0f%%，或休市日）：%s"
+              % (MIN_COVER * 100, "、".join(f"{d}({'休市' if c < 0 else f'{c*100:.0f}%'})"
+                                            for d, c in dropped)))
     if no_shape:
         print(f"無盤中形狀而略過 {len(no_shape)} 條鏈：{'、'.join(no_shape)}")
     top = sorted(((c, v[-1]) for c, v in chains.items() if v[-1] is not None),

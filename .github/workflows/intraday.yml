@@ -4,6 +4,10 @@ name: intraday
 # 給 8 月初的盤中訊號回測（7b）當原料。
 # 排 14:10 台北（06:10 UTC）：13:30 收盤、13:33 最後一格 frame 之後留緩衝，
 # frame 皆在當日 TTL 內。非交易日腳本自動優雅退出（無 frame → 不寫檔、不 commit）。
+# 休市日守門（2026-09-29）：國定假日 KV 可能殘留 frame（09-25／09-28 實例：全 stale、全天同值，
+# 覆蓋率 100% → 舊守門擋不住、寫出假歸檔）。archive／frozen 兩支在任何網路請求前先查
+# src/twse_holidays.py（本地 data/twse_holidays.json 優先，fail-open 只排週末），休市日 exit 0
+# 不寫檔；rrg base 因 data/intraday/ 無新檔照舊跳過。**本檔步驟與步驟序刻意未改。**
 # KV 讀量：54 時點 × ≤6 get ＋ series 1 get ≈ ≤325 讀/日，遠低於免費 10 萬/日。
 on:
   schedule:

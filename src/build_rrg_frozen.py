@@ -60,6 +60,9 @@ from pathlib import Path
 
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import twse_holidays  # noqa: E402  休市日判定唯一一份（行事曆消費端，fail-open）
+
 ROOT = Path(__file__).resolve().parent.parent
 CLASSIFY = ROOT / "data" / "classify.json"
 BASE = ROOT / "data" / "rrg_base.json"
@@ -152,6 +155,13 @@ def agg_frame(stocks: dict, cmap: dict, universe, chains: list[str]) -> tuple[di
 
 
 def build(date: str, out_path: Path, base_path: Path | None = None) -> int:
+    # ★ 休市日守門（2026-09-29）：休市日 KV 可能殘留 frame（09-25／09-28 實例：全 stale、全天同值），
+    #   下面「可用取樣點 <3」擋不住，會把定格檔改寫成休市日那份假資料（09-28 那版即是）。
+    #   先問行事曆、在任何網路與檔案讀取之前；fail-open 只排週末。優雅退出保留前一版定格檔。
+    reason = twse_holidays.check_closed(date)
+    if reason:
+        print(f"{date}：休市日（{reason}）→ 不寫定格檔，保留前一版（正常退出）")
+        return 0
     base_path = base_path or BASE
     for p in (CLASSIFY, base_path):
         if not p.exists():

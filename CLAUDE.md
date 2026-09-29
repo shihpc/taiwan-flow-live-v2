@@ -662,6 +662,33 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 
 ## 盤中 RRG 盤外定格（`data/rrg_frozen.json`，2026-09-11）
 
+**⚠ 假日假歸檔事故與休市日守門（2026-09-29）**：2026-09-25（中秋）與 09-28（教師節）兩個**平日國定假日**，
+intraday.yml 照 cron `10 6 * * 1-5` 觸發（實際 commit 落在台北 19:43／21:43，GitHub cron 延遲），而 Worker KV 裡有
+**休市日殘留的 frame**——`data/intraday/2026-09-25.json` 與 `2026-09-28.json` 實查：54 格 `frames` 全 `stale:1`、
+`total` 54 格**全天同一值 2540006019891**、`series` 0 筆，兩檔的 `total`／`cg` **逐位相同**。既有守門
+（「一格 frame 都沒有／覆蓋率 <90% → 不歸檔」、「可用取樣點 <3 → 不定格」）對這個形狀**全部失效**（覆蓋率 100%），
+於是寫出兩份假歸檔，並連帶污染 `data/rrg_base.json`（`days` 變成 09-22~09-25＋09-28）與 `data/rrg_frozen.json`
+（`date=2026-09-28`、`base_days` 含 09-25）。
+- **修法**：新增 `src/twse_holidays.py`（本 repo 行事曆消費端，判定邏輯**只有這一份**），`closed_reason(day, cal)`
+  ＝週末或行事曆休市日。三支腳本共用：`archive_intraday.build()`／`build_rrg_frozen.build()` 在**任何網路請求之前**
+  遇休市日印訊息 `return 0`（不寫檔、定格檔保留前一版）；`build_rrg_base.load_days()` 選基準日時剔除休市日檔
+  （防既有殘檔或手動補跑回流，剔除清單標「休市」）。**`intraday.yml` 步驟與步驟序一字未改**——休市日 archive
+  不產檔 → `build rrg base` 因 `data/intraday/` 無新檔照舊跳過 → commit 無 diff 照舊 exit 0；不紅燈、
+  不引入 `continue-on-error`。
+- **讀哪份行事曆**：**先讀本地 `data/twse_holidays.json`**（本 repo 即產出端，checkout 後就在磁碟上，免網路），
+  本地缺檔／壞檔才退 raw URL（逾時 10 秒）。**fail-open**：兩者都不可用、schema 不是恰為整數 1（`True`／`1.0` 皆拒）、
+  `years`／`closed` 形狀不合、或目標年度不在 `years` → 退回**只排週末**＝改動前行為，**不拋例外、不失敗**。
+  此時平日國定假日若 KV 又有殘留 frame，仍會寫出假歸檔（同事故當時），`closed` 未收的颱風臨時停市亦同。
+- **資料清理（同批）**：刪兩份假檔；`rrg_base.json` 以 `build_rrg_base.py` 正規路徑重算，`days`＝
+  09-18／09-21／09-22／09-23／09-24（與 `97f688f` 那版同一組日子；各格數值不同，因 level 取自重算當下的
+  `baseline.json`（`date=2026-09-24`），`97f688f` 當時用的是前一日那版）；`rrg_frozen.json` 從 `97f688f`
+  **逐字還原**（`date=2026-09-24`、`base_days`＝09-17~09-23，不含當日、不含假日）。
+- **本批刻意未動（批次二）**：Worker 端 frame 班在假日照樣寫 KV（殘留 frame 的來源）；Worker `runBackup` 的
+  intraday 補發與 `runHealthCheck` eve 盤點**不讀行事曆**——修正後假日不再有 `intraday/<date>.json`，健檢會像
+  事故前一樣在假日列 `intraday(無檔)`（訊息附「無盤中 series，可能為休市」提示，既有已接受的誤報）；
+  `runBackup` 在 `series:<date>` 存在時可能於 14:40／15:10 補發 intraday.yml，那兩班會被本守門優雅擋下（exit 0）。
+  前端 `ovRrgTaipeiToday` 的「國定假日不處理」亦屬批次二。測試 `tests/test_intraday_holidays.py`。
+
 **守門的次生效應（可接受的降級，2026-09-12 覆驗補記）**：若某日首班的 `build rrg frozen`
 因網路等原因失敗、但同班 `build rrg base` 成功並 commit，則**該日任何補跑都會被守門擋下**
 （磁碟上的 base 已含當日）→ 該日永遠不會有定格檔，停在前一日。**行為安全**——畫面自帶資料日、
@@ -777,6 +804,8 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 - **⚠ 過去的日子無法回補**：KV frame TTL 2 天，新欄位只從 2026-09-14 那一班起算，
   要累積 **5~10 個交易日**才夠重跑 `OV_RRG_ODDMAX`／`OV_RRG_CLOSE` 的鏈層依據（見
   `docs/rrg-spec-20260809.md` §7 第 4 條 (d)）。
+- **休市日不歸檔（2026-09-29）**：`2026-09-25`／`09-28` 兩份假日假歸檔已刪（事故與守門見上一節開頭）。
+  回測腳本（`backtest/run_rrg*.py` 以 glob 讀本目錄）的樣本因此少兩個「假交易日」——那兩天本來就不該在樣本裡。
 
 ## CSP 與注入面（2026-09-06）
 

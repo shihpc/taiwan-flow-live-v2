@@ -40,6 +40,7 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 | taiwan-flows | `run_daily.classify_no_data`（假日→`no_data` 而非 `missing`）、`verify_daily` 對應路徑、前一交易日計算 | 假日不再 exit 1、不開 issue；既有測試不改語意 |
 | claude-harness | `freshness_watchdog.py` 的 `judge_market`／`judge_backtest` 前一交易日跳過假日；flows 改讀 `actual_date`（同 Worker 已做的修正） | 09-25／09-28 重演不再 STALE；三份 backtest 門檻數值不動（`check_backtest_thresholds.py` 仍 PASS） |
 | taiwan-backtest（2026-09-29 追加） | `walkforward/walkforward_daily.py`／`shadow_daily.py` 經 `walkforward/twse_holidays.py` 讀行事曆，休市日在任何 API 呼叫前跳過、不記帳；讀不到 fail-open 只排週末。三份帳冊既有 2026-09-25 列已刪 | 假日不再記「空手、0 損益」列；前端 `ledgerStatus` 屬批次二未改 |
+| taiwan-flow-live-v2 intraday（2026-09-29 追加） | `src/twse_holidays.py`（本地 `data/twse_holidays.json` 優先、壞/缺才退 raw URL）供 `archive_intraday.py`／`build_rrg_frozen.py`／`build_rrg_base.py` 共用；`intraday.yml` 步驟未改 | 休市日不歸檔、不定格（exit 0、無 commit）、基準選日剔除休市日檔；fail-open 只排週末。起因：09-25／09-28 KV 殘留 frame 被當成當日歸檔（見 CLAUDE.md「盤中 RRG 盤外定格」）。Worker 端 frame 寫 KV／`runBackup`／`runHealthCheck` 屬批次二 |
 
 **批次二（本批不做，另案）**：各站前端（postmkt `pmStatus` 等、taiwan-flows `siteStatus`、v2 `prevWeekday`／`ovRrgTaipeiToday`、
 taiwan-backtest `ledgerStatus`）、Worker 其他班（`runSentinel` 假日空打、`runHealthCheck` 假日告警、`runTickSample`、`runMorning`）、

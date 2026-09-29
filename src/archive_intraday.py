@@ -61,6 +61,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_rrg_frozen import agg_frame  # noqa: E402  同口徑唯一事實來源，見檔頭做法 3b
+import twse_holidays  # noqa: E402  休市日判定唯一一份（行事曆消費端，fail-open）
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKER = "https://taiwan-flow-v2.shihpc.workers.dev"
@@ -126,6 +127,15 @@ def live_universe() -> list[str] | None:
 
 
 def build(date: str) -> int:
+    # ★ 休市日守門（2026-09-29）：2026-09-25／09-28 兩個平日國定假日，KV 裡有休市日殘留的
+    #   frame（54 格全 stale=1、累計額全天同一值），下面的「無 frame／覆蓋率 <90%」守門擋不住
+    #   （覆蓋率 100%），寫出兩份逐位相同的假歸檔。故在打任何網路之前先問行事曆。
+    #   行事曆讀不到／壞檔／年度未涵蓋 → fail-open 只排週末（照舊行為），不得因此失敗。
+    #   退出碼維持 0（同檔頭第 5 條「沒東西可寫一律 return 0」的契約）。
+    reason = twse_holidays.check_closed(date)
+    if reason:
+        print(f"{date}：休市日（{reason}）→ 不歸檔，正常退出")
+        return 0
     cl = load_classify()
     series = get_json(f"{WORKER}/replay?date={date}").get("series") or []
 
