@@ -289,9 +289,10 @@ function renderMarket(){
 //      ③（ts 為 null，兩列指數皆缺）實測會走到，並由 flow_last.date 推出資料日；只有②（ts 存在但 <09:00）
 //      在新語意下走不到，**而那同樣是推論、不是保證**。保留理由照舊：ts 形狀劣化（上游指數列缺漏／
 //      退回舊形狀）時的降級路徑，程式不因「某個子情形目前走不到」而拿掉。
-//      已知失效模式：定格班漏寫時 flow_last.date 會比真實資料日更舊（TTL 7 天內殘留）；國定假日不處理。
+//      已知失效模式：定格班漏寫時 flow_last.date 會比真實資料日更舊（TTL 7 天內殘留）；國定假日自 2026-09-29 起
+//      由 prevWeekday 依休市行事曆跳過（行事曆未載入／讀不到時 fail-open＝只排週末，前一平日若是假日仍會誤報）。
 //   本站更新：generated_at（Worker 產出牆鐘，UTC Z）轉台北到分。
-//   狀態（台北時區，交易日只排週末）：
+//   狀態（台北時區；交易日排週末，行事曆載入後另排國定假日，未載入＝只排週末）：
 //     查詢失敗（未知）＝boot 兩次都拿不到可用 payload（不知道好壞、不代表資料異常；後續自動刷新失敗不改狀態，沿用上一份）；
 //     延遲＝generated_at 距今 >3 分（沿用舊「⚠快照 N 分前」門檻；Worker／上游卡住）；
 //     休市定格＝週末，或平日 09:00 後資料日≠今日（國定假日，或開盤首分鐘尚無成交／上游未更新）；
@@ -1679,8 +1680,8 @@ function ovRrgFrozenLoad(){
   }).catch(e=>{ OV_RRG_FRZ_ERR=String((e&&e.message)||e); ovRrgRepaint(); });
 }
 // 台北「今天是星期幾」：沿用 `function liveStatus` 的既有做法（taipeiNowStr 取台北日，再以該日的
-// getUTCDay 取星期），**不另寫一套時區換算**。國定假日**不處理**（同 liveStatus 與 taiwan-flows
-// 的既有立場，站內沒有行事曆來源）——平日的國定假日仍會走牆鐘那條降級文案。
+// getUTCDay 取星期），**不另寫一套時區換算**。國定假日自 2026-09-29 起由 `hol`（twseHoliday，同源休市行事曆）
+// 判定，呼叫端比照週末走定格；行事曆未載入／讀不到（fail-open）時 hol 恆為 false，平日的國定假日仍走牆鐘那條降級文案。
 function ovRrgTaipeiToday(){
   const today=taipeiNowStr().slice(0,10);
   // hol：平日的國定假日（2026-09-29 批次二；行事曆未載入恆為 false＝改動前行為）
@@ -1787,8 +1788,9 @@ function ovRrgHtml(){
   // 降級②（盤前／時點不足）**只在平日成立**：那兩句文案斷言的是「今天稍後會有盤中資料」，
   // 週末說出口就是假的——週末沒有盤前、也不會有盤中，而定格檔早就躺在同源路徑上。
   // 故台北週末一律先走定格路徑（連 /replay 都不打，週末必然取不到 frame）；
-  // **平日路徑一行不動**（含國定假日：站內無行事曆來源，維持 liveStatus 的「不處理」立場，
-  // 平日假日在 ${RRG_T0} 之前仍會看到「盤前時段」，之後由降級③的定格 fallback 接手）。
+  // **平日路徑一行不動**。國定假日自 2026-09-29 起由行事曆（tpToday.hol）判定、併入下面的 wknd 比照週末走定格；
+  // 行事曆未載入／讀不到（fail-open）時才落回平日路徑：平日假日在 ${RRG_T0} 之前仍會看到「盤前時段」，
+  // 之後由降級③的定格 fallback 接手（＝改動前行為）。
   let frz=null, T=null, rows=null, valid=null;
   // wknd＝「今天休市」：台北週末，或行事曆所列的平日國定假日（2026-09-29 起比照週末直接走定格、不打 /replay）
   const tpToday=ovRrgTaipeiToday(), wknd=(tpToday.dow===0||tpToday.dow===6)||tpToday.hol;

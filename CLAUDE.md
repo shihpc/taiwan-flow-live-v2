@@ -152,6 +152,12 @@
   但**仍是一次子請求**；workers.dev 上對第三方 origin 的實際命中行為**未實測**）；②`holidayCalCached` 的 isolate 記憶化：
   成功後 `HOLIDAY_MEMO_OK_MS`（30 分）內**連子請求都不發**，失敗記 `HOLIDAY_MEMO_FAIL_MS`（5 分，期間 fail-open 照寫 frame、
   不會每分鐘去撞掛掉的 raw）；同分鐘多個事件並發共用 in-flight。逾時 `HOLIDAY_SCHED_TIMEOUT_MS`（5 秒，/status 仍是 20 秒）。
+  **另有硬上限 `HOLIDAY_HARD_TIMEOUT_MS`（6 秒，2026-09-29 驗收退回 M1 後補）**：`holidayCalCached` 內以 `Promise.race`
+  包住 `loadHolidayCal`——signal 只能中止 fetch 本身，擋不住「標頭回了但 `r.json()` 永不 resolve」或不理 signal 的 fetch；
+  而 in-flight 是整個 isolate 共用、memo 只在 resolve 後寫，一旦卡住，同 isolate 之後**每一次** scheduled 都 await 同一個
+  永不結束的 promise＝frame／哨兵／tick 全停擺。逾時回 `{cal:null, err:"timeout"}`、**照寫失敗記憶**（5 分內不再撞）並清
+  in-flight → fail-open 照平日跑。選 race 而非 `AbortSignal.timeout()` 的理由同「台指期 tick 量測班」節 `tickWithTimeout`
+  （官方文件未列該靜態方法、signal 管不到 body）；代價也相同：race 不取消底層操作、卡住的 fetch 只是被放生，timer 在 finally 清。
   所以是「每個 isolate 每 30 分至多 1 次」，不是每分鐘一次（`test/holidays2.mjs` 以連續 4 分鐘 frame 斷言只讀 1 次）。
 - **fail-open**：行事曆 404／壞檔／拋錯／年度未涵蓋 → `holiday:false` → 照改動前跑（照寫 frame、照探測），log 一行
   `holiday-cal 未載入`。颱風臨時停市（行事曆事後才補）當天照舊會跑。
@@ -164,19 +170,26 @@
 | 單體班 TW 四條＋recheck（daysummary／intraday／aetf／baseline，`runBackup`） | 不讀 KV、不抓產物、不 dispatch、不告警 | **改**（多一道；原本 `series:<date>` 守門在 frame 不寫後本來也會擋，現在連那次 KV get 都省） |
 | 單體班 us＋recheck（`runBackup` us） | **照跑** | **不改**：美股日曆，台股休市與它無關 |
 | `evening`（21:00–23:55，`runEvening`：pm summary→diag→mktbal→aetf2→圖卡渲染→`pushDailyCards`） | 整條不跑 | **改**（原 series 守門本來也會擋；`pushDailyCards` 另有 baseline.date 閘門，同樣不必動） |
-| `health` eve（23:50，`runHealthCheck`） | 帶 `opts.marketClosed`：只留 `HEALTH_NON_TW`（us／lastweek／meta）；**濾完一項不剩就零副作用 return**（週五假日即此）；週一假日仍檢查 lastweek／meta | **改**。低頻班是週頻／月頻 GH cron、不看台股休市，丟掉會讓週一假日那週漏檢；台股日產物不告警 |
-| `health` morn（09:30） | 同上，只剩 us | **改**；假日隔天（09-29）不需特別處理——eve／morn 每一項都是「今日」產物，沒有一項以「前一交易日」為基準 |
-| `summary-am` 窗（`runSummaryDispatch` am＋`runMorning`＝晨間圖卡渲染／推播） | 不 dispatch summary.yml、不渲染、不推 LINE | **改**（週末兩者都有 dow 守門；summary.yml 進場查到休市會秒退＝空跑 runner） |
+| `health` eve（23:50，`runHealthCheck`） | 帶 `opts.marketClosed`：只留 `HEALTH_NON_TW`（us／lastweek／meta／**news**／morning）；eve 實際剩 **news**（＋週一的 lastweek／meta）；**濾完一項不剩才零副作用 return** | **改**。**news 假日照檢（使用者裁決 2026-09-29）**：news 由 Worker 每日 :07 dispatch、不看休市，假日沒落地是真故障。低頻班是週頻／月頻 GH cron、不看台股休市，丟掉會讓週一假日那週漏檢；台股日產物（flows／postmkt／summary-pm…）不告警。休市日不讀 `series` |
+| `health` morn（09:30） | 同上，剩 **morning＋us**（summary-am 不檢） | **改**；morning 因 06:47 照跑而照檢（下列）；summary-am 不檢——summary.yml 進場查到休市會自己 skip，當日檔本來就不會有。假日隔天（09-29）不需特別處理——eve／morn 每一項都是「今日」產物，沒有一項以「前一交易日」為基準 |
+| `summary-am` 窗的 **am summary 協調班**（`runSummaryDispatch` am） | 不 dispatch summary.yml、不讀 sumfired | **改**（週末有 dow 守門）。postmkt `build_summary.py` 進場 `is_twse_holiday` 會秒退，擋與不擋**產出相同**，擋掉只省一台空跑 runner——屬「台股盤後類本來就由自身閘門 skip」 |
+| `summary-am` 窗的**晨間圖卡**（`runMorning`＝08:05–08:15 渲染 dispatch、08:20–08:50 推播） | **照跑、照推 LINE** | **不改，維持改動前**（使用者裁決 2026-09-29：**晨間產品每天出、照推**）。改動前只守週末（`runMorning` 自己的 dow 守門，週末路徑不變）；卡片各自的新鮮度守門（brief.date／morning generated_at／us 資料日）照舊決定出哪幾張 |
 | `summary-am` 窗的 `runUsCatchup` | **照跑** | **不改**：美股日曆（它自己的週日／週一守門不動） |
-| `morning`（06:47，`dispatchMorning`） | 不 dispatch | **改**（比照週末：`scheduledRole` 週末不回 morning）。`morning.yml` 的 GH cron（`0 22 * * 0-4`）不看行事曆、照舊會產出，只是少了 Worker 的準點加速 |
+| `morning`（06:47，`dispatchMorning`） | **照 dispatch** | **不改，維持改動前**（同一裁決：晨間產品每天出）。它是晨卡 news-morning-2/3 的上游（卡的守門要 morning.json generated_at＝今日），擋掉會讓假日晨卡缺席 |
 | `news`（每日 :07） | 照跑 | **不改**：本來就含週末（新聞是日曆日） |
 | `iching`（22:30／23:30） | 照跑 | **不在本批**（另一 session 負責；該 repo `daily_run` 自己判休市） |
 | `alertJob` 本體 | 不變 | **不改**：它只看週末 dow；休市日會呼叫它的只剩 us／低頻班／news／iching，都不屬台股交易日類 |
 
 測試 `node test/holidays2.mjs`（直接打 `export default` 的 `scheduled`，stub 全域 fetch＋KV＋ctx）：22 個角色×09-25／09-28
-逐一斷言零 FinMind／零 dispatch／零告警／零 KV；09-29 與行事曆 404／壞檔／拋錯（fail-open）時，fetch 集合與 KV 操作集合
-**與改動前（`git show 94c5773:worker/src/index.js`）對跑逐項相同**；09-26 週六 dow `*` 的角色與改動前相同且不讀行事曆；
-記憶化／in-flight／年度未涵蓋。非 git 環境取不到舊版時對跑段落印 WARN 略過。
+逐一斷言——台股角色零 FinMind／零 dispatch／零告警／零 KV；summary-am 窗只少 am summary 協調班（08:10 照 dispatch cards.yml、
+08:20 照讀 manifest，且與改動前相比「差額只有 am summary」）；06:47 morning 與 us／news／iching 與改動前相同；09-29 與行事曆
+404／壞檔／拋錯（fail-open）時，fetch 集合與 KV 操作集合**與改動前（`git show 94c5773:worker/src/index.js`）對跑逐項相同**；
+09-26 週六 dow `*` 的角色與改動前相同且不讀行事曆；記憶化／in-flight／年度未涵蓋；**F 段硬上限**（body 永不回／fetch 永不回：
+上限內 fail-open、並發一起結束、後續走失敗記憶不再卡、過 5 分重試成功；生產預設 6 秒下 scheduled frame 照寫）；
+**G 段 fail-open 正向斷言**（404／拋錯／壞檔時哨兵照探測、frame 照寫、tick 照抓照寫、eve 健檢照舊讀 series 與台股項、am summary 照讀 sumfired）。
+**⚠ CI 不跑對跑**：`worker-deploy.yml` 的 `actions/checkout` 預設 `fetch-depth: 1`，取不到 `94c5773`，對跑段落（A 段的
+「與改動前相同」與整個 B 段、C 段的比對）印 WARN 略過；CI 上守住行為的是**不依賴舊版的斷言**（A 段逐角色零副作用、F、G）。
+對跑只在完整 clone 的本機跑得到；本機模擬淺 clone：`HOLIDAYS2_BASE=deadbeef node test/holidays2.mjs`。
 
 ## 台指期 tick 量測班與 `/tickdiag`（2026-09-09，**暫時班，拆除條件見下**）
 
@@ -974,7 +987,7 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 ②「資料日即取自此」是**有條件**的斷言，由 `dataDateFromTs` 與 `liveDataDate` 共用 `TS_RE`／`function tsParts`
 保證判準一致，**改一邊要改另一邊**，否則又會回到「敘述與程式不符」。
 
-本站更新＝`generated_at`（Worker 牆鐘 UTC Z）轉台北到分。狀態五值（台北時區、交易日只排週末）：**查詢失敗（未知）**＝boot 兩次
+本站更新＝`generated_at`（Worker 牆鐘 UTC Z）轉台北到分。狀態五值（台北時區；交易日排週末，行事曆載入後另排國定假日，未載入＝只排週末）：**查詢失敗（未知）**＝boot 兩次
 都拿不到可用 payload（後續自動刷新失敗沿用上一份、不改狀態）；**延遲**＝`generated_at` 距今 >3 分（沿用舊門檻）；**休市定格**＝
 週末、**行事曆所列的國定假日**（2026-09-29 起，tooltip 寫「國定假日休市（名稱）」），或平日 09:00 後資料日≠今日（行事曆未載入時的國定假日／開盤首分鐘尚無成交／上游未更新，三者無法區分）；**收盤定格**＝平日資料日＝今日且
 ≥13:35（同 `ovMarketPhase`），或平日 09:00 前握著上一交易日；**盤中**＝平日 09:00–13:35 且資料日＝今日。

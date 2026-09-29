@@ -2282,12 +2282,15 @@ export function healthUrl(t, today) {
 // 上述誤報只剩行事曆讀不到（fail-open）或颱風臨時停市的日子。
 // 國定假日（2026-09-29 批次二，§5a）：scheduled handler 查到今天是平日的國定假日時帶 opts.marketClosed=true。
 // 比照週末（週末 cron dow 2-6 根本不醒）＝不對「當日應有的台股產物」告警：只留**不依台股交易日**的項目——
-// HEALTH_NON_TW（us＝美股日曆、lastweek／meta＝週頻／月頻低頻班，GH cron 不看台股休市照跑）。
+// HEALTH_NON_TW（us＝美股日曆、lastweek／meta＝週頻／月頻低頻班，GH cron 不看台股休市照跑；
+// news＝每日 06:07–22:07 每小時由 Worker dispatch、不看休市，eve 照檢（2026-09-29 使用者裁決「假日照檢 news」）；
+// morning＝06:47 dispatchMorning 國定假日照跑（同日裁決「晨間產品每天出」），morn 照檢）。
+// summary-am／summary-pm 不在內：summary.yml 進場查到 TWSE 休市會自己 skip、當日檔本來就不會出現。
 // 濾完一項不剩就整班 return（不讀 series、不抓、不告警、不寫 jobstat＝跟週末一樣零副作用）。
 // 假日隔天的健檢不需特別處理：eve／morn 每一項都是「今日」產物（genToday／date＝今日／{ymd} 檔），
 // 沒有任何一項拿「前一交易日」當基準，所以 09-29 照常比對 09-29 即可。
 // 省略 opts.marketClosed（既有呼叫、行事曆讀不到 fail-open）＝改動前行為逐字不變。
-export const HEALTH_NON_TW = new Set(["us", "lastweek", "meta"]);
+export const HEALTH_NON_TW = new Set(["us", "lastweek", "meta", "news", "morning"]);
 export async function runHealthCheck(env, tp, slot, fetchFn = fetch, opts = {}) {
   const today = tp.date;
   const closed = !!opts.marketClosed;
@@ -4457,7 +4460,7 @@ export async function loadHolidayCal(fetchFn = fetch, timeoutMs = FIN_FETCH_TIME
 }
 // ---- 排程角色的「今天是不是國定假日」（docs/holiday-calendar.md §5a，2026-09-29 批次二）----
 // 總原則「休市日比照週末」：scheduled handler 在平日才有意義的角色（frame／哨兵／tick／TW 單體班／晚場班／
-// 晨間 TW 班／健檢的台股項）進場前問一次這支，是國定假日就比照週末不跑（週末本來就由 cron dow 或各函式
+// am summary 協調班／健檢的台股項）進場前問一次這支，是國定假日就比照週末不跑（週末本來就由 cron dow 或各函式
 // 自己的 dow 守門擋掉，**這支刻意只回「平日的國定假日」**，週末一律回 holiday:false、連行事曆都不讀，
 // 讓週末路徑逐字維持改動前的樣子）。
 // **fail-open**：行事曆讀不到／壞檔／年度未涵蓋 → holiday:false ＝ 照改動前行為跑（照寫 frame、照探測）。
@@ -4474,25 +4477,45 @@ export async function loadHolidayCal(fetchFn = fetch, timeoutMs = FIN_FETCH_TIME
 export const HOLIDAY_MEMO_OK_MS = 30 * 60e3;
 export const HOLIDAY_MEMO_FAIL_MS = 5 * 60e3;
 export const HOLIDAY_SCHED_TIMEOUT_MS = 5000;
+// ★ 硬上限（2026-09-29 驗收退回 M1 後補）：只靠 loadHolidayCal 的 AbortSignal 是不夠的——signal 只能中止
+// **fetch 本身**，擋不住「標頭回了但 r.json() 永不 resolve」，也擋不住不理 signal 的 fetch 實作。
+// 而 holidayInflight 是整個 isolate 共用、holidayMemo 只在 resolve 後才寫，一旦卡住，同一 isolate 之後每一次
+// scheduled（frame／哨兵／tick…）都會 await 同一個永不結束的 promise ＝ 全部停擺，fail-open 與 5 分失敗記憶
+// 都不生效（驗收以兩種 stub 重現 HUNG）。故比照 tickWithTimeout 的 Promise.race（理由同 CLAUDE.md「台指期
+// tick 量測班」節：官方文件未列 AbortSignal.timeout()、signal 管不到 body），逾時回 { cal:null, err:"timeout" }、
+// **照樣寫進失敗記憶**並清空 inflight → 呼叫端 fail-open 照平日跑，5 分內不再去撞。
+// 取 6 秒＝比 fetch 的 5 秒 signal 多 1 秒：正常的 abort 路徑（err 帶真實原因）優先，race 只接「signal 失效」那一種。
+// **代價同 tickWithTimeout**：race 不取消底層操作，卡住的 fetch／json 只是被放生；timer 一律在 finally 清掉。
+export const HOLIDAY_HARD_TIMEOUT_MS = 6000;
 let holidayMemo = null;       // { at, cal, err }
 let holidayInflight = null;
 export function resetHolidayMemo() { holidayMemo = null; holidayInflight = null; }   // 測試用
-export async function holidayCalCached(fetchFn = fetch, nowMs = Date.now()) {
+// hardMs 選填＝硬上限（省略＝HOLIDAY_HARD_TIMEOUT_MS；只供測試壓成毫秒級，生產呼叫一律省略）。
+export async function holidayCalCached(fetchFn = fetch, nowMs = Date.now(), hardMs = HOLIDAY_HARD_TIMEOUT_MS) {
   if (holidayMemo && nowMs - holidayMemo.at < (holidayMemo.cal ? HOLIDAY_MEMO_OK_MS : HOLIDAY_MEMO_FAIL_MS))
     return { cal: holidayMemo.cal, err: holidayMemo.err, memo: true };
   if (!holidayInflight) {
-    holidayInflight = loadHolidayCal(fetchFn, HOLIDAY_SCHED_TIMEOUT_MS)
+    let timer = null;
+    const bomb = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ cal: null, err: "timeout" }), hardMs);
+    });
+    holidayInflight = Promise.race([
+      Promise.resolve().then(() => loadHolidayCal(fetchFn, HOLIDAY_SCHED_TIMEOUT_MS))
+        .catch((e) => ({ cal: null, err: String((e && e.message) || e) })),
+      bomb,
+    ])
       .then((r) => { holidayMemo = { at: nowMs, cal: r.cal, err: r.err }; return r; })
-      .finally(() => { holidayInflight = null; });
+      .finally(() => { if (timer !== null) clearTimeout(timer); holidayInflight = null; });
   }
   const r = await holidayInflight;
   return { cal: r.cal, err: r.err, memo: false };
 }
 // tp＝taipeiParts；回 { holiday, err }。**永不拋例外**（loadHolidayCal 本身不拋，這裡再兜一層）。
-export async function holidayToday(tp, fetchFn = fetch, nowMs = Date.now()) {
+// hardMs 選填（只供測試），原樣傳給 holidayCalCached。
+export async function holidayToday(tp, fetchFn = fetch, nowMs = Date.now(), hardMs = HOLIDAY_HARD_TIMEOUT_MS) {
   if (!tp || tp.dow === 0 || tp.dow === 6) return { holiday: false, err: null };   // 週末交給既有守門
   try {
-    const { cal, err } = await holidayCalCached(fetchFn, nowMs);
+    const { cal, err } = await holidayCalCached(fetchFn, nowMs, hardMs);
     return { holiday: holidayClosed(tp.date, cal), err: cal ? null : err };
   } catch (e) {
     return { holiday: false, err: String((e && e.message) || e) };
@@ -4833,8 +4856,8 @@ export default {
   async scheduled(event, env, ctx) {
     const tp = taipeiParts(new Date(event.scheduledTime));
     // 國定假日比照週末（docs/holiday-calendar.md §5a，2026-09-29 批次二；角色盤點表見 CLAUDE.md
-    // 「休市日（國定假日）各排程角色」節）。lazy：只有平日才有意義的角色才會 await 它（news／iching／us
-    // 不問），同一次事件至多問一次；週末直接 false（交給各角色既有的 dow 守門）。讀不到行事曆＝false＝照舊跑。
+    // 「休市日（國定假日）各排程角色」節）。lazy：只有平日才有意義的角色才會 await 它（news／iching／us／
+    // 06:47 morning 不問；晨間圖卡與 us 補跑照跑——2026-09-29 使用者裁決「晨間產品每天出」），同一次事件至多問一次；週末直接 false（交給各角色既有的 dow 守門）。讀不到行事曆＝false＝照舊跑。
     // 刻意在 handler 本體 await 後 return，而不是把各 run* 包進 .then：被守門的呼叫式因此逐字保留
     // （test/frames.mjs、test/tickdiag.mjs 以原始碼字串釘住生產呼叫形狀），各 run* 函式本身零改動。
     let holP = null;
@@ -4863,7 +4886,7 @@ export default {
         ctx.waitUntil(runEvening(env, tp).catch((e) => console.log("evening:", e && e.message)));
       } else if (droute.kind === "health") {
         // 健檢班：不 dispatch、只盤點產物，缺件告警（失敗只 log，絕不影響其他班）
-        // 國定假日帶 marketClosed：只留美股／低頻班項目（見 runHealthCheck 上方註解）；平日呼叫式不變
+        // 國定假日帶 marketClosed：只留 HEALTH_NON_TW（美股／低頻班／news／morning，見 runHealthCheck 上方註解）；平日呼叫式不變
         if (await isHoliday()) {
           ctx.waitUntil(runHealthCheck(env, tp, droute.slot, undefined, { marketClosed: true })
             .catch((e) => console.log("health:", e && e.message)));
@@ -4879,14 +4902,12 @@ export default {
         // 股市易經每日班主觸發（台北 22:30／23:30）：失敗已在函式內告警，這裡只 log；同分醒的哨兵／晚場班各自獨立
         ctx.waitUntil(dispatchIching(env, tp).catch((e) => console.log("iching:", e && e.message)));
       } else if (droute.kind === "summary-am") {
-        // us 晨間補跑是美股日曆，台股國定假日照跑（不受下面守門影響）；am summary（summary.yml 進場查到休市
-        // 會秒退＝空跑一台 runner）與晨間圖卡比照週末不跑
-        const hol = await holidaySkip("summary-am／morning-cards");
-        if (hol) {
-          ctx.waitUntil(runUsCatchup(env, tp).catch((e) => console.log("us-catchup:", e && e.message)));
-          return;
-        }
-        ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
+        // 國定假日（§5a，2026-09-29 使用者裁決「晨間產品每天出、照推」）：只擋 am summary 協調班——
+        // summary.yml 進場查到 TWSE 休市會自己秒退（postmkt build_summary.py 的 is_twse_holiday），不擋也產不出東西，
+        // 擋掉只是省一台空跑 runner、產出與改動前相同。晨間圖卡（runMorning）與 us 晨間補跑**照跑、維持改動前**
+        // （改動前兩者只守週末）；週末路徑不變（runMorning／runSummaryDispatch 內部各自的 dow 守門）。
+        if (!(await holidaySkip("summary-am（am summary 協調班；晨間圖卡／us 補跑照跑）")))
+          ctx.waitUntil(runSummaryDispatch(env, tp, "am").catch((e) => console.log("summary-am:", e && e.message)));
         // 晨間圖卡（AM slot，2026-08-10）：同窗並存的第二件事——08:05–08:15 dispatch 渲染、
         // 08:20–08:50 推播；runMorning 內部各步已 try/catch，絕不影響上面的 summary-am
         ctx.waitUntil(runMorning(env, tp).catch((e) => console.log("morning-cards:", e && e.message)));
@@ -4904,7 +4925,8 @@ export default {
       return;
     }
     if (role === "morning") {
-      if (await holidaySkip("morning")) return;
+      // 國定假日照跑（§5a 使用者裁決 2026-09-29：晨間產品每天出，06:47 morning.yml 維持改動前；它是晨間圖卡
+      // news-morning-2/3 的上游，擋掉會讓假日晨卡因 generated_at 非今日而缺席）
       ctx.waitUntil(dispatchMorning(env).catch((e) => console.log("morning dispatch:", e && e.message)));
       return;
     }

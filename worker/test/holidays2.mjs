@@ -7,14 +7,16 @@
 //
 // 「與改動前相同」的證據＝**對跑**：把 HEAD~ 的 worker/src/index.js（本批改動前）以 git show 取出，
 // 同一組 stub 各跑一次，比對 fetch URL 集合與 KV 操作集合（去掉行事曆那一次 fetch 與破快取參數）。
-// 取不到舊版（非 git 環境）時對跑段落整段略過並印 WARN，其餘斷言照跑。
+// 取不到舊版（非 git 環境，或 CI：worker-deploy.yml 的 checkout 預設 fetch-depth 1、沒有 94c5773）時
+// 對跑段落整段略過並印 WARN，其餘斷言照跑——F（硬上限）與 G（fail-open 正向斷言）不依賴舊版，CI 也守得住。
+// 本機模擬淺 clone：HOLIDAYS2_BASE=deadbeef node test/holidays2.mjs
 import { readFile, writeFile, mkdtemp } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import worker, {
   HOLIDAYS_URL, FRAME_CRON, TICK_CRON, ICHING_CRON, resetHolidayMemo, holidayCalCached, holidayToday,
-  HOLIDAY_MEMO_OK_MS, HOLIDAY_MEMO_FAIL_MS, runHealthCheck, HEALTH_NON_TW,
+  HOLIDAY_MEMO_OK_MS, HOLIDAY_MEMO_FAIL_MS, runHealthCheck, HEALTH_NON_TW, HOLIDAY_HARD_TIMEOUT_MS,
 } from "../src/index.js";
 
 let pass = 0, fail = 0;
@@ -121,11 +123,13 @@ const ROLES = [
   { id: "evening-2230",     cron: "*/5 13-15 * * 2-6",     hm: "22:30", tw: true },
   { id: "health-eve",       cron: "50 15 * * 2-6",         hm: "23:50", tw: "health" },
   { id: "health-morn",      cron: "30 1 * * 2-6",          hm: "09:30", tw: "health" },
-  { id: "summary-am-0650",  cron: "50,55 22 * * *",        hm: "06:50", tw: true },
-  { id: "summary-am-0700",  cron: "*/5 23 * * *",          hm: "07:00", tw: "am+us" },
-  { id: "summary-am-0810",  cron: "*/10 0 * * *",          hm: "08:10", tw: true },
-  { id: "summary-am-0820",  cron: "*/10 0 * * *",          hm: "08:20", tw: true },
-  { id: "morning-0647",     cron: "7,47 0-14,22-23 * * *", hm: "06:47", tw: true },
+  // summary-am 窗（2026-09-29 使用者裁決「晨間產品每天出、照推」）：假日只擋 am summary 協調班，
+  // 晨間圖卡（08:10 渲染 dispatch／08:20 推播）與 us 晨間補跑照跑；06:47 morning 完全照跑（tw:false）
+  { id: "summary-am-0650",  cron: "50,55 22 * * *",        hm: "06:50", tw: "am" },
+  { id: "summary-am-0700",  cron: "*/5 23 * * *",          hm: "07:00", tw: "am" },
+  { id: "summary-am-0810",  cron: "*/10 0 * * *",          hm: "08:10", tw: "am" },
+  { id: "summary-am-0820",  cron: "*/10 0 * * *",          hm: "08:20", tw: "am" },
+  { id: "morning-0647",     cron: "7,47 0-14,22-23 * * *", hm: "06:47", tw: false },
   { id: "backup-us",        cron: "5 21 * * *",            hm: "05:05", tw: false },
   { id: "recheck-us",       cron: "35 21 * * *",           hm: "05:35", tw: false },
   { id: "news",             cron: "7,47 0-14,22-23 * * *", hm: "10:07", tw: false },
@@ -150,30 +154,46 @@ for (const d of ["2026-09-25", "2026-09-28"]) {
       chk(`${tag}：行事曆恰讀 1 次`, r.calFetches === 1, String(r.calFetches));
     } else if (R.tw === "health") {
       const prods = r.fetches.filter((u) => u.includes("raw.githubusercontent.com"));
-      const allowed = prods.every((u) => /\/us\.json|\/lastweek\.json|\/classify\.json/.test(u));
-      chk(`${tag}：只抓美股／低頻班產物`, allowed, prods.join(","));
+      const allowed = prods.every((u) => /\/us\.json|\/lastweek\.json|\/classify\.json|taiwan-stock-news\/main\/news\.json|\/morning\.json/.test(u));
+      chk(`${tag}：只抓美股／低頻班／news／morning 產物`, allowed, prods.join(","));
+      chk(`${tag}：不抓 summary／flows／postmkt 等台股產物`,
+        !prods.some((u) => /\/summary\/|taiwan-flows|postmkt|baseline|aetf|daysummary|intraday/.test(u)), prods.join(","));
       chk(`${tag}：不打 FinMind、不 dispatch`, !r.fetches.some(isFin) && !r.fetches.some(isDispatch));
       chk(`${tag}：不讀 series`, !r.kv.some((o) => o.includes("series:")), r.kv.join(","));
+      if (R.id === "health-eve")
+        chk(`${tag}：eve 照檢 news（使用者裁決 2026-09-29）`, prods.some((u) => u.includes("taiwan-stock-news/main/news.json")), prods.join(","));
       if (R.id === "health-eve" && d === "2026-09-25")
-        chk(`${tag}：週五假日 eve 一項不剩 → 零副作用`, r.fetches.length === 0 && r.kv.length === 0, r.fetches.join(",") + "|" + r.kv.join(","));
+        chk(`${tag}：週五假日 eve 只剩 news`, prods.length === 1, prods.join(","));
       if (R.id === "health-eve" && d === "2026-09-28")
         chk(`${tag}：週一假日 eve 仍檢查 lastweek／meta（低頻班不依台股交易日）`,
           prods.some((u) => u.includes("lastweek.json")) && prods.some((u) => u.includes("classify.json")), prods.join(","));
       if (R.id === "health-morn")
-        chk(`${tag}：morn 只剩 us`, prods.length === 1 && prods[0].includes("/us.json"), prods.join(","));
-    } else if (R.tw === "am+us") {
-      chk(`${tag}：am summary 不 dispatch（只允許 us.yml）`,
-        r.fetches.filter(isDispatch).every((u) => u.includes("/us.yml/")), r.fetches.join(","));
-      // us 晨間補跑照跑：週五（09-25）us.json stale → dispatch us.yml；週一（09-28）既有 dow 守門本來就不跑
-      const wantUs = d === "2026-09-25";
-      chk(`${tag}：us 晨間補跑照跑（週五 dispatch／週一依既有守門不跑）`,
-        r.fetches.some((u) => u.includes("/us.yml/dispatches")) === wantUs, r.fetches.join(","));
-      if (OLD) {
-        const o = await run(OLD, { cron: R.cron, at: `${d}T${R.hm}`, seed: seedFor(d), products: PRODUCTS });
-        const usOnly = (a) => a.filter((u) => u.includes("us.yml") || u.includes("/us.json"));
-        chk(`${tag}：us 部分與改動前相同`, sortJ(usOnly(r.fetches)) === sortJ(usOnly(o.fetches)), `${r.fetches}\n    vs ${o.fetches}`);
-      }
+        chk(`${tag}：morn 只剩 morning＋us（summary-am 不檢）`,
+          prods.length === 2 && prods.some((u) => u.includes("/us.json")) && prods.some((u) => u.includes("/morning.json")), prods.join(","));
+    } else if (R.tw === "am") {
+      // 只擋 am summary 協調班：不 dispatch summary.yml、不讀 sumfired、不抓 summary 產物
+      chk(`${tag}：am summary 不 dispatch`, !r.fetches.some((u) => u.includes("/summary.yml/")), r.fetches.join(","));
       chk(`${tag}：不讀 series／sumfired`, !r.kv.some((o) => o.includes("series:") || o.includes("sumfired:")), r.kv.join(","));
+      chk(`${tag}：不抓 summary 產物`, !r.fetches.some((u) => u.includes("/data/summary/")), r.fetches.join(","));
+      // 晨間圖卡照跑（不依賴舊版的正向斷言，CI 淺 clone 也跑）
+      if (R.hm === "08:10")
+        chk(`${tag}：晨間圖卡渲染照 dispatch cards.yml`, r.fetches.some((u) => u.includes("/cards.yml/dispatches")), r.fetches.join(","));
+      if (R.hm === "08:20")
+        chk(`${tag}：晨間圖卡推播照讀 manifest`, r.fetches.some((u) => u.includes("/cards/am/manifest.json")), r.fetches.join(","));
+      // us 晨間補跑照跑：週五（09-25）us.json stale → dispatch us.yml；週一（09-28）既有 dow 守門本來就不跑
+      if (R.hm === "07:00")
+        chk(`${tag}：us 晨間補跑照跑（週五 dispatch／週一依既有守門不跑）`,
+          r.fetches.some((u) => u.includes("/us.yml/dispatches")) === (d === "2026-09-25"), r.fetches.join(","));
+      if (OLD) {
+        // 與改動前相比：新版是舊版的子集，差額只能是 am summary 協調班自己的東西
+        const o = await run(OLD, { cron: R.cron, at: `${d}T${R.hm}`, seed: seedFor(d), products: PRODUCTS });
+        const minus = (a, b) => { const m = [...b]; return a.filter((x) => { const k = m.indexOf(x); if (k < 0) return true; m.splice(k, 1); return false; }); };
+        const SUM = /\/data\/summary\/|\/summary\.yml\/|sumfired:|jobstat:|\/morning\.json/;
+        const extraF = minus(r.fetches, o.fetches), extraK = minus(r.kv, o.kv);
+        const lostF = minus(o.fetches, r.fetches), lostK = minus(o.kv, r.kv);
+        chk(`${tag}：沒有舊版沒做的事`, !extraF.length && !extraK.length, `${extraF} | ${extraK}`);
+        chk(`${tag}：少做的只有 am summary 協調班`, lostF.every((u) => SUM.test(u)) && lostK.every((k) => SUM.test(k)), `${lostF} | ${lostK}`);
+      }
     } else {
       // 非台股交易日類（us／news／iching）：台股休市照跑，且與改動前逐項相同
       chk(`${tag}：照跑（有 dispatch）`, r.fetches.some(isDispatch), r.fetches.join(","));
@@ -289,12 +309,98 @@ for (const R of ROLES.filter((x) => x.cron.trim().split(/\s+/)[4] === "*")) {
 
 // ---- E. runHealthCheck 直呼：省略 opts.marketClosed ＝ 舊行為（既有測試不改即證）；帶上只剩非台股項 ----
 {
-  chk("HEALTH_NON_TW 恰為 us／lastweek／meta", [...HEALTH_NON_TW].sort().join(",") === "lastweek,meta,us");
+  chk("HEALTH_NON_TW 恰為 us／lastweek／meta／news／morning", [...HEALTH_NON_TW].sort().join(",") === "lastweek,meta,morning,news,us");
   const kv = mockKV();
   const calls = [];
   const f = makeFetch("ok", "2026-09-25", calls);
   const out = await runHealthCheck(ENV(kv), { date: "2026-09-25", dow: 5, hour: 23, minute: 50 }, "eve", f, { marketClosed: true, dry: true });
-  chk("health eve 週五假日 marketClosed → skipped、零請求", out.skipped === "market-closed" && calls.length === 0 && kv.ops.length === 0, JSON.stringify(out));
+  chk("health eve 週五假日 marketClosed → 只檢 news、不讀 series",
+    out.checked === 1 && out.rows && out.rows[0].name === "news" && !kv.ops.some((o) => o.includes("series:")), JSON.stringify(out) + kv.ops.join(","));
+  // 週二（非低頻檢查日）且 news 不在 targets 的 slot：morn 帶 marketClosed 仍剩 morning＋us
+  const kv2 = mockKV(); const calls2 = [];
+  const out2 = await runHealthCheck(ENV(kv2), { date: "2026-09-25", dow: 5, hour: 9, minute: 30 }, "morn", makeFetch("ok", "2026-09-25", calls2), { marketClosed: true, dry: true });
+  chk("health morn 假日 marketClosed → morning＋us", out2.checked === 2 && out2.rows.map((x) => x.name).sort().join(",") === "morning,us", JSON.stringify(out2));
+}
+
+// ---- F. 硬上限（2026-09-29 驗收退回 M1）：signal 管不到的卡死路徑也要在上限內 fail-open ----
+// 兩種卡法：①標頭回了、r.json() 永不 resolve（signal 管不到 body）②fetch 本身永不回（不理 signal）。
+{
+  const HUNG = Symbol("HUNG");
+  const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(HUNG), ms))]);
+  const tp = { date: "2026-09-25", dow: 5, hour: 10, minute: 0 };
+  const t0 = Date.parse("2026-09-25T02:00:00Z");
+  chk("硬上限常數＝6 秒（> fetch signal 5 秒）", HOLIDAY_HARD_TIMEOUT_MS === 6000, String(HOLIDAY_HARD_TIMEOUT_MS));
+  for (const [nm, mk] of [
+    ["body 永不回", () => { let n = 0; const f = async () => { n++; return { ok: true, status: 200, json: () => new Promise(() => {}) }; }; return [f, () => n]; }],
+    ["fetch 永不回", () => { let n = 0; const f = () => { n++; return new Promise(() => {}); }; return [f, () => n]; }],
+  ]) {
+    resetHolidayMemo();
+    const [f, cnt] = mk();
+    const a = await within(holidayToday(tp, f, t0, 30), 1000);
+    chk(`${nm}：在硬上限內結束（不 HUNG）`, a !== HUNG, "HUNG");
+    chk(`${nm}：fail-open holiday=false、err=timeout`, a !== HUNG && a.holiday === false && a.err === "timeout", JSON.stringify(a));
+    // 並發共用 inflight 的呼叫也要一起結束
+    resetHolidayMemo();
+    const [f2] = mk();
+    const both = await within(Promise.all([holidayToday(tp, f2, t0, 30), holidayToday(tp, f2, t0, 30)]), 1000);
+    chk(`${nm}：並發兩次都在上限內結束`, both !== HUNG, "HUNG");
+    // 之後再呼叫：失敗記憶生效，5 分內不再打、也不再卡
+    const b = await within(holidayToday(tp, f, t0 + 60e3, 30), 200);
+    chk(`${nm}：後續呼叫走失敗記憶、立即回（不再卡）`, b !== HUNG && b.holiday === false && b.err === "timeout", String(b === HUNG ? "HUNG" : JSON.stringify(b)));
+    chk(`${nm}：後續呼叫不再 fetch`, cnt() === 1, String(cnt()));
+    // 過 5 分：重試（這次行事曆正常 → 判假日），證明 inflight 已清空、沒被卡住的 promise 佔住
+    let ok = 0;
+    const good = async () => { ok++; return new Response(REAL_CAL, { status: 200 }); };
+    const c = await within(holidayToday(tp, good, t0 + HOLIDAY_MEMO_FAIL_MS + 1, 30), 1000);
+    chk(`${nm}：過 5 分重試成功（inflight 已清空）`, c !== HUNG && c.holiday === true && ok === 1, JSON.stringify(c));
+  }
+  resetHolidayMemo();
+  // 生產預設（hardMs 省略＝6 秒）：scheduled frame 在 fetch 永不回時仍於上限內照寫 frame（fail-open）
+  const calls = [];
+  const kv = mockKV();
+  const fin = makeFetch("ok", "2026-09-25", []);
+  globalThis.fetch = (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    calls.push(url);
+    if (url.startsWith(HOLIDAYS_URL)) return new Promise(() => {});
+    return fin(input, init);
+  };
+  const logs = [];
+  console.log = (...a) => logs.push(a.join(" "));
+  const t1 = Date.now();
+  let res;
+  try {
+    const waits = [];
+    res = await within((async () => {
+      await worker.scheduled({ cron: FRAME_CRON, scheduledTime: tpeMs("2026-09-25T10:00") }, ENV(kv), { waitUntil: (p) => waits.push(p) });
+      await Promise.allSettled(waits);
+      return "done";
+    })(), HOLIDAY_HARD_TIMEOUT_MS + 3000);
+  } finally { globalThis.fetch = origFetch; console.log = origLog; }
+  const el = Date.now() - t1;
+  chk("scheduled frame（行事曆 fetch 永不回）：硬上限內結束", res === "done", `HUNG ${el}ms`);
+  chk("scheduled frame（行事曆 fetch 永不回）：fail-open 照寫 frame", kv.ops.includes("put f:2026-09-25:10:00"), kv.ops.join(","));
+  chk("scheduled frame（行事曆 fetch 永不回）：log 註明 timeout", logs.some((l) => l.includes("holiday-cal 未載入") && l.includes("timeout")), logs.join("|"));
+  resetHolidayMemo();
+}
+
+// ---- G. fail-open 正向斷言（不依賴舊版對跑；CI 淺 clone 取不到 94c5773 時 B 段整段略過，靠這段守住）----
+{
+  const d = "2026-09-25";   // 真實行事曆裡的假日；404 → 必須照平日跑
+  const s = await run(worker, { cron: "*/5 9-14 * * 2-6", at: `${d}T18:00`, cal: "404" });
+  chk("fail-open 404：哨兵照探測 FinMind 四訊號", s.fetches.filter(isFin).length === 4, s.fetches.join(","));
+  const f = await run(worker, { cron: FRAME_CRON, at: `${d}T10:00`, cal: "404", seed: seedFor(d) });
+  chk("fail-open 404：frame 照寫 f／fi／series", ["f:2026-09-25:10:00", "fi:2026-09-25", "series:2026-09-25"].every((k) => f.kv.includes(`put ${k}`)), f.kv.join(","));
+  const t = await run(worker, { cron: TICK_CRON, at: `${d}T10:05`, cal: "throw" });
+  chk("fail-open 拋錯：tick 照抓 FinMind", t.fetches.some(isFin), t.fetches.join(","));
+  chk("fail-open 拋錯：tick 照寫樣本", t.kv.some((o) => o.startsWith("put tick:")), t.kv.join(","));
+  const he = await run(worker, { cron: "50 15 * * 2-6", at: `${d}T23:50`, cal: "bad", seed: seedFor(d) });
+  const heP = he.fetches.filter((u) => u.includes("raw.githubusercontent.com"));
+  chk("fail-open 壞檔：eve 健檢照舊檢查台股項（flows／postmkt／baseline）",
+    ["taiwan-flows", "postmkt.json", "baseline.json"].every((x) => heP.some((u) => u.includes(x))), heP.join(","));
+  chk("fail-open 壞檔：eve 健檢照舊讀 series", he.kv.some((o) => o.includes(`series:${d}`)), he.kv.join(","));
+  const am = await run(worker, { cron: "50,55 22 * * *", at: `${d}T06:50`, cal: "404" });
+  chk("fail-open 404：am summary 照讀 sumfired", am.kv.some((o) => o.includes("sumfired:")), am.kv.join(","));
 }
 
 console.log(`holidays2: ${pass} passed, ${fail} failed${OLD ? "" : "（對跑略過）"}`);
