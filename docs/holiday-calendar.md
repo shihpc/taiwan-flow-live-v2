@@ -27,6 +27,8 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 - 讀不到／壞檔／年度未涵蓋 → **fail-open 退回現行行為（只排週末）**，不得因行事曆掛掉而擋掉真交易日或拋例外。
 - 休市日＝週末 ∪ `closed`。「前一交易日」往回跳過兩者。
 - 只影響「預期資料日／是否缺料」的判定；**不改任何資料欄位語意與 schema**。
+  **唯一例外：taiwan-backtest walkforward（2026-09-29 使用者裁決）**——兩支記帳腳本以行事曆決定「當天記不記帳」（假日跳過，
+  範圍比判級寬），見下表與該 repo `walkforward/twse_holidays.py`。
 - 颱風臨時停市：TWSE 事後才會補進行事曆，當天仍可能誤報一次（已知、接受）。
 
 ## 3. 批次一範圍（會亮紅燈／開 issue／對外顯示錯的路徑）
@@ -37,6 +39,7 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 | taiwan-flow-live-v2 Worker | `/status` 判級：`lastExpectedTradingDate`／`prevExpectedTradingDate`／`gradeMarket`／`gradeBacktest` 接受選填的休市集合；`buildStatus` 讀行事曆（raw URL，cf 快取），失敗 fail-open | 預設參數＝空集合時輸出與現行逐字相同（既有測試不改）；新增 09-25／09-28 案例 |
 | taiwan-flows | `run_daily.classify_no_data`（假日→`no_data` 而非 `missing`）、`verify_daily` 對應路徑、前一交易日計算 | 假日不再 exit 1、不開 issue；既有測試不改語意 |
 | claude-harness | `freshness_watchdog.py` 的 `judge_market`／`judge_backtest` 前一交易日跳過假日；flows 改讀 `actual_date`（同 Worker 已做的修正） | 09-25／09-28 重演不再 STALE；三份 backtest 門檻數值不動（`check_backtest_thresholds.py` 仍 PASS） |
+| taiwan-backtest（2026-09-29 追加） | `walkforward/walkforward_daily.py`／`shadow_daily.py` 經 `walkforward/twse_holidays.py` 讀行事曆，休市日在任何 API 呼叫前跳過、不記帳；讀不到 fail-open 只排週末。三份帳冊既有 2026-09-25 列已刪 | 假日不再記「空手、0 損益」列；前端 `ledgerStatus` 屬批次二未改 |
 
 **批次二（本批不做，另案）**：各站前端（postmkt `pmStatus` 等、taiwan-flows `siteStatus`、v2 `prevWeekday`／`ovRrgTaipeiToday`、
 taiwan-backtest `ledgerStatus`）、Worker 其他班（`runSentinel` 假日空打、`runHealthCheck` 假日告警、`runTickSample`、`runMorning`）、
