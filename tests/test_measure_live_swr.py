@@ -115,7 +115,7 @@ def _fake_get(calls):
 
 def test_run_end_to_end():
     calls, sleeps, logs = [], [], []
-    args = m.build_parser().parse_args(["--rounds", "3", "--interval-sec", "60"])
+    args = m.build_parser().parse_args(["--rounds", "3", "--interval-sec", "60", "--live-per-round", "5"])
     summary, meta, _ = m.run(args, get=_fake_get(calls), sleep=sleeps.append,
                              now=lambda: datetime(2026, 9, 30, 10, 0, tzinfo=m.TPE), log=logs.append)
     check("窗內跑滿 3 輪", meta["rounds_run"] == 3 and meta["representative"])
@@ -135,6 +135,20 @@ def test_run_end_to_end():
     check("盤外 --force 照跑但仍標無代表性", meta3["rounds_run"] == 2 and not meta3["representative"])
 
 
+def test_default_diag_only():
+    calls = []
+    args = m.build_parser().parse_args(["--rounds", "2", "--interval-sec", "60"])
+    check("預設 --live-per-round 0", args.live_per_round == 0)
+    summary, meta, _ = m.run(args, get=_fake_get(calls), sleep=lambda s: None,
+                             now=lambda: datetime(2026, 9, 30, 10, 0, tzinfo=m.TPE), log=lambda s: None)
+    check("預設只打 /livediag", len(calls) == 2 and all(c.endswith("/livediag") for c in calls))
+    txt = m.render_text(summary, meta)
+    check("摘要含機房偏差警語", m.GEO_WARNING in txt)
+    check("未打 /live 時不印自我污染警語", m.SELF_POLLUTION_WARNING not in txt and "未打 /live" in txt)
+    txt5 = m.render_text(summary, {**meta, "live_per_round": 5})
+    check("有打 /live 時印自我污染警語", m.SELF_POLLUTION_WARNING in txt5)
+
+
 def test_validate():
     p = m.build_parser()
     check("預設參數合法", m.validate(p.parse_args([])) is None)
@@ -142,11 +156,13 @@ def test_validate():
     check("rounds 0 拒絕", m.validate(p.parse_args(["--rounds", "0"])) is not None)
     check("超過 55 分拒絕", m.validate(p.parse_args(["--rounds", "14", "--interval-sec", "600"])) is not None)
     check("非 https base 拒絕", m.validate(p.parse_args(["--base", "http://x"])) is not None)
+    check("live-per-round 0 合法", m.validate(p.parse_args(["--live-per-round", "0"])) is None)
+    check("live-per-round -1 拒絕", m.validate(p.parse_args(["--live-per-round", "-1"])) is not None)
 
 
 if __name__ == "__main__":
     for fn in [test_ratio, test_classify_diag, test_summarize_discards_and_ratios, test_summarize_all_discarded,
-               test_live_errors_counted, test_window, test_run_end_to_end, test_validate]:
+               test_live_errors_counted, test_window, test_run_end_to_end, test_default_diag_only, test_validate]:
         try:
             fn()
         except AssertionError:

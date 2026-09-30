@@ -5,8 +5,15 @@
 # 只讀、不寫任何檔案、不需要任何 secret；由 `.github/workflows/measure-live-swr.yml`
 # （只有 workflow_dispatch）或本機直接跑。
 #
-# 每輪：GET `/live` N 次（預設 5 次、間隔 3 秒），記錄 `x-swr`／`x-gen`／狀態碼／耗時；
-# 再 GET 一次 `/livediag` 取 `swr` 欄位（worker `liveSwrStats()`）。
+# 每輪：（選用）GET `/live` N 次（`--live-per-round`，預設 0＝不打；間隔 3 秒），記錄 `x-swr`／`x-gen`／
+# 狀態碼／耗時；再 GET 一次 `/livediag` 取 `swr` 欄位（worker `liveSwrStats()`）。
+#
+# ⚠ 量到的是「請求端所在 Cloudflare 機房」的 isolate（驗收 2026-09-30 指出，依 Cloudflare 架構推論、未實測 cf-ray）：
+#   isolate 與 `caches.default` 都是各機房各自一份，台灣客戶端落在台灣機房。GitHub Actions runner 出口在美國，
+#   打到的是美國機房的 isolate，幾乎碰不到真實客戶端 → 從 Actions 跑只能當連通性檢查，**比例不代表線上**。
+#   要量真實客戶端，請在**台灣本機**於盤中執行：`python tools/measure_live_swr.py`（預設只打 `/livediag`）。
+# ⚠ 自我污染：`--live-per-round` > 0 時本工具自己的 `/live` 請求若落在同一 isolate，會讓冷 isolate 的輪
+#   變成「非零」而被採計，且 3 秒間隔的請求多為 fresh、把 stale 佔比往下拉。所以預設 0。
 #
 # 判讀規則（照 CLAUDE.md 第 6 條，不另創口徑）：
 #   ① stale 佔比＝staleHits / (staleHits + freshHits)
@@ -39,6 +46,13 @@ MAX_TOTAL_SEC = 55 * 60        # workflow timeout 60 分，留 5 分餘裕
 SELECTION_BIAS_WARNING = (
     "⚠ 選擇偏誤：isolate 計數比例只含「有抓到非零計數」的輪（全 0 與被節流的輪已丟棄），"
     "代表的是診斷請求剛好落在忙碌 isolate 時的比例、不是全隊平均；只能當量級看。"
+)
+GEO_WARNING = (
+    "⚠ 機房偏差：isolate 計數只屬於本工具請求所在的 Cloudflare 機房；從 GitHub Actions（美國）跑，"
+    "量的是美國機房、幾乎碰不到台灣客戶端，比例不代表線上。真實量測請在台灣本機盤中執行。"
+)
+SELF_POLLUTION_WARNING = (
+    "⚠ 自我污染：本次每輪有打 /live，若與 /livediag 落在同一 isolate，冷 isolate 會被誤採計、stale 佔比偏低。"
 )
 
 
@@ -165,11 +179,17 @@ def render_text(summary, meta):
         st = iso[key]
         L.append(f"  {name}：n={st['n']} 中位數={st['median']} 範圍=[{st['min']}, {st['max']}]")
     rx = summary["runner_x_swr"]
-    L.append("[runner 自己看到的 /live x-swr 標頭分布（與 isolate 計數分開）]")
-    L.append(f"  fresh={rx['fresh']} stale={rx['stale']} miss={rx['miss']} other={rx['other']}"
-             f" error={rx['error']}  stale/(stale+fresh)={rx['stale_share_of_hits']}"
-             f"  耗時中位數={rx['live_ms_median']}ms")
+    if meta.get("live_per_round", 0) > 0:
+        L.append("[runner 自己看到的 /live x-swr 標頭分布（與 isolate 計數分開）]")
+        L.append(f"  fresh={rx['fresh']} stale={rx['stale']} miss={rx['miss']} other={rx['other']}"
+                 f" error={rx['error']}  stale/(stale+fresh)={rx['stale_share_of_hits']}"
+                 f"  耗時中位數={rx['live_ms_median']}ms")
+    else:
+        L.append("[runner /live x-swr 標頭分布：本次未打 /live（--live-per-round 0）]")
     L.append(SELECTION_BIAS_WARNING)
+    L.append(GEO_WARNING)
+    if meta.get("live_per_round", 0) > 0:
+        L.append(SELF_POLLUTION_WARNING)
     if summary["rounds_kept"] == 0:
         L.append("⚠ 沒有任何一輪抓到非零計數：本次沒有可用的 isolate 比例（不是比例＝0）。")
     return "\n".join(L)
@@ -222,7 +242,8 @@ def run(args, get=http_get, sleep=time.sleep, now=lambda: datetime.now(TPE), log
             f"{[x['x_swr'] for x in live]} livediag={diag['kind']}")
     summary = summarize(rounds)
     meta = {"base": base, "started_tpe": start.strftime("%Y-%m-%d %H:%M:%S"), "in_window": in_window,
-            "representative": representative, "rounds_requested": args.rounds, "rounds_run": rounds_n}
+            "representative": representative, "rounds_requested": args.rounds, "rounds_run": rounds_n,
+            "live_per_round": args.live_per_round}
     return summary, meta, rounds
 
 
@@ -231,7 +252,8 @@ def build_parser():
     p.add_argument("--rounds", type=int, default=8)
     p.add_argument("--interval-sec", type=int, default=240)
     p.add_argument("--base", default=DEFAULT_BASE)
-    p.add_argument("--live-per-round", type=int, default=5)
+    p.add_argument("--live-per-round", type=int, default=0,
+                   help="每輪先打幾次 /live（預設 0＝只打 /livediag，避免自我污染）")
     p.add_argument("--live-gap-sec", type=float, default=3.0)
     p.add_argument("--force", action="store_true", help="非台北盤中也照設定輪數跑（結果仍標無代表性）")
     return p
@@ -242,9 +264,10 @@ def validate(args):
         return f"--rounds 須在 1..{MAX_ROUNDS}"
     if args.interval_sec < MIN_INTERVAL_SEC:
         return f"--interval-sec 須 ≥ {MIN_INTERVAL_SEC}（/livediag 節流 30 秒/次）"
-    if not (1 <= args.live_per_round <= 20):
-        return "--live-per-round 須在 1..20"
-    total = (args.rounds - 1) * args.interval_sec + args.rounds * args.live_per_round * (args.live_gap_sec + 20)
+    if not (0 <= args.live_per_round <= 20):
+        return "--live-per-round 須在 0..20"
+    # 每輪：/live 各最多 20 秒逾時＋間隔、/livediag 最多 20 秒逾時
+    total = (args.rounds - 1) * args.interval_sec + args.rounds * (args.live_per_round * (args.live_gap_sec + 20) + 20)
     if total > MAX_TOTAL_SEC:
         return f"預估最長耗時 {int(total)} 秒超過 {MAX_TOTAL_SEC} 秒（workflow timeout 60 分）"
     if not args.base.startswith("https://"):
@@ -263,7 +286,7 @@ def main(argv=None):
     print(render_text(summary, meta))
     print("JSON " + json.dumps({"meta": meta, "summary": summary}, ensure_ascii=False, separators=(",", ":")))
     rx = summary["runner_x_swr"]
-    if rx["n_ok"] == 0:
+    if args.live_per_round > 0 and rx["n_ok"] == 0:
         print("::error::所有 /live 請求都失敗")
         return 1
     return 0

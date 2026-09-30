@@ -1153,10 +1153,14 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
      而長出一個常駐班不划算，同 tick 量測班的教訓）。要量就是人去打，把數字記回這一節。
      **2026-09-30 補：已提供手動觸發的量測 workflow，仍刻意不排程**——`.github/workflows/measure-live-swr.yml`
      （workflow 名 `measure-live-swr`，**只有 `workflow_dispatch`**，`permissions: contents: read`、不 commit、
-     不需 secret、不掛 notify-failure）跑 `tools/measure_live_swr.py`。觸發：Actions 頁選 `measure-live-swr`
-     →Run workflow（或 `gh workflow run measure-live-swr.yml -f rounds=8 -f interval_sec=240`），**請在台北平日
-     09:00–13:30 觸發**；窗外預設只量一輪並標「無代表性」（勾 `force` 才照設定輪數跑，仍標無代表性）。每輪打
-     5 次 `/live`（間隔 3 秒）＋1 次 `/livediag`。輸出怎麼讀：job summary 與 log 的「`/live` SWR 量測摘要」列
+     不需 secret、不掛 notify-failure）跑 `tools/measure_live_swr.py`。
+     **⚠ 機房偏差（同日驗收指出，依 Cloudflare 架構推論、未實測 cf-ray）**：isolate 與 `caches.default` 各機房
+     各自一份，GitHub runner 出口在美國、打到的是美國機房的 isolate，幾乎碰不到台灣客戶端——**從 Actions 跑只能當
+     連通性檢查，比例不代表線上**。**真實量測請在台灣本機、台北平日 09:00–13:30 執行 `python tools/measure_live_swr.py`**
+     （免 secret、只讀）。窗外預設只量一輪並標「無代表性」（`--force` 才照設定輪數跑，仍標無代表性）。
+     每輪預設**只打 1 次 `/livediag`**（`--live-per-round` 預設 0）：若先打 `/live` 且落在同一 isolate，冷 isolate
+     會因自己的請求被誤採計、3 秒間隔的請求多為 fresh 又會把 stale 佔比往下拉（**自我污染**），所以要 >0 得明確指定，
+     摘要會另印警語。輸出怎麼讀：job summary 與 log 的「`/live` SWR 量測摘要」列
      採計／丟棄（全 0／節流／錯誤）輪數、逐輪 ①stale 佔比 ②合併率與其中位數／範圍（`swr` 是 isolate 累計快照，
      **各輪不相加**）、另列 runner 自己看到的 `x-swr` 標頭 fresh/stale/miss 分布（與 isolate 計數分開）；末行
      `JSON {...}` 供機器讀。上面那條選擇偏誤照樣成立，摘要會印警語。離線測試 `tests/test_measure_live_swr.py`。

@@ -3,17 +3,24 @@ name: measure-live-swr
 # 判讀規則見 CLAUDE.md「已知限制／坑」第 6 條與 tools/measure_live_swr.py 檔頭。
 # 刻意只有 workflow_dispatch、不排程（為一次性決策長出常駐班不划算）；只讀、不 commit、不需 secret、
 # 不掛 notify-failure（量測失敗不是生產故障）。請在台北平日 09:00–13:30 觸發，窗外只量一輪且標無代表性。
+# ⚠ 機房偏差（2026-09-30 驗收）：Cloudflare isolate 各機房各自一份，runner 出口在美國，量到的是美國機房的
+#   isolate、幾乎碰不到台灣客戶端——從這裡跑**只能當連通性檢查，比例不代表線上**。真實量測請在台灣本機盤中執行
+#   `python tools/measure_live_swr.py`（預設只打 /livediag，不打 /live 以免自我污染）。
 on:
   workflow_dispatch:
     inputs:
       rounds:
-        description: '輪數（1–14）'
+        description: '輪數（1–14；上限另受「輪數×間隔 ≤ 約 55 分」限制）'
         required: false
         default: '8'
       interval_sec:
         description: '輪間隔秒數（≥30，/livediag 節流 30 秒/次）'
         required: false
         default: '240'
+      live_per_round:
+        description: '每輪先打幾次 /live（0–20，預設 0；>0 會自我污染 isolate 計數）'
+        required: false
+        default: '0'
       force:
         description: '非台北盤中也照設定輪數跑（結果仍標無代表性）'
         type: boolean
@@ -41,9 +48,10 @@ jobs:
         env:
           ROUNDS: ${{ inputs.rounds }}
           INTERVAL_SEC: ${{ inputs.interval_sec }}
+          LIVE_PER_ROUND: ${{ inputs.live_per_round }}
           FORCE: ${{ inputs.force }}
         run: |
-          args=(--rounds "$ROUNDS" --interval-sec "$INTERVAL_SEC")
+          args=(--rounds "$ROUNDS" --interval-sec "$INTERVAL_SEC" --live-per-round "$LIVE_PER_ROUND")
           if [ "$FORCE" = "true" ]; then args+=(--force); fi
           python tools/measure_live_swr.py "${args[@]}" | tee "$RUNNER_TEMP/measure.log"
           rc=${PIPESTATUS[0]}
