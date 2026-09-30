@@ -78,6 +78,12 @@ crons = [
   #   （該 repo 只 workflow_dispatch、無 GH cron 兜底）。22:30 與哨兵（*/5 9-14）、23:30 與晚場班（*/5 13-15）同分醒，
   #   各帶自己的 event.cron，dispatchRoleForCron 以 ICHING_CRON 精確攔截。dow 為 Quartz 慣例，2-6＝週一~五。
   "30 14,15 * * 2-6",        # 21) ※ 需與 src/index.js 的 ICHING_CRON 完全一致
+  # 22) 股市易經早晨補叫班（2026-09-30）：台北 07:10 週二～六（UTC 23:10 週一～五；dow 為 Quartz 慣例 2-6＝週一~五，
+  #   UTC 週五 23:10 已是台北週六 07:10）dispatch 同一支 daily.yml，沿用 dispatchIching。動機：借券餘額等資料 23:30 仍未齊時
+  #   寫 waiting，沒有這班要等隔天 22:30 才續算（約 23 小時）。管線冪等、無 pending 即 no-op（約 40 秒）。
+  #   同分撞點（逐分鐘展開一週 10,080 分鐘比對）只有 am summary 主窗 `*/5 23 * * *`（每週 5 撞點＝這 5 個 07:10），
+  #   各帶自己的 event.cron，dispatchRoleForCron 以 ICHING_AM_CRON 精確攔截；落到 scheduledRole 會 fallthrough 成 frame。
+  "10 23 * * 2-6",           # 22) ※ 需與 src/index.js 的 ICHING_AM_CRON 完全一致
 ]
 
 # Workers Logs（2026-07-25）：原本 console.log 不落地，事後根本查不到「這班 cron 到底有沒有被叫起來」

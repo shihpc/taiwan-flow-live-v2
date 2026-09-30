@@ -120,6 +120,26 @@
 - `iching`（2026-09-14）：台北 22:30 與 23:30 週一～五各一次 → `taiwan-stock-iching/daily.yml`（股市易經每日班主觸發；
   該 repo 無 GH cron 兜底，dispatch 兩次都失敗走 `alertJob` tag `iching-dispatch-err`；cron `ICHING_CRON` 由 `dispatchRoleForCron`
   精確攔截，因 22:30 撞哨兵窗、23:30 撞晚場班窗。`GH_DISPATCH_TOKEN` 須涵蓋 `taiwan-stock-iching`。測試 `node test/iching.mjs`）
+  - **早晨補叫班（2026-09-30 使用者裁定）**：`export const ICHING_AM_CRON = "10 23 * * 2-6"`＝UTC 23:10 週一～五＝**台北 07:10
+    週二～六**（dow 為 Quartz 慣例 2-6＝週一~五，UTC 週五 23:10 已是台北週六 07:10；`wrangler.toml` 第 22 條，**crons 由 21 增為 22 條**，
+    `test/tickdiag.mjs` 釘 toml 條數的斷言同步 21→22）。`dispatchRoleForCron` 表加 `[ICHING_AM_CRON]: "iching"`，沿用 `dispatchIching`
+    零新 dispatch 路徑；`export function ichingSlot(tp)` 以 `tp.hour < 12` 判 am／pm。動機：FinMind 借券餘額 09-29 在 23:30 只落地一半、
+    該 repo 寫 waiting，沒有這班要等隔天 22:30 才續算（約 23 小時）；管線冪等、無 pending 即 no-op（Actions 約 40 秒）。
+    07:10 當日 TAIEX 尚未落地，`daily_run` 的 `trading_days_since`（TAIEX 有列才算交易日）只會列出前一交易日，**不會替當日寫 waiting**
+    （依 taiwan-stock-iching `src/iching/daily_fetch.py` 的 `trading_days_since` 讀碼，未線上實跑）。
+    **同分撞點**（逐分鐘展開一週 10,080 分鐘，與 toml 全部 21 條既有 cron 比對，腳本另存 scratchpad 不進 repo；同法對 `TICK_CRON`
+    重算得 frame 300／哨兵 180／其餘 7 條各 5＝每交易日 60／36／1，與 tick 節記載相符）：**只有 `*/5 23 * * *`（am summary 主窗）
+    每週 5 撞點**＝這 5 個 07:10；兩條各帶自己的 `event.cron`，`dispatchRoleForCron` 精確比對後分別得 `iching`／`summary-am`，互不干擾。
+    **必須被攔截**：`scheduledRole(07:10)` 不是 news／morning／sentinel／idle，而是 fallthrough 的 **`frame`**（會多寫一格
+    `f:<date>:07:10` 並多打一次 FinMind），`test/iching.mjs` 7c 把這個事實釘住。
+    **`dispatchIching` 的去重／時窗（C2 實查）**：dispatch 本身**沒有** KV 去重（22:30／23:30 本來就各叫一次），早晨班同樣不看前一晚結果。
+    原本的週末守門 `dow<1||dow>5` 會把**週六 07:10**（補週五那班）整個 skip，故改成 am 收 dow 2-6、pm 仍 dow 1-5。告警去重鍵
+    `alerted:<date>:<tag>` 以台北日為 date，早晨與當晚同 date，所以 am 改用獨立 tag `iching-am-dispatch-err`／`secret-missing-iching-am`
+    （pm 仍 `iching-dispatch-err`／`secret-missing-iching`）——同日早晨失敗與當晚失敗各發一則、互不吃額度（7e／7f／7g 測試）。
+    **已知限制**：`alertJob` 本體對週末 dow 一律 skip（休市表「不改」），**週六 07:10 dispatch 失敗不會告警**（只 console.error；
+    7h 釘住現況），影響＝週五 waiting 要等週一 22:30 才續算。**`/status` iching 的 `dueHour 23.75` 不動**：正常日仍是晚上落地、
+    早晨班只縮短「23:30 仍 waiting」那種日子的續算延遲，預期資料日口徑不變。早晨班**不查國定假日**（與 pm 同：該 repo 自判休市、
+    無 pending 即 no-op）。`claude-harness/docs/schedule-map.md` 另案（PR-D）同步。
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
 - `health` 健檢班：台北 23:50（`eve`）、09:30（`morn`），只盤點產物落地與否、不 dispatch。
   低頻班 `lastweek`／`meta` 於 2026-08-30 納入 `eve`（`mode:"lowfreq"`，判準 `export function lowFreqDue`）：
@@ -596,7 +616,7 @@ iching 抓 `taiwan-stock-iching/data/web/latest.json`（`ICHING_STATUS_URL`，�
 | flows | 20 | `taiwan-flows/index.html` 的 `function lastDueTradingDay`（平日 `hour>=20` 才期待今日），同後端 `src/run_daily.py` 的 `PUBLISH_DEADLINE_HOUR = 20` |
 | postmkt | 22.5 | `postmkt/index.html` 的 `function pmStatus`：資料日為上一交易日且 `hm < "22:30"` 仍判「正常」 |
 | brief | 8 | `claude-harness/tools/freshness_watchdog.py` 的 `DAILY_CUTOFF = time(8, 0)`＋`daily_target()`／`judge_brief()`（「08:00 後 date 應＝今日；08:00 前應＝昨日」）。**2026-09-08 補上**，見下段 |
-| iching | 23.75 | **2026-09-26 使用者裁定 23:45**。該站前端**沒有**新鮮度判級可對齊，依據改取**實際 commit 時刻**：主班由本 Worker 台北 22:30 dispatch（`ICHING_CRON`），實測 commit 落在台北 22:32～22:59；補叫班 23:30 → 實測 23:34 落地；再加 raw CDN `max-age=300` ＋本端點 cf 快取 5 分，最壞約 23:44 才看得到 → 取 23.75 使「補叫班才成功」的日子也無假黃。**不得 ≥24**（`dueReached` 永不成立、那站永遠期待前一交易日、真缺料判不出來；`test/status.mjs` 有 `< 24` 斷言）。走 `gradeMarket` 的**交易日**階梯（每日班 cron 只排週一～五）；國定假日自 2026-09-28 起由行事曆排除（fail-open 時退回只排週末、隔晚誤報一次 yellow） |
+| iching | 23.75 | **2026-09-26 使用者裁定 23:45**。該站前端**沒有**新鮮度判級可對齊，依據改取**實際 commit 時刻**：主班由本 Worker 台北 22:30 dispatch（`ICHING_CRON`），實測 commit 落在台北 22:32～22:59；補叫班 23:30 → 實測 23:34 落地；再加 raw CDN `max-age=300` ＋本端點 cf 快取 5 分，最壞約 23:44 才看得到 → 取 23.75 使「補叫班才成功」的日子也無假黃。**不得 ≥24**（`dueReached` 永不成立、那站永遠期待前一交易日、真缺料判不出來；`test/status.mjs` 有 `< 24` 斷言）。走 `gradeMarket` 的**交易日**階梯（每日班 cron 只排週一～五）；國定假日自 2026-09-28 起由行事曆排除（fail-open 時退回只排週末、隔晚誤報一次 yellow）。**2026-09-30 加早晨補叫班（`ICHING_AM_CRON`，台北 07:10 週二～六）後此值不動**：正常日仍晚上落地，早晨班只縮短「23:30 仍 waiting」那種日子的續算延遲（隔日 22:30 → 隔晨 07:10），預期資料日口徑不變 |
 
 `gradeNews` 不受影響（本來就看 `generated_at` 距今時數）。
 

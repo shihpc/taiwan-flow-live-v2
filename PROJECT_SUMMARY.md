@@ -27,6 +27,11 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
   無 GH cron 兜底，故 dispatch 兩次都失敗走 `alertJob`（tag `iching-dispatch-err`）；22:30 撞哨兵窗、23:30 撞晚場班窗，
   由 `dispatchRoleForCron` 以 `ICHING_CRON` 精確攔截。**前置**：`GH_DISPATCH_TOKEN` 的 PAT 要含 `taiwan-stock-iching`。
   測試 `node worker/test/iching.mjs`。設計正本在 taiwan-stock-iching `docs/P2-DAILY-PLAN.md` §7.5。
+  - **早晨補叫班（2026-09-30）**：CF cron **第 22 條** `10 23 * * 2-6`（`ICHING_AM_CRON`，台北 07:10 週二～六；**crons 總數 21→22**）
+    沿用 `dispatchIching`（`ichingSlot(tp)` 判 am／pm）。動機：借券餘額等資料 23:30 仍未齊時該 repo 寫 waiting，沒有這班要等隔天
+    22:30 才續算。am 週末守門收週二～六（週六補週五）、告警 tag 改 `iching-am-dispatch-err`／`secret-missing-iching-am` 與當晚分家；
+    同分撞點只有 am summary 主窗 `*/5 23 * * *`（每週 5 撞點，各帶 event.cron 精確分流）。`/status` iching `dueHour 23.75` 不動。
+    已知限制：週六 07:10 失敗不告警（`alertJob` 週末 skip）。細節見 `CLAUDE.md`「其他 scheduled 角色」iching 條。
 - **🔬 台指期 tick 量測班上線（2026-09-09）——暫時班，只量測、不下判準**：
   CF cron 第 20 條 `*/5 1-11 * * 2-6`（台北平日 09:00–19:55 每 5 分，132 slot/交易日）
   ＋唯讀端點 `GET /tickdiag`。程式在 `worker/src/index.js` 的 `export async function runTickSample`
