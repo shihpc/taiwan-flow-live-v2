@@ -194,7 +194,7 @@ const SRC = readFileSync(new URL("../src/index.js", import.meta.url), "utf-8");
   const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf-8");
   const crons = toml.split("crons = [")[1].split("]")[0].split("\n")
     .map((l) => (l.match(/^\s*"([^"]+)"/) || [])[1]).filter(Boolean);
-  chk("crons 共 21 條", crons.length === 21, String(crons.length));
+  chk("crons 共 22 條", crons.length === 22, String(crons.length));   // 2026-09-30 加股市易經早晨補叫班（ICHING_AM_CRON）
   chk("crons 含 TICK_CRON 且僅一次", crons.filter((c) => c === TICK_CRON).length === 1);
   chk("crons 無重複字串", new Set(crons).size === crons.length);
 }
