@@ -48,8 +48,9 @@ SELECTION_BIAS_WARNING = (
     "代表的是診斷請求剛好落在忙碌 isolate 時的比例、不是全隊平均；只能當量級看。"
 )
 GEO_WARNING = (
-    "⚠ 機房偏差：isolate 計數只屬於本工具請求所在的 Cloudflare 機房；從 GitHub Actions（美國）跑，"
-    "量的是美國機房、幾乎碰不到台灣客戶端，比例不代表線上。真實量測請在台灣本機盤中執行。"
+    "⚠ 機房偏差（依 Cloudflare 架構推論，未實測 cf-ray）：isolate 計數只屬於本工具請求所落的那台機器／機房；"
+    "從 GitHub Actions 跑（runner 通常不在台灣），多半碰不到服務台灣客戶端的 isolate，比例不代表線上。"
+    "真實量測請在台灣本機盤中執行。"
 )
 SELF_POLLUTION_WARNING = (
     "⚠ 自我污染：本次每輪有打 /live，若與 /livediag 落在同一 isolate，冷 isolate 會被誤採計、stale 佔比偏低。"
@@ -275,13 +276,14 @@ def validate(args):
     return None
 
 
-def main(argv=None):
+def main(argv=None, **run_kw):
+    """run_kw（get／sleep／now／log）只供測試注入，生產呼叫不帶。"""
     args = build_parser().parse_args(argv)
     err = validate(args)
     if err:
         print(f"::error::{err}")
         return 2
-    summary, meta, _rounds = run(args)
+    summary, meta, _rounds = run(args, **run_kw)
     print()
     print(render_text(summary, meta))
     print("JSON " + json.dumps({"meta": meta, "summary": summary}, ensure_ascii=False, separators=(",", ":")))

@@ -149,6 +149,23 @@ def test_default_diag_only():
     check("有打 /live 時印自我污染警語", m.SELF_POLLUTION_WARNING in txt5)
 
 
+def test_main_exit_codes():
+    import contextlib, io
+    kw = dict(sleep=lambda s: None, now=lambda: datetime(2026, 9, 30, 10, 0, tzinfo=m.TPE), log=lambda s: None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc0 = m.main(["--rounds", "2", "--interval-sec", "60"], get=_fake_get([]), **kw)
+
+        def bad_live(url):
+            if url.endswith("/livediag"):
+                return 200, {}, _swr(staleHits=1, freshHits=1).encode(), 1.0
+            return None, {"_error": "x"}, b"", 1.0
+        rc1 = m.main(["--rounds", "1", "--interval-sec", "60", "--live-per-round", "2"], get=bad_live, **kw)
+        rc2 = m.main(["--rounds", "1", "--interval-sec", "60"], get=bad_live, **kw)
+    check("預設（不打 /live）main 回 0", rc0 == 0)
+    check("有打 /live 且全失敗 main 回 1", rc1 == 1)
+    check("不打 /live 時不因 /live 全失敗回 1", rc2 == 0)
+
+
 def test_validate():
     p = m.build_parser()
     check("預設參數合法", m.validate(p.parse_args([])) is None)
@@ -156,13 +173,16 @@ def test_validate():
     check("rounds 0 拒絕", m.validate(p.parse_args(["--rounds", "0"])) is not None)
     check("超過 55 分拒絕", m.validate(p.parse_args(["--rounds", "14", "--interval-sec", "600"])) is not None)
     check("非 https base 拒絕", m.validate(p.parse_args(["--base", "http://x"])) is not None)
+    check("rounds 14 × interval 240 含 /livediag 逾時被拒",
+          m.validate(p.parse_args(["--rounds", "14", "--interval-sec", "240"])) is not None)
+    check("rounds 13 × interval 240 合法", m.validate(p.parse_args(["--rounds", "13", "--interval-sec", "240"])) is None)
     check("live-per-round 0 合法", m.validate(p.parse_args(["--live-per-round", "0"])) is None)
     check("live-per-round -1 拒絕", m.validate(p.parse_args(["--live-per-round", "-1"])) is not None)
 
 
 if __name__ == "__main__":
     for fn in [test_ratio, test_classify_diag, test_summarize_discards_and_ratios, test_summarize_all_discarded,
-               test_live_errors_counted, test_window, test_run_end_to_end, test_default_diag_only, test_validate]:
+               test_live_errors_counted, test_window, test_run_end_to_end, test_default_diag_only, test_main_exit_codes, test_validate]:
         try:
             fn()
         except AssertionError:

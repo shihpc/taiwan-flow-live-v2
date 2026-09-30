@@ -3,8 +3,8 @@ name: measure-live-swr
 # 判讀規則見 CLAUDE.md「已知限制／坑」第 6 條與 tools/measure_live_swr.py 檔頭。
 # 刻意只有 workflow_dispatch、不排程（為一次性決策長出常駐班不划算）；只讀、不 commit、不需 secret、
 # 不掛 notify-failure（量測失敗不是生產故障）。請在台北平日 09:00–13:30 觸發，窗外只量一輪且標無代表性。
-# ⚠ 機房偏差（2026-09-30 驗收）：Cloudflare isolate 各機房各自一份，runner 出口在美國，量到的是美國機房的
-#   isolate、幾乎碰不到台灣客戶端——從這裡跑**只能當連通性檢查，比例不代表線上**。真實量測請在台灣本機盤中執行
+# ⚠ 機房偏差（2026-09-30 驗收；依 Cloudflare 架構推論、未實測 cf-ray）：isolate 屬於各機房的各台機器，GitHub runner
+#   通常不在台灣（出口地區不保證），多半碰不到服務台灣客戶端的 isolate——從這裡跑**只能當連通性檢查，比例不代表線上**。真實量測請在台灣本機盤中執行
 #   `python tools/measure_live_swr.py`（預設只打 /livediag，不打 /live 以免自我污染）。
 on:
   workflow_dispatch:
