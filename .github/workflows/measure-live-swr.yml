@@ -1,0 +1,55 @@
+name: measure-live-swr
+# /live stale-while-revalidate 比例的**手動**量測（2026-09-30）。供日後決定 worker `LIVE_TTL`（15→25/30），
+# 判讀規則見 CLAUDE.md「已知限制／坑」第 6 條與 tools/measure_live_swr.py 檔頭。
+# 刻意只有 workflow_dispatch、不排程（為一次性決策長出常駐班不划算）；只讀、不 commit、不需 secret、
+# 不掛 notify-failure（量測失敗不是生產故障）。請在台北平日 09:00–13:30 觸發，窗外只量一輪且標無代表性。
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: '輪數（1–14）'
+        required: false
+        default: '8'
+      interval_sec:
+        description: '輪間隔秒數（≥30，/livediag 節流 30 秒/次）'
+        required: false
+        default: '240'
+      force:
+        description: '非台北盤中也照設定輪數跑（結果仍標無代表性）'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: measure-live-swr
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: measure /live swr
+        # inputs 一律經 env 傳入，不 ${{ }} 內插進 run 字串（防注入）；數值由腳本 argparse type=int 驗證
+        env:
+          ROUNDS: ${{ inputs.rounds }}
+          INTERVAL_SEC: ${{ inputs.interval_sec }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          args=(--rounds "$ROUNDS" --interval-sec "$INTERVAL_SEC")
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          python tools/measure_live_swr.py "${args[@]}" | tee "$RUNNER_TEMP/measure.log"
+          rc=${PIPESTATUS[0]}
+          {
+            echo '```'
+            sed -n '/^=== \/live SWR 量測摘要 ===/,$p' "$RUNNER_TEMP/measure.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
