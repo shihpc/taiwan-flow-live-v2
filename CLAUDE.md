@@ -59,8 +59,8 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **28 支** `.mjs`；
-  2026-09-29 `ls worker/test/*.mjs` 實查（含 09-28 的 `holidays.mjs` 與 09-29 的 `holidays2.mjs`），取代舊記的 27 支）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **29 支** `.mjs`；
+  2026-09-30 `ls worker/test/*.mjs` 實查（含 09-28 的 `holidays.mjs`、09-29 的 `holidays2.mjs` 與 09-30 的 `holidays_timer.mjs`），取代舊記的 28 支）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
   （**15 支**＝帶 cron 11 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
@@ -178,6 +178,8 @@
   永不結束的 promise＝frame／哨兵／tick 全停擺。逾時回 `{cal:null, err:"timeout"}`、**照寫失敗記憶**（5 分內不再撞）並清
   in-flight → fail-open 照平日跑。選 race 而非 `AbortSignal.timeout()` 的理由同「台指期 tick 量測班」節 `tickWithTimeout`
   （官方文件未列該靜態方法、signal 管不到 body）；代價也相同：race 不取消底層操作、卡住的 fetch 只是被放生，timer 在 finally 清。
+  **timer 確實被清由 `test/holidays_timer.mjs` 守住**（2026-09-30 補 S1 漏洞）：stub 全域 `setTimeout`／`clearTimeout`，
+  對快速成功／fetch 拋錯／body 永不回（觸發硬上限）三條路徑逐一斷言 race timer 全數被 `clearTimeout`；拿掉 finally 那行 `clearTimeout` 實測三條皆紅。
   所以是「每個 isolate 每 30 分至多 1 次」，不是每分鐘一次（`test/holidays2.mjs` 以連續 4 分鐘 frame 斷言只讀 1 次）。
 - **fail-open**：行事曆 404／壞檔／拋錯／年度未涵蓋 → `holiday:false` → 照改動前跑（照寫 frame、照探測），log 一行
   `holiday-cal 未載入`。颱風臨時停市（行事曆事後才補）當天照舊會跑。
@@ -1028,7 +1030,7 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 27 支要個別跑（離線、免 token；2026-09-29 實查 worker/test/*.mjs 共 28 支，
+node test/sentinel.mjs              # 其餘 28 支要個別跑（離線、免 token；2026-09-30 實查 worker/test/*.mjs 共 29 支，
                                     #   含 swr.mjs 與新增的 tickdiag.mjs。舊記的「22 支」已過時）
 for f in test/*.mjs; do node "$f" || echo FAIL $f; done   # 一次跑完全部（同 worker-deploy.yml 的 glob）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
