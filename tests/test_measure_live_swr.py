@@ -152,15 +152,25 @@ def test_default_diag_only():
 def test_main_exit_codes():
     import contextlib, io
     kw = dict(sleep=lambda s: None, now=lambda: datetime(2026, 9, 30, 10, 0, tzinfo=m.TPE), log=lambda s: None)
-    with contextlib.redirect_stdout(io.StringIO()):
-        rc0 = m.main(["--rounds", "2", "--interval-sec", "60"], get=_fake_get([]), **kw)
 
-        def bad_live(url):
+    def bad_live(calls):
+        def get(url):
+            calls.append(url)
             if url.endswith("/livediag"):
                 return 200, {}, _swr(staleHits=1, freshHits=1).encode(), 1.0
             return None, {"_error": "x"}, b"", 1.0
-        rc1 = m.main(["--rounds", "1", "--interval-sec", "60", "--live-per-round", "2"], get=bad_live, **kw)
-        rc2 = m.main(["--rounds", "1", "--interval-sec", "60"], get=bad_live, **kw)
+        return get
+
+    c0, c1, c2 = [], [], []
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc0 = m.main(["--rounds", "2", "--interval-sec", "60"], get=_fake_get(c0), **kw)
+        rc1 = m.main(["--rounds", "1", "--interval-sec", "60", "--live-per-round", "2"], get=bad_live(c1), **kw)
+        rc2 = m.main(["--rounds", "1", "--interval-sec", "60"], get=bad_live(c2), **kw)
+    # 先證明注入的 get 真的被 main 用到（否則下面的 exit code 可能只是巧合）
+    check("main 注入生效：預設 2 輪只打 2 次 /livediag", len(c0) == 2 and all(u.endswith("/livediag") for u in c0))
+    check("main 注入生效：live-per-round 2 打 2 次 /live＋1 次 /livediag",
+          sum(not u.endswith("/livediag") for u in c1) == 2 and sum(u.endswith("/livediag") for u in c1) == 1)
+    check("main 注入生效：預設不打 /live", len(c2) == 1 and c2[0].endswith("/livediag"))
     check("預設（不打 /live）main 回 0", rc0 == 0)
     check("有打 /live 且全失敗 main 回 1", rc1 == 1)
     check("不打 /live 時不因 /live 全失敗回 1", rc2 == 0)
