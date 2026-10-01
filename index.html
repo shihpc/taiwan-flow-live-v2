@@ -646,8 +646,8 @@ const CRED_SPEC = {
   anth:{ user:"anthropic-api-key", label:"Anthropic API key", ph:"貼上 Anthropic API key（sk-ant-…）", verify:"anthropic" },
   gh:  { user:"github-pat-postmkt-analyses", label:"GitHub PAT（postmkt analyses）", ph:"貼上 GitHub PAT（github_pat_…）", verify:"shihpc/postmkt" },
 };
-// 載入成功後強制重繪（renderInsight 平時在使用者操作憑證表單時會跳過 20 秒自動重繪）
-const credRerender = () => { if (state.tab === "insight") renderInsight(true); else render(); };
+// 載入成功後重繪（使用者觸發的重繪一律照畫；只有 20 秒自動刷新會在焦點位於憑證表單時跳過，見 renderInsight）
+const credRerender = () => render();
 // ---------- 前端憑證：改存瀏覽器密碼管理器（2026-10-01；家族四站同一套寫法，刻意不要求逐字） ----------
 // 金鑰不再寫進 localStorage。每種憑證一個 <form>：readonly 的 username 欄（家族統一的固定帳號名，
 // 讓密碼管理器把同 origin 的各把金鑰分開存、不互蓋）＋ autocomplete="current-password" 的密碼欄
@@ -1074,7 +1074,7 @@ function insightHtml(){
       + `key 由瀏覽器密碼管理器保管、載入後只在本分頁記憶體，不會寫入網站或傳給 Anthropic 以外的任何地方；載入時會先打一次免費的列模型 API 驗證。`) + `</div>`;
   }
   if (!ghToken()){
-    h += `<div class="card" style="font-size:13px;line-height:1.6">` + credFormHtml("gh", `選填：GitHub Fine-grained PAT（只勾 postmkt repo、Contents Read/write）→ 分析結果自動存雲端跨裝置讀取；不載入則只存本機。讀取歷史不需要 token。載入時會先唯讀查一次 postmkt repo 驗證。`) + `</div>`;
+    h += `<div class="card" style="font-size:13px;line-height:1.6">` + credFormHtml("gh", `選填：GitHub Fine-grained PAT（只勾 postmkt repo、Contents Read/write）→ 分析結果自動存雲端跨裝置讀取；不載入則只存本機。讀取歷史不需要 token。載入時會先唯讀查一次 postmkt repo 驗證——這只證明 PAT 有效，postmkt 是 public repo，不證明它有 Contents 寫入權限；權限不足要到實際存雲端時才會顯示錯誤。`) + `</div>`;
   }
   const modelOpts = INSIGHT_MODELS.map(([v,l])=>`<option value="${v}"${state.insightModel===v?" selected":""}>${escI(l)}</option>`).join("");
   h += `<div class="card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">`
@@ -1137,14 +1137,14 @@ function cloudHistSectionHtml(){
   }
   return h;
 }
-function renderInsight(force){
-  // v2 有 20 秒自動刷新會重繪 main：使用者正在操作憑證表單（焦點在表單內、密碼欄有值或驗證中）時跳過重繪，
-  // 避免清空輸入或打斷密碼管理器自動填入；載入成功走 credRerender() 帶 force 強制重繪
-  if(!force){
+function renderInsight(){
+  // v2 有 20 秒自動刷新會重繪 main：**只有自動刷新那條路徑**（pull(false) 期間 PULL_AUTO=true）在焦點位於
+  // 憑證表單內時跳過，避免清空正在輸入／自動填入的值。使用者觸發的重繪（手動 render、runInsight 完成、
+  // 雲端歷史、存雲端回呼、載入成功）一律照畫——2026-10-01 驗收退回：原版「任一密碼欄有值就跳過所有重繪」
+  // 會讓摘要結果出不來。
+  if(PULL_AUTO){
     const act=document.activeElement;
-    for(const f of document.querySelectorAll("#main form[data-cred]")){
-      if(f.contains(act)||f.querySelector("button:disabled")||[...f.querySelectorAll('input[type="password"]')].some(i=>i.value))return;
-    }
+    if(act&&act.closest&&act.closest("#main form[data-cred]"))return;
   }
   document.getElementById("main").innerHTML = insightHtml();
   document.querySelectorAll("#main .scrollbox").forEach(b=>b.style.maxHeight="none");
@@ -2887,6 +2887,7 @@ function liveUsable(j){
 }
 // 抓一次即時資料並重繪；manual=true 時在按鈕顯示狀態。in-flight 防重疊（慢回應時自動刷新不疊發）
 let pulling=false;
+let PULL_AUTO=false;   // 自動刷新（pull(false)）觸發的 render 期間為 true；renderInsight 據此決定是否讓位給憑證表單
 async function pull(manual){
   if(pulling)return; pulling=true;
   const btn=document.getElementById("refresh");let old;
@@ -2894,7 +2895,7 @@ async function pull(manual){
   try{
     const j=await loadJSON(liveURL(),FETCH_CACHE.live);
     // 第五期：回放中暫停自動重繪（state.live 照更新，「回到即時」立即接上最新盤面）
-    if(liveUsable(j)){state.liveErr=false;state.live=j;if(!(OV_REPLAY&&state.tab==="ov"))render();}
+    if(liveUsable(j)){state.liveErr=false;state.live=j;if(!(OV_REPLAY&&state.tab==="ov")){PULL_AUTO=!manual;try{render();}finally{PULL_AUTO=false;}}}
   }catch(e){ if(manual)alert("更新失敗："+(e.message||e)); }
   finally{ pulling=false; if(manual){btn.textContent=old;btn.disabled=false;} }
 }

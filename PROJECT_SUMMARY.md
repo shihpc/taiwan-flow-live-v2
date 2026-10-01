@@ -1686,6 +1686,7 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
   大盤段原誤把 chgP（漲跌點數）當 % 顯示，已改「±X點/±Y%」雙顯示。
   localStorage key `anthropic_key`/`insight_model` 與 postmkt、taiwan-stock-news
   同 origin 共用（設一次三站通用）。
+  > **更正（2026-10-01）**：金鑰（`anthropic_key`／`gh_token`）起改存瀏覽器密碼管理器、不再存 localStorage，見 CLAUDE.md CSP 表 localStorage 列與 `postmkt/CLAUDE.md` 約定 6；上下文為歷史紀錄、原文保留。
 - 個股外連＋雲端儲存（2026-07-12）：insight 渲染中個股代號自動變連結，外開 Yahoo 技術分析頁
   （`linkifyStocks(html, knownSet)`，三站逐字一致、改動需三站同步）。分析結果自動存
   **postmkt repo** `data/analyses/insight-live-YYYYMMDD.json`（當日陣列、單日上限10筆、
