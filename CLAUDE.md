@@ -900,7 +900,7 @@ meta；理由寫在原位 HTML 註解），快取策略改由 `const FETCH_CACHE
 | `style=` 屬性 | 52 處（表格內距、連結色等） | `style-src 'self' 'unsafe-inline'` |
 | fetch 目標 origin | 同源 `data/classify.json`／`data/rrg_base.json`／`data/live.json`（無 Worker 時）；`taiwan-flow-v2.shihpc.workers.dev`（`/live`、`/replay`）；`api.anthropic.com`（`callClaude`）；`raw.githubusercontent.com`（postmkt analyses 雲端歷史 `CLOUD_RAW`）；`api.github.com`（`ghSaveAnalysis` 寫 postmkt＋`loadSiteVer`） | `connect-src` 白名單恰為此 4 個外部 origin＋`'self'` |
 | 純導覽外連 | Yahoo（`yahoo()`／摘要 `link`）、`shihpc.github.io/postmkt/`；皆 `target="_blank" rel="noopener"` | 不受 CSP 限制（無 `navigate-to`） |
-| localStorage | `anthropic_key`／`gh_token`／`insight_model`／`tflive2_auto`（金鑰只送 Authorization header，不進 DOM） | — |
+| localStorage | `insight_model`／`tflive2_auto`。**金鑰 2026-10-01 起不再存 localStorage**：Anthropic key／GitHub PAT 改由瀏覽器密碼管理器保管，摘要分析 tab 的 `<form data-cred>` 載入後只在記憶體 `CRED`（勾「只在本分頁記住」才寫 sessionStorage `cred_tab_<kind>`），只送 header、不進 DOM／URL；舊 key `anthropic_key`／`gh_token` 只用於搬移提示卡與刪除（`CRED_MIGRATE_UNTIL` 2026-10-15 後載入即刪）。四站寫法與家族 username 正本見 `postmkt/CLAUDE.md` 約定 6；載入時打的免費驗證請求（`api.anthropic.com/v1/models`、`api.github.com/repos/shihpc/postmkt`）都在既有 `connect-src` 內，CSP 未改。`form-action 'none'` 不影響：表單 submit 一律 `preventDefault()`、不導覽 | — |
 
 ### `innerHTML` 逐處稽核（2026-09-07 完成，取代 09-06 的「未做逐處稽核」）
 
