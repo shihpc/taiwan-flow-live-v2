@@ -1164,6 +1164,19 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
      採計／丟棄（全 0／節流／錯誤）輪數、逐輪 ①stale 佔比 ②合併率與其中位數／範圍（`swr` 是 isolate 累計快照，
      **各輪不相加**）、另列 runner 自己看到的 `x-swr` 標頭 fresh/stale/miss 分布（與 isolate 計數分開）；末行
      `JSON {...}` 供機器讀。上面那條選擇偏誤照樣成立，摘要會印警語。離線測試 `tests/test_measure_live_swr.py`。
+   - **✅ 已量、已裁定（2026-10-05，使用者裁定 `LIVE_TTL` 維持 15，本項結案）**：
+     ①**10-02 只打 `/livediag` 的量法失敗**——台灣本機（PowerShell）盤中 8 輪全 0、採計 0 輪：診斷請求一直落在沒服務過
+     `/live` 的 isolate；以目前流量（推論：盤中使用者極少）這種「抽查 isolate 計數」**量不到東西**，再跑也一樣。
+     ②**10-05 改模擬單一客戶端**（手機 Termux 本機，`cf-ray` 實測 `-TPE`；13:08:36 開始，
+     `--rounds 1 --live-per-round 20 --live-gap-sec 20`）：客戶端自己看到的 `x-swr` 為 **stale 17／fresh 3（85%）**；
+     同輪 `/livediag` 剛好落在服務它的 isolate，累計 rebuilds 41／staleHits 40／freshHits 8／misses 2／coalesced 1
+     ＝**stale 佔比 0.83、合併率 0.024**（含本工具自己的 20 次請求，只當量級）；`/live` 耗時中位數 329 ms。
+     **讀法**：前端 20 秒輪詢 > TTL 15 秒 → 幾乎每次輪詢都走 stale 並觸發一次背景重建（每個開著頁面的客戶端
+     盤中約 3 次／分），畫面資料約落後 20 秒；併發重建幾乎不存在，`liveRebuildInflight` 去重在目前流量下派不上用場。
+     **TTL 只有 15 與 25 兩個實質選項**（依程式邏輯推算、未實測）：20 秒輪詢下 25 與 30 都是「隔一次重建一次」
+     （重建約減半、資料平均落後約 30 秒、最多約 40 秒），要再少得 ≥40。**維持 15 的理由**：使用者極少、總重建量小，
+     未見 FinMind 額度或延遲壓力；改 25 只換到重建減半、代價是資料平均再晚約 10 秒。**日後若 FinMind 額度吃緊或使用者
+     變多再改 25**（不考慮 30）。`measure-live-swr.yml`／`tools/measure_live_swr.py` 保留（手動、不排程）。
 7. **哨兵 dispatch 失敗與 secret 缺失：已接告警（2026-09-06）；獨立看門狗仍未做**：
    `export async function runSentinel` 內 `ghDispatch` 的 catch 現已接 `alertJob`（tag
    `sentinel-err-<signal>`，沿用每日每 tag 一則的 KV 去重；KV 仍不記、5 分後照舊重試）。
