@@ -1,10 +1,10 @@
 {
- "date": "2026-10-12",
- "generated_at": "2026-10-12T08:11:16+08:00",
+ "date": "2026-10-13",
+ "generated_at": "2026-10-13T08:10:53+08:00",
  "images": {
-  "news-morning-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/am/news-morning-2.png?d=2026-10-12",
-  "news-morning-3": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/am/news-morning-3.png?d=2026-10-12",
-  "news-morning-4": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/am/news-morning-4.png?d=2026-10-12"
+  "news-morning-2": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/am/news-morning-2.png?d=2026-10-13",
+  "news-morning-3": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/am/news-morning-3.png?d=2026-10-13",
+  "news-morning-4": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/am/news-morning-4.png?d=2026-10-13"
  },
  "ratios": {
   "news-morning-2": "1024:955",
