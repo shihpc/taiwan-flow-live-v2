@@ -1,7 +1,11 @@
 // backtest/run_rrg_d7_rerun.mjs — D7 複跑：位移異常條數／收盤窗／OV_RRG_ODDMAX 的多日檢驗
 //
 // 報告：docs/rrg-d7-rerun-20260929.md（本腳本的輸出即該報告的數字來源）。
-// 用法（repo 根目錄）：node backtest/run_rrg_d7_rerun.mjs [--json out.json]
+// 用法（repo 根目錄）：node backtest/run_rrg_d7_rerun.mjs [--json out.json] [--days all|YYYY-MM-DD,...] [--until YYYY-MM-DD]
+//   不帶 --days：釘死的 9 天（docs/rrg-d7-rerun-20260929.md），輸出與該版逐字相同。
+//   --days all：data/intraday/ 下 ≥2026-09-14 且 ≤ --until（預設 2026-10-14）、非週末／非 HOLIDAYS、
+//     且帶 cg/cmkt 的全部檔（報告 docs/rrg-d7-rerun-20261015.md）。--days a,b,c：指定日期。
+//   帶 --days 時另印「擴充檢查」段（檔案篩選、base 違規與剔除版、離群日檢查）；不帶時一行都不多印。
 //   需要完整 git 歷史（shallow clone 先 `git fetch --unshallow origin`），免 token、免網路。
 //
 // 口徑原則（不得違反）：
@@ -66,15 +70,49 @@ const hm2m = hm => +hm.slice(0, 2) * 60 + +hm.slice(3, 5);
 const m2hm = m => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
 
 // ── 2. 資料：歸檔檔、當日 base、當日定格檔（交叉驗證用） ────────────────────
-const HOLIDAYS = ["2026-09-25", "2026-09-28"];
-// 重算範圍釘死為這 9 個交易日（不以 glob 取 ≥09-14）：在任何 commit 上重跑輸出皆相同，
-// 除非這 9 天的歸檔檔或 index.html 的被抽函式／常數有變。要納入新日子請另開一版報告。
-const days = ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
+const HOLIDAYS = ["2026-09-25", "2026-09-28", "2026-10-09"];
+// 預設重算範圍釘死為這 9 個交易日（不以 glob 取 ≥09-14）：在任何 commit 上重跑輸出皆相同，
+// 除非這 9 天的歸檔檔或 index.html 的被抽函式／常數有變。新日子走 --days（2026-10-15 起）。
+const DEFAULT_DAYS = ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
   "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24"];
+const argOf = k => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : null; };
+const DAYS_ARG = argOf("--days"), UNTIL = argOf("--until") || "2026-10-14";
+const EXT = DAYS_ARG != null;          // 擴充模式：才印額外段落、才在 JSON 加新欄位
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+if (!DATE_RE.test(UNTIL)) throw new Error(`--until 須為 YYYY-MM-DD：${UNTIL}`);
+const extNotes = [];                   // 擴充模式的檔案篩選紀錄
+let days;
+if (!EXT) days = DEFAULT_DAYS;
+else if (DAYS_ARG === "all") {
+  days = [];
+  const files = fs.readdirSync(path.join(ROOT, "data/intraday")).filter(f => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).map(f => f.slice(0, 10)).sort();
+  for (const d of files) {
+    if (d < "2026-09-14" || d > UNTIL) continue;
+    const dow = new Date(d + "T00:00:00Z").getUTCDay();
+    if (dow === 0 || dow === 6) { extNotes.push(`${d}：週末檔，排除`); continue; }
+    if (HOLIDAYS.includes(d)) { extNotes.push(`${d}：休市日檔（HOLIDAYS），排除——假歸檔線索`); continue; }
+    const a = JSON.parse(fs.readFileSync(path.join(ROOT, `data/intraday/${d}.json`), "utf8"));
+    if (!a.cg || !a.cmkt) { extNotes.push(`${d}：無 cg/cmkt，排除`); continue; }
+    days.push(d);
+  }
+} else {
+  days = DAYS_ARG.split(",").map(x => x.trim()).filter(Boolean);
+  for (const d of days) if (!DATE_RE.test(d)) throw new Error(`--days 日期格式錯：${d}`);
+}
 
 function baseSeen(d) {
   const sha = git("rev-list", "--first-parent", "-1", `--before=${d}T01:00:00Z`, "origin/main").trim();
   return { sha: sha.slice(0, 7), j: JSON.parse(git("show", `${sha}:data/rrg_base.json`)) };
+}
+// 擴充模式：盤中 base 含休市日或當日時，找當日台北 09:00 之後、14:00 之前 main 上第一版
+// days 乾淨的 rrg_base.json（＝當日稍晚載入頁面者看到的版本）當「剔除版」。
+function baseClean(d) {
+  const shas = git("log", "--first-parent", "--reverse", "--format=%H", `--since=${d}T01:00:00Z`, `--until=${d}T06:00:00Z`, "origin/main", "--", "data/rrg_base.json").trim().split("\n").filter(Boolean);
+  for (const s of shas) {
+    const j = JSON.parse(git("show", `${s}:data/rrg_base.json`));
+    if (!j.days.some(x => HOLIDAYS.includes(x) || x >= d)) return { sha: s.slice(0, 7), j, at: git("show", "-s", "--format=%cI", s).trim() };
+  }
+  return null;
 }
 let frozenIdx = null;   // date → 第一個寫出該日定格檔的 commit
 function frozenOf(d) {
@@ -129,12 +167,20 @@ for (const d of days) {
   const a = JSON.parse(fs.readFileSync(path.join(ROOT, `data/intraday/${d}.json`), "utf8"));
   if (!a.cg || !a.cmkt) { res.push({ d, skip: "無 cg/cmkt" }); continue; }
   const flat = a.total.every(v => v === a.total[0]);
-  const { sha, j: base } = baseSeen(d);
+  let { sha, j: base } = baseSeen(d);
   const bad = base.days.filter(x => HOLIDAYS.includes(x) || x >= d);
   const frames = framesFromArchive(a);
-  const seen = runDay(d, base, frames);
-  let clean = null;
-  if (bad.length) clean = "（base 含休市日或當日；需另跑剔除版——本批 9 天皆不觸發）";
+  let seen = runDay(d, base, frames);
+  let clean = null, polluted = null;
+  if (bad.length && !EXT) clean = "（base 含休市日或當日；需另跑剔除版——本批 9 天皆不觸發）";
+  if (bad.length && EXT) {
+    // 擴充模式：主表改用剔除版，盤中實際看到的（受污染）版本另存 polluted 供對照
+    const bc = baseClean(d);
+    if (!bc) throw new Error(`${d} base 含 ${bad.join(",")}，且當日找不到乾淨的 base 版本`);
+    polluted = { sha, days: base.days, seen };
+    clean = { sha: bc.sha, at: bc.at, days: bc.j.days };
+    sha = bc.sha; base = bc.j; seen = runDay(d, base, frames);
+  }
   // 交叉驗證：定格檔（盤中 /replay 實抓）12 時點 share vs 歸檔 cg/cmkt 還原的 share
   const fz = frozenOf(d);
   let fzDiff = null, fzBase = null;
@@ -159,7 +205,9 @@ for (const d of days) {
   const incT = hm => ti[hm] - ti[m2hm(hm2m(hm) - 10)];
   const medT = (xs => { const s = [...xs].sort((x, y) => x - y), n = s.length; return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2; })(baseHm.map(incT));
   const totMult1330 = incT("13:30") / medT;
-  res.push({ d, flat, baseSha: sha, baseDays: base.days, bad, clean, fzDiff, fzBase, seen, cmkt: { medInc: med, mult, firstJump }, total: { medIncYi: medT / 1e8, mult1330: totMult1330 } });
+  const rec = { d, flat, baseSha: sha, baseDays: base.days, bad, clean, fzDiff, fzBase, seen, cmkt: { medInc: med, mult, firstJump }, total: { medIncYi: medT / 1e8, mult1330: totMult1330 } };
+  if (EXT) { rec.polluted = polluted; rec.stale = (a.frames || []).filter(f => f && f.stale).map(f => f.t); }
+  res.push(rec);
 }
 
 // ── 3. 彙整與輸出（Markdown 片段，直接貼進報告） ─────────────────────────────
@@ -172,7 +220,7 @@ L.push(`| 日期 | total 非常數 | 盤中 base（main@台北 09:00） | base.d
 L.push(`|---|---|---|---|---|---|---|`);
 for (const r of res) {
   if (r.skip) { L.push(`| ${r.d} | — | — | — | — | — | ${r.skip} |`); continue; }
-  L.push(`| ${r.d} | ${r.flat ? "否（常數）" : "是"} | \`${r.baseSha}\` | ${r.baseDays[0].slice(5)}~${r.baseDays.at(-1).slice(5)} | ${r.bad.length ? r.bad.join(",") : "無"} | ${r.fzBase == null ? "無定格檔" : r.fzBase ? "是" : "否"} | ${r.fzDiff ? `${r.fzDiff.cells}／${r.fzDiff.maxRel.toExponential(1)}（\`${r.fzDiff.sha}\`）` : "—"} |`);
+  L.push(`| ${r.d} | ${r.flat ? "否（常數）" : "是"} | \`${r.baseSha}\`${r.polluted ? `（剔除版；09:00 實為 \`${r.polluted.sha}\`）` : ""} | ${r.baseDays[0].slice(5)}~${r.baseDays.at(-1).slice(5)} | ${r.bad.length ? r.bad.join(",") : "無"} | ${r.fzBase == null ? "無定格檔" : r.fzBase ? "是" : "否"} | ${r.fzDiff ? `${r.fzDiff.cells}／${r.fzDiff.maxRel.toExponential(1)}（\`${r.fzDiff.sha}\`）` : "—"} |`);
 }
 const hms = ANCHORS.map(m2hm);
 L.push(`\n## D1 逐日逐時點位移異常條數（oddRaw＝不套收盤窗；收盤窗格括號內為 odd＝套收盤窗後實際採用；非收盤窗 odd＝oddRaw）\n`);
@@ -222,7 +270,7 @@ const exc = ok.flatMap(r => r.seen.filter(s => s.close).flatMap(s => s.rawList.f
 L.push(`\n收盤窗內**不在**落後／轉弱象限的 oddRaw（${exc.length} 條）：${exc.join("；") || "無"}`);
 
 // D2 補：逐格象限比例（與「同格全部族群」的基準率對照）與特殊日敏感度
-L.push(`\n| 錨點 | oddRaw 條數（9 天合計） | 其中落後／轉弱 | 同格全部族群落後／轉弱（基準率） |`);
+L.push(`\n| 錨點 | oddRaw 條數（${ok.length} 天合計） | 其中落後／轉弱 | 同格全部族群落後／轉弱（基準率） |`);
 L.push(`|---|---|---|---|`);
 const qrow = (lab, cells) => { const r = cells.reduce((s, x) => s + x.raw, 0), d = cells.reduce((s, x) => s + x.rawDown, 0), a = cells.reduce((s, x) => s + x.nrows, 0), ad = cells.reduce((s, x) => s + x.allDown, 0);
   L.push(`| ${lab} | ${r} | ${d}（${r ? (100 * d / r).toFixed(0) : "—"}%） | ${ad}/${a}（${(100 * ad / a).toFixed(0)}%） |`); };
@@ -278,6 +326,70 @@ for (const r of ok) L.push(`| ${r.d} | ${r.cmkt.mult["13:30"].toFixed(2)} | ${r.
 const mc = P(ok.map(r => r.cmkt.mult["13:30"]), 0.5), mt = P(ok.map(r => r.total.mult1330), 0.5), mr = P(ok.map(r => r.total.mult1330 / r.cmkt.mult["13:30"]), 0.5);
 L.push(`| **中位數** | ${mc.toFixed(2)} | ${mt.toFixed(2)} | ${mr.toFixed(2)} |`);
 L.push(`\n歸檔 total 的 11:30–13:00 10 分增額中位數（億）：${ok.map(r => r.total.medIncYi.toFixed(1)).join("／")}`);
+
+// ── 4. 擴充模式專屬段落（不帶 --days 時一行都不印，保預設輸出逐字不變） ──────
+if (EXT) {
+  L.push(`\n## 擴充檢查（--days ${DAYS_ARG}${DAYS_ARG === "all" ? `，--until ${UNTIL}` : ""}）\n`);
+  L.push(`納入 ${ok.length} 天：${ok.map(r => r.d.slice(5)).join(", ")}`);
+  L.push(`\n檔案篩選紀錄：${extNotes.length ? extNotes.join("；") : "無（範圍內無週末／休市日／缺 cg 檔）"}；HOLIDAYS＝${HOLIDAYS.join(", ")}`);
+  const flatDays = ok.filter(r => r.flat).map(r => r.d);
+  L.push(`\ntotal 為常數（假歸檔形狀）的日子：${flatDays.length ? flatDays.join(", ") : "無"}`);
+  const stl = ok.filter(r => r.stale.length);
+  L.push(`\n歸檔 frames 帶 stale:1 的格數／54（Worker storeFrame：FinMind 時戳與牆鐘差 >3 分或日期不同即標 stale）：${ok.map(r => `${r.d.slice(5)} ${r.stale.length}`).join("，")}。`);
+  L.push(`  註：09-22 以前幾乎每格都 stale（worker/src/index.js 註解記載「近 8 個交易日 frames[].stale 實測 52–54/54」），該旗標在那段期間沒有鑑別力；09-23 起常態為 0。13:30 那格 stale 的日子：${ok.filter(r => r.stale.includes("13:30") && r.stale.length < 27).map(r => r.d).join(", ") || "無"}（只列 stale 格數 <27 的日子）。`);
+  const pol = ok.filter(r => r.polluted);
+  L.push(`\n### 盤中 base 違規（含休市日或當日）\n`);
+  if (!pol.length) L.push(`無。`);
+  else {
+    L.push(`| 日期 | 盤中 09:00 版 base | 其 days | 違規項 | 主表改用（剔除版） | 剔除版 days | 剔除版進 main 時刻 |`);
+    L.push(`|---|---|---|---|---|---|---|`);
+    for (const r of pol) L.push(`| ${r.d} | \`${r.polluted.sha}\` | ${r.polluted.days.map(x => x.slice(5)).join(",")} | ${r.bad.join(",")} | \`${r.clean.sha}\` | ${r.clean.days.map(x => x.slice(5)).join(",")} | ${r.clean.at} |`);
+    L.push(`\n受污染版 vs 剔除版的逐錨點 oddRaw（10:40 起；同一份 frame，只換 base）：\n`);
+    for (const r of pol) {
+      const pick = xs => xs.filter(s => s.m >= 640).map(s => `${s.hm.slice(0, 5)}:${s.raw}`).join(" ");
+      L.push(`- ${r.d} 受污染 \`${r.polluted.sha}\`：${pick(r.polluted.seen)}（全日 ${r.polluted.seen.reduce((s, x) => s + x.raw, 0)}）`);
+      L.push(`- ${r.d} 剔除版 \`${r.clean.sha}\`：${pick(r.seen)}（全日 ${r.seen.reduce((s, x) => s + x.raw, 0)}）`);
+    }
+  }
+  // 離群日檢查：沿用 09-29 報告點名 09-16／09-18 的兩種形狀，並加穩健 z（中位數／MAD）
+  L.push(`\n### 離群日檢查\n`);
+  L.push(`形狀 A（09-16 型）：13:00 cmkt 增額倍數 ≥1.5（量能提早集中）。形狀 B（09-18 型）：13:30 cmkt 倍數 ≥ 全樣本中位數 ×2。形狀 C：13:30 oddRaw 落後／轉弱比例 < 50%（09-18 為 6/19）。形狀 D（2026-10-15 新增，資料面）：13:30 cmkt 增額倍數 < 2（收盤集合競價量疑似未進 frame），或 stale 格數 <27 的日子 13:30 那格 stale。另對四個指標算穩健 z＝(x−中位數)/(1.4826×MAD)，|z|>3.5 標 ★。\n`);
+  const met = ok.map(r => { const s30 = r.seen.find(s => s.hm === "13:30"); const cs = r.seen.filter(s => s.close);
+    return { d: r.d, m1300: r.cmkt.mult["13:00"], m1330: r.cmkt.mult["13:30"], raw1330: s30.raw, dr1330: s30.raw ? s30.rawDown / s30.raw : NaN, s30, closeRaw: cs.reduce((s, x) => s + x.raw, 0), closeDown: cs.reduce((s, x) => s + x.rawDown, 0) }; });
+  const rz = k => { const xs = met.map(m => m[k]).filter(x => !isNaN(x)); const md = P(xs, 0.5); const mad = P(xs.map(x => Math.abs(x - md)), 0.5); return m => (isNaN(m[k]) || !mad ? NaN : (m[k] - md) / (1.4826 * mad)); };
+  const zf = { m1300: rz("m1300"), m1330: rz("m1330"), raw1330: rz("raw1330"), dr1330: rz("dr1330") };
+  const med1330 = P(met.map(m => m.m1330), 0.5);
+  L.push(`| 日期 | 13:00 cmkt 倍數（z） | 13:30 cmkt 倍數（z） | 13:30 oddRaw（z） | 13:30 落後／轉弱（比例 z） | 收盤窗三格 oddRaw 落後／轉弱 | 形狀 |`);
+  L.push(`|---|---|---|---|---|---|---|`);
+  const flagged = [];
+  for (const m of met) {
+    const f = (k, v, dg) => { const z = zf[k](m); return `${v}（${isNaN(z) ? "—" : z.toFixed(1)}${Math.abs(z) > 3.5 ? " ★" : ""}）`; };
+    const sh = []; if (m.m1300 >= 1.5) sh.push("A"); if (m.m1330 >= 2 * med1330) sh.push("B"); if (m.raw1330 && m.dr1330 < 0.5) sh.push("C");
+    const rr = ok.find(r => r.d === m.d); if (m.m1330 < 2 || (rr.stale.includes("13:30") && rr.stale.length < 27)) sh.push("D");
+    const star = Object.values(zf).some(fn => Math.abs(fn(m)) > 3.5);
+    if (sh.length || star) flagged.push(m.d);
+    L.push(`| ${m.d} | ${f("m1300", m.m1300.toFixed(2))} | ${f("m1330", m.m1330.toFixed(2))} | ${f("raw1330", m.raw1330)} | ${f("dr1330", `${m.s30.rawDown}/${m.raw1330}`)} | ${m.closeDown}/${m.closeRaw} | ${sh.join("") || "—"}${star ? " ★" : ""} |`);
+  }
+  L.push(`\n13:30 cmkt 倍數全樣本中位數 ${med1330.toFixed(2)}；被標出（任一形狀或 ★）的日子：${flagged.join(", ") || "無"}`);
+  const newFlag = flagged.filter(d => !SPECIAL.includes(d));
+  L.push(`\n### 敏感度（擴充）\n`);
+  for (const [lab, ex] of [[`剔除 ${SPECIAL.join("、")}`, SPECIAL], [`剔除全部被標出日（${flagged.join("、") || "無"}）`, flagged], [`只看 ${DEFAULT_DAYS.length} 天以外的新日子`, DEFAULT_DAYS]]) {
+    const sb = ok.filter(r => !ex.includes(r.d));
+    if (!sb.length) continue;
+    const part = ["13:10", "13:20", "13:30"].map(h => { const cs = sb.map(r => r.seen.find(s => s.hm === h)); const r0 = cs.reduce((s, x) => s + x.raw, 0), d0 = cs.reduce((s, x) => s + x.rawDown, 0), a0 = cs.reduce((s, x) => s + x.nrows, 0), ad = cs.reduce((s, x) => s + x.allDown, 0);
+      return `${h} oddRaw 平均 ${(r0 / sb.length).toFixed(2)}、落後／轉弱 ${d0}/${r0}（${r0 ? (100 * d0 / r0).toFixed(0) : "—"}%；基準率 ${(100 * ad / a0).toFixed(0)}%）`; });
+    const nz = sb.flatMap(r => r.seen.filter(s => !s.close && s.zable));
+    const mid0 = sb.flatMap(r => r.seen.filter(mid).map(s => s.raw));
+    const jmp = {}; for (const r of sb) { const mx = Math.max(...r.seen.filter(mid).map(s => s.raw)); const g = h => r.seen.find(s => s.hm === h).raw; const j = ["13:10", "13:20", "13:30"].find(h => g(h) > mx) || "無"; jmp[j] = (jmp[j] || 0) + 1; }
+    L.push(`- ${lab}（${sb.length} 天）：11:00–13:00 每格平均 ${mean(mid0).toFixed(2)}；${part.join("；")}；條數跳升點 ${Object.entries(jmp).map(([k, v]) => `${k}:${v}天`).join("，")}；非收盤窗 z 可算 extraRaw >${C.ODDMAX} 的格數 ${nz.filter(s => s.extraRaw > C.ODDMAX).length}/${nz.length}`);
+  }
+  L.push(`\n新被標出的日子（不在 ${SPECIAL.join("、")}）：${newFlag.join(", ") || "無"}`);
+  // 收盤窗 790 vs 810 的直接後果：13:10／13:20 若不停用，會多出多少條標示（odd 名額內／extraRaw）
+  const c1020 = ok.flatMap(r => r.seen.filter(s => s.hm === "13:10" || s.hm === "13:20"));
+  L.push(`\n### 790 vs 810 的直接後果（13:10／13:20 兩格）\n`);
+  L.push(`- 790（現行）：兩格 odd 一律 0；被停止標示的 oddRaw 合計 ${c1020.reduce((s, x) => s + x.raw, 0)} 條（${ok.length} 天，平均每天 ${(c1020.reduce((s, x) => s + x.raw, 0) / ok.length).toFixed(1)} 條），其中扣錨點／改善後真正會額外上畫布者 ${c1020.reduce((s, x) => s + Math.min(x.extraRaw, C.ODDMAX), 0)} 條；收盤窗標示每天出現於 13:10、13:20、13:30 三個錨點。`);
+  L.push(`- 810：上述 oddRaw 恢復標示；收盤窗標示只剩 13:30 一個錨點。兩格中 extraRaw >${C.ODDMAX}（會被上限擠掉）的格數 ${c1020.filter(s => s.extraRaw > C.ODDMAX).length}/${c1020.length}。`);
+}
 
 const txt = L.join("\n");
 console.log(txt);
