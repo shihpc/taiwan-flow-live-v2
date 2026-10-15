@@ -6,6 +6,7 @@
 //   --days all：data/intraday/ 下 ≥2026-09-14 且 ≤ --until（預設 2026-10-14）、非週末／非 HOLIDAYS、
 //     且帶 cg/cmkt 的全部檔（報告 docs/rrg-d7-rerun-20261015.md）。--days a,b,c：指定日期。
 //   帶 --days 時另印「擴充檢查」段（檔案篩選、base 違規與剔除版、離群日檢查）；不帶時一行都不多印。
+//   參數錯誤（缺值、非真實日期、只給 --until、列舉含週末／休市日／缺檔、空集合）一律報錯 exit 2，規則見下方「參數驗證」。
 //   需要完整 git 歷史（shallow clone 先 `git fetch --unshallow origin`），免 token、免網路。
 //
 // 口徑原則（不得違反）：
@@ -70,16 +71,34 @@ const hm2m = hm => +hm.slice(0, 2) * 60 + +hm.slice(3, 5);
 const m2hm = m => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
 
 // ── 2. 資料：歸檔檔、當日 base、當日定格檔（交叉驗證用） ────────────────────
-const HOLIDAYS = ["2026-09-25", "2026-09-28", "2026-10-09"];
+const HOLIDAYS = ["2026-09-25", "2026-09-28", "2026-10-09", "2026-10-26"];   // 平日休市日（行事曆 data/twse_holidays.json 所列；週末另判）
 // 預設重算範圍釘死為這 9 個交易日（不以 glob 取 ≥09-14）：在任何 commit 上重跑輸出皆相同，
 // 除非這 9 天的歸檔檔或 index.html 的被抽函式／常數有變。新日子走 --days（2026-10-15 起）。
 const DEFAULT_DAYS = ["2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18",
   "2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24"];
-const argOf = k => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : null; };
-const DAYS_ARG = argOf("--days"), UNTIL = argOf("--until") || "2026-10-14";
-const EXT = DAYS_ARG != null;          // 擴充模式：才印額外段落、才在 JSON 加新欄位
+// 參數驗證（錯誤一律印訊息後 exit 2，不靜默忽略）：
+//   * --days／--until 缺值（位於最後或後面緊接另一個 --旗標）→ 錯誤。
+//   * 日期須為真實日曆日（2026-02-30、2026-99-99 擋下）。
+//   * 只給 --until 不給 --days → 錯誤（--until 只對 --days all 有意義）。
+//   * --days 列舉：去重後排序；列到週末或 HOLIDAYS → **錯誤退出**（不剔除，避免誤以為有算到）；
+//     檔案不存在 → 錯誤退出。
+//   * 篩完為空集合 → 錯誤退出。
+const die = msg => { console.error(`錯誤：${msg}`); process.exit(2); };
+const argOf = k => {
+  const i = process.argv.indexOf(k);
+  if (i < 0) return null;
+  const v = process.argv[i + 1];
+  if (v == null || v.startsWith("--")) die(`${k} 缺值`);
+  return v;
+};
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-if (!DATE_RE.test(UNTIL)) throw new Error(`--until 須為 YYYY-MM-DD：${UNTIL}`);
+const isRealDate = d => { if (!DATE_RE.test(d)) return false; const t = new Date(d + "T00:00:00Z"); return !isNaN(t) && t.toISOString().slice(0, 10) === d; };
+const DAYS_ARG = argOf("--days"), UNTIL_ARG = argOf("--until"), UNTIL = UNTIL_ARG || "2026-10-14";
+const EXT = DAYS_ARG != null;          // 擴充模式：才印額外段落、才在 JSON 加新欄位
+if (UNTIL_ARG != null && !EXT) die("--until 只能與 --days all 一起用（未給 --days）");
+if (UNTIL_ARG != null && DAYS_ARG !== "all") die("--until 只對 --days all 有意義；列舉日期時請勿同時給 --until");
+if (!isRealDate(UNTIL)) die(`--until 須為真實日期 YYYY-MM-DD：${UNTIL}`);
+const isWeekend = d => { const w = new Date(d + "T00:00:00Z").getUTCDay(); return w === 0 || w === 6; };
 const extNotes = [];                   // 擴充模式的檔案篩選紀錄
 let days;
 if (!EXT) days = DEFAULT_DAYS;
@@ -88,16 +107,23 @@ else if (DAYS_ARG === "all") {
   const files = fs.readdirSync(path.join(ROOT, "data/intraday")).filter(f => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).map(f => f.slice(0, 10)).sort();
   for (const d of files) {
     if (d < "2026-09-14" || d > UNTIL) continue;
-    const dow = new Date(d + "T00:00:00Z").getUTCDay();
-    if (dow === 0 || dow === 6) { extNotes.push(`${d}：週末檔，排除`); continue; }
+    if (isWeekend(d)) { extNotes.push(`${d}：週末檔，排除`); continue; }
     if (HOLIDAYS.includes(d)) { extNotes.push(`${d}：休市日檔（HOLIDAYS），排除——假歸檔線索`); continue; }
     const a = JSON.parse(fs.readFileSync(path.join(ROOT, `data/intraday/${d}.json`), "utf8"));
     if (!a.cg || !a.cmkt) { extNotes.push(`${d}：無 cg/cmkt，排除`); continue; }
     days.push(d);
   }
+  if (!days.length) die(`--days all：2026-09-14～${UNTIL} 之間沒有可用的歸檔檔（篩選紀錄：${extNotes.join("；") || "無"}）`);
 } else {
-  days = DAYS_ARG.split(",").map(x => x.trim()).filter(Boolean);
-  for (const d of days) if (!DATE_RE.test(d)) throw new Error(`--days 日期格式錯：${d}`);
+  const list = [...new Set(DAYS_ARG.split(",").map(x => x.trim()).filter(Boolean))].sort();
+  if (!list.length) die("--days 為空");
+  for (const d of list) {
+    if (!isRealDate(d)) die(`--days 日期不是真實日曆日 YYYY-MM-DD：${d}`);
+    if (isWeekend(d)) die(`--days 含週末：${d}`);
+    if (HOLIDAYS.includes(d)) die(`--days 含休市日（HOLIDAYS）：${d}`);
+    if (!fs.existsSync(path.join(ROOT, `data/intraday/${d}.json`))) die(`--days 找不到歸檔檔 data/intraday/${d}.json`);
+  }
+  days = list;
 }
 
 function baseSeen(d) {
@@ -353,12 +379,14 @@ if (EXT) {
   }
   // 離群日檢查：沿用 09-29 報告點名 09-16／09-18 的兩種形狀，並加穩健 z（中位數／MAD）
   L.push(`\n### 離群日檢查\n`);
-  L.push(`形狀 A（09-16 型）：13:00 cmkt 增額倍數 ≥1.5（量能提早集中）。形狀 B（09-18 型）：13:30 cmkt 倍數 ≥ 全樣本中位數 ×2。形狀 C：13:30 oddRaw 落後／轉弱比例 < 50%（09-18 為 6/19）。形狀 D（2026-10-15 新增，資料面）：13:30 cmkt 增額倍數 < 2（收盤集合競價量疑似未進 frame），或 stale 格數 <27 的日子 13:30 那格 stale。另對四個指標算穩健 z＝(x−中位數)/(1.4826×MAD)，|z|>3.5 標 ★。\n`);
+  L.push(`形狀 A（09-16 型）：13:00 cmkt 增額倍數 ≥1.5（量能提早集中）。形狀 B（09-18 型）：13:30 cmkt 倍數 ≥ 全樣本中位數 ×2。形狀 C：13:30 oddRaw 落後／轉弱比例 < 50%（09-18 為 6/19）。形狀 D（2026-10-15 新增，資料面）：13:30 cmkt 增額倍數 < 2（收盤集合競價量疑似未進 frame），或 stale 格數 <27 的日子 13:30 那格 stale。另對四個指標試算穩健 z＝(x−中位數)/(1.4826×MAD)，|z|>3.5 標 ★；MAD＝0 的指標 z 算不出、顯示「—」（實際有 z 的指標見表下）。\n`);
   const met = ok.map(r => { const s30 = r.seen.find(s => s.hm === "13:30"); const cs = r.seen.filter(s => s.close);
     return { d: r.d, m1300: r.cmkt.mult["13:00"], m1330: r.cmkt.mult["13:30"], raw1330: s30.raw, dr1330: s30.raw ? s30.rawDown / s30.raw : NaN, s30, closeRaw: cs.reduce((s, x) => s + x.raw, 0), closeDown: cs.reduce((s, x) => s + x.rawDown, 0) }; });
   const rz = k => { const xs = met.map(m => m[k]).filter(x => !isNaN(x)); const md = P(xs, 0.5); const mad = P(xs.map(x => Math.abs(x - md)), 0.5); return m => (isNaN(m[k]) || !mad ? NaN : (m[k] - md) / (1.4826 * mad)); };
   const zf = { m1300: rz("m1300"), m1330: rz("m1330"), raw1330: rz("raw1330"), dr1330: rz("dr1330") };
   const med1330 = P(met.map(m => m.m1330), 0.5);
+  const ZLAB = { m1300: "13:00 cmkt 倍數", m1330: "13:30 cmkt 倍數", raw1330: "13:30 oddRaw", dr1330: "13:30 落後／轉弱比例" };
+  const zNone = Object.keys(zf).filter(k => met.every(m => isNaN(zf[k](m))));
   L.push(`| 日期 | 13:00 cmkt 倍數（z） | 13:30 cmkt 倍數（z） | 13:30 oddRaw（z） | 13:30 落後／轉弱（比例 z） | 收盤窗三格 oddRaw 落後／轉弱 | 形狀 |`);
   L.push(`|---|---|---|---|---|---|---|`);
   const flagged = [];
@@ -370,6 +398,7 @@ if (EXT) {
     if (sh.length || star) flagged.push(m.d);
     L.push(`| ${m.d} | ${f("m1300", m.m1300.toFixed(2))} | ${f("m1330", m.m1330.toFixed(2))} | ${f("raw1330", m.raw1330)} | ${f("dr1330", `${m.s30.rawDown}/${m.raw1330}`)} | ${m.closeDown}/${m.closeRaw} | ${sh.join("") || "—"}${star ? " ★" : ""} |`);
   }
+  L.push(`\n穩健 z 實際算得出的指標：${Object.keys(zf).filter(k => !zNone.includes(k)).map(k => ZLAB[k]).join("、")}（${Object.keys(zf).length - zNone.length} 個）；MAD＝0 算不出：${zNone.map(k => ZLAB[k]).join("、") || "無"}。`);
   L.push(`\n13:30 cmkt 倍數全樣本中位數 ${med1330.toFixed(2)}；被標出（任一形狀或 ★）的日子：${flagged.join(", ") || "無"}`);
   const newFlag = flagged.filter(d => !SPECIAL.includes(d));
   L.push(`\n### 敏感度（擴充）\n`);
