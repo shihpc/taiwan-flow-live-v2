@@ -148,13 +148,16 @@
     `series:<date>` 交易日、`scheduled` handler 的國定假日 `holidaySkip`）；本身再守台北 **22:00–23:55**（`PICK2_PUSH_AFTER_MIN`／`PICK2_PUSH_UNTIL_MIN`）。
     資料＝postmkt raw main `data/pick2/track.json`（`export const PICK2_TRACK_URL`，帶 `?d=` 破快取）；**契約正本在 postmkt**
     （`docs/pick2-score.md`「追蹤名單」節），本站只讀 `schema`（須為 1）／`date`／`tracking`（只數筆數）／`new_today[].{code,name,src,score}`，
-    頂層形狀不合＝無資料不推，單筆不合（代號白名單 `^\d{4}[0-9A-Z]{0,2}$`、`score` 有限數、`src` 為 auto/manual）丟棄。
-    **推播條件**：`date`＝台北今日且 `new_today` 有效筆數 >0；文字由純函式 `export function pick2TrackText` 組（標題「【選股二追蹤】<date> 新選入 N 檔」、
+    頂層形狀不合＝無資料不推，單筆不合（代號白名單 `^\d{4}[0-9A-Z]{0,2}$`、`score` 為有限數**或 `null`**、`src` 為 auto/manual）丟棄；
+    `score` 為 `null`（手動加入的池外股）保留、顯示「總分 —」。
+    **推播條件**：`track.date` 在台北今日往前 **4 個日曆日內**（含今日，`PICK2_CATCHUP_DAYS`、`export function pick2DateLag`；未來日期／格式不合不推）、
+    該 `track.date` 未推過、`new_today` 有效筆數 >0——**補推**（2026-10-19 驗收要求）：track.json 晚於 23:55 才落地時當晚漏推，隔晚照推，第一行寫 `track.date`；文字由純函式 `export function pick2TrackText` 組（標題「【選股二追蹤】<date> 新選入 N 檔」、
     每檔「代號 名稱 總分 x.x（自動/手動）」、「目前追蹤 M 檔」、「AI 研判，未經回測，非保證」；名稱去控制字元截 20 字、最多列 60 檔、總長 ≤4900）。
     **通道只走 LINE（`LINE_TOKEN`＋`LINE_USER_ID`）、不走 `sendAlert`**——後者會同時送 `ALERT_WEBHOOK` 並加「【排程】」前綴，那是告警通道；
     本則是產品通知，比照 `pushMorningCards`。通道未設＝不抓、不推、**不寫去重鍵**（已知限制 7 同一教訓）。
-    **去重鍵 `alerted:<YYYYMMDD>:pick2`**（`alertedKey`、`ALERTED_TTL` 2 天），**推送成功才寫**；抓取失敗／壞 JSON／LINE 非 2xx 都不寫（5 分後重試，
-    窗內至多 24 輪）；date 不符或 `new_today` 空也不寫（track 晚到仍有機會）。本步失敗**不告警**（避免每輪重試的噪音），結局看 `/evening` 回傳的 `pick2`
+    **去重鍵 `alerted:<track.date 的 YYYYMMDD>:pick2`**（以 **track.date** 為準、不是台北今日＝同一個 track.date 只推一次；TTL `PICK2_ALERTED_TTL`＝5 天，
+    刻意長於補推窗——用既有 `ALERTED_TTL` 2 天的話，上游停產數日時鍵會先過期而重推同一 track.date），**推送成功才寫**；抓取失敗／壞 JSON／LINE 非 2xx 都不寫
+    （5 分後重試，窗內至多 24 輪）；超出補推窗或 `new_today` 空也不寫。因鍵要看 track.date，每輪都會先抓一次 track.json（已推過也抓，窗內至多 24 次小請求）。本步失敗**不告警**（避免每輪重試的噪音），結局看 `/evening` 回傳的 `pick2`
     與 jobstat（只記 `pushed`）。測試 `node test/pick2track.mjs`；`test/holidays2.mjs` 的對跑（基準 `94c5773`）以 `LATER_ADDED` 濾掉本步新增的
     track.json fetch 與去重鍵 get，其餘仍逐項比對。
 - `health` 健檢班：台北 23:50（`eve`）、09:30（`morn`），只盤點產物落地與否、不 dispatch。

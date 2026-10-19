@@ -2,7 +2,7 @@
 // 執行：cd worker && node test/pick2track.mjs
 // 守的規格：track.json 介面契約（postmkt docs/pick2-score.md「追蹤名單」節）＋本 repo CLAUDE.md 晚場班說明。
 import { pushPick2Track, pick2TrackText, runEvening, alertedKey, PICK2_TRACK_URL,
-  PICK2_DISCLAIMER, PICK2_TEXT_MAX } from "../src/index.js";
+  PICK2_DISCLAIMER, PICK2_TEXT_MAX, PICK2_ALERTED_TTL, PICK2_CATCHUP_DAYS, pick2DateLag } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -14,7 +14,8 @@ function fakeKV(init = {}) {
     _m: m, ops: [],
     async get(k, type) { this.ops.push(`get ${k}`); const v = m.get(k);
       if (v === undefined) return null; return type === "json" ? (typeof v === "string" ? JSON.parse(v) : v) : v; },
-    async put(k, v) { this.ops.push(`put ${k}`); m.set(k, v); },
+    ttl: {},
+    async put(k, v, o) { this.ops.push(`put ${k}`); m.set(k, v); if (o) this.ttl[k] = o.expirationTtl; },
   };
 }
 const TODAY = "2026-10-19";
@@ -57,7 +58,7 @@ const mkFetch = (mode = {}, spy = []) => async (u, init) => {
     if (t === "throw") throw new Error("fetch failed");
     if (t === "404" || t === undefined) return { ok: false, status: 404, json: async () => { throw new Error("nf"); } };
     if (t === "bad") return { ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected token"); } };
-    return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(t)) };
+    return { ok: true, status: 200, json: async () => structuredClone(t) };   // 不走 JSON 往返：保留 NaN／Infinity 以測守門（真 JSON 裡它們本來就出不來）
   }
   spy.push({ url: s, kind: "other" });
   return { ok: false, status: 404, json: async () => null };
@@ -91,9 +92,12 @@ for (const [h, m, want] of [[21, 55, "waiting"], [21, 0, "waiting"], [23, 56, "s
     "目前追蹤 3 檔", PICK2_DISCLAIMER].join("\n");
   chk("文字內容逐字符合", text === want, JSON.stringify(text));
   chk("KV 寫 alerted:<ymd>:pick2＝pushed", kv._m.get(KEY) === "pushed" && KEY === "alerted:20261019:pick2", KEY);
+  chk("去重鍵 TTL＝PICK2_ALERTED_TTL（5 天，長於補推窗）", kv.ttl[KEY] === PICK2_ALERTED_TTL
+    && PICK2_ALERTED_TTL > PICK2_CATCHUP_DAYS * 86400, String(kv.ttl[KEY]));
   const spy2 = [];
   const again = await pushPick2Track(ENV(kv), TP(22, 5), mkFetch({ track: TRACK() }, spy2));
-  chk("同日第二次 → already-pushed、零網路", again.skipped === "already-pushed" && spy2.length === 0, JSON.stringify(again));
+  chk("同日第二次 → already-pushed、不推（只抓 track 一次）", again.skipped === "already-pushed"
+    && lines(spy2).length === 0 && spy2.filter((c) => c.kind === "track").length === 1, JSON.stringify(again));
 }
 
 // ---- ③ date 不符／new_today 空／契約形狀不合 → 不推、不寫 KV ----
@@ -103,8 +107,12 @@ const noPush = async (label, track, wantSkip) => {
   chk(`${label} → 不推`, lines(spy).length === 0 && (!wantSkip || out.skipped === wantSkip), JSON.stringify(out));
   chk(`${label} → 不寫去重鍵`, !kv._m.has(KEY));
 };
-await noPush("date 為昨日", TRACK({ date: "2026-10-16" }), "not-today");
-await noPush("date 缺", TRACK({ date: undefined }), "not-today");
+await noPush("date 為 5 天前", TRACK({ date: "2026-10-14" }), "stale-date");
+await noPush("date 為 4 天前（窗外邊界）", TRACK({ date: "2026-10-15" }), "stale-date");
+await noPush("date 在未來（明日）", TRACK({ date: "2026-10-20" }), "future-date");
+await noPush("date 缺", TRACK({ date: undefined }), "bad-date");
+await noPush("date 非法（2026-02-30）", TRACK({ date: "2026-02-30" }), "bad-date");
+await noPush("date 帶時間", TRACK({ date: "2026-10-19T00:00" }), "bad-date");
 await noPush("new_today 空陣列", TRACK({ new_today: [] }), "no-new-today");
 await noPush("new_today 非陣列", TRACK({ new_today: { code: "2330" } }));
 await noPush("tracking 缺", TRACK({ tracking: undefined }));
@@ -118,6 +126,48 @@ await noPush("new_today 全部單筆不合（代號／score／src）", TRACK({ n
   { code: "2330", name: "台積電", src: "auto", score: NaN },
   null,
 ] }), "no-new-today");
+
+// ---- ③b 補推：track.date 在 4 個日曆日內（含今日）、該 track.date 未推過 → 推，第一行寫 track.date ----
+chk("pick2DateLag 基本", pick2DateLag("2026-10-18", TODAY) === 1 && pick2DateLag(TODAY, TODAY) === 0
+  && pick2DateLag("2026-10-20", TODAY) === -1 && pick2DateLag("x", TODAY) === null);
+for (const [d, lag] of [["2026-10-18", 1], ["2026-10-16", 3]]) {
+  const spy = [], kv = fakeKV();
+  const out = await pushPick2Track(ENV(kv), TP(22, 0), mkFetch({ track: TRACK({ date: d }) }, spy));
+  const k = alertedKey(d, "pick2");
+  chk(`補推 ${d}（落後 ${lag} 天）→ sent、catchup`, out.sent === true && out.catchup === true && out.trackDate === d, JSON.stringify(out));
+  chk(`補推 ${d} → 第一行寫 track.date`, lines(spy)[0]?.body.messages[0].text.startsWith(`【選股二追蹤】${d} 新選入 2 檔`));
+  chk(`補推 ${d} → 去重鍵以 track.date 寫、不寫今日鍵`, kv._m.get(k) === "pushed" && !kv._m.has(KEY), [...kv._m.keys()].join(","));
+}
+{
+  // 同一個 track.date 只推一次：昨晚（10-18）23:30 才產出、10-18 晚漏推 → 10-19 22:00 補推 → 10-19 22:05 與 10-20 22:00 都不再推
+  const kv = fakeKV(), d = "2026-10-18", T = TRACK({ date: d });
+  const a = await pushPick2Track(ENV(kv), TP(22, 0), mkFetch({ track: T }));
+  const spyB = [], spyC = [];
+  const b = await pushPick2Track(ENV(kv), TP(22, 5), mkFetch({ track: T }, spyB));
+  const c = await pushPick2Track(ENV(kv), { date: "2026-10-20", hour: 22, minute: 0, dow: 2 }, mkFetch({ track: T }, spyC));
+  chk("同 track.date 只推一次（跨日亦然）", a.sent === true && b.skipped === "already-pushed" && c.skipped === "already-pushed"
+    && lines(spyB).length === 0 && lines(spyC).length === 0, JSON.stringify([a, b, c]));
+  // 新的一天 track.date 前進 → 新鍵、照推
+  const spyD = [];
+  const e = await pushPick2Track(ENV(kv), { date: "2026-10-20", hour: 22, minute: 0, dow: 2 },
+    mkFetch({ track: TRACK({ date: "2026-10-20" }) }, spyD));
+  chk("track.date 前進 → 新鍵照推", e.sent === true && lines(spyD).length === 1 && kv._m.get(alertedKey("2026-10-20", "pick2")) === "pushed");
+}
+
+// ---- ③c score 為 null（手動加入池外股）→ 保留、顯示「總分 —」；非 null 非有限數仍丟 ----
+{
+  const t = TRACK({ new_today: [
+    { code: "6789", name: "池外股", src: "manual", score: null },
+    { code: "2330", name: "台積電", src: "auto", score: Infinity },
+    { code: "2454", name: "聯發科", src: "auto", score: "88" },
+  ] });
+  const spy = [], kv = fakeKV();
+  const out = await pushPick2Track(ENV(kv), TP(22, 0), mkFetch({ track: t }, spy));
+  const text = lines(spy)[0]?.body.messages[0].text || "";
+  chk("null score → 保留並推", out.sent === true && out.n === 1, JSON.stringify(out));
+  chk("null score → 「總分 —（手動）」", text.split("\n")[1] === "6789 池外股 總分 —（手動）", JSON.stringify(text));
+  chk("Infinity／字串 score 仍丟", !text.includes("2330") && !text.includes("2454"));
+}
 
 // ---- ④ 抓取失敗：404／壞 JSON／fetch 拋錯 → 不拋、不推、不寫 KV ----
 for (const t of ["404", "bad", "throw"]) {
