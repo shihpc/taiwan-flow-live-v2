@@ -2026,7 +2026,91 @@ export async function runEvening(env, tp, fetchFn = fetch, opts = {}) {
     out.cards = { error: String((e && e.message) || e) };
     await alertJob(env, tp, "cards-err", `❌ 盤後圖卡：${out.cards.error}（KV 未記，下輪自動重試）`, fetchFn);
   }
+  // 選股二追蹤名單 LINE 純文字（2026-10-19，見 pushPick2Track）：排在全部既有步驟之後、獨立
+  // try/catch——讀不到／推不出去只影響本步，既有鏈的順序與行為不變。
+  try { out.pick2 = await pushPick2Track(env, tp, fetchFn, opts); }
+  catch (e) { out.pick2 = { name: "pick2", error: String((e && e.message) || e) }; }
   return out;
+}
+
+// ---- 選股二「追蹤名單」新選入通知（2026-10-19 使用者裁定）----
+// 契約正本＝postmkt 產出的 data/pick2/track.json（raw main，postmkt docs/pick2-score.md「追蹤名單」節）：
+//   {schema:1, date, tracking:[...], new_today:[{code,name,src:"auto"|"manual",score}], ...}
+// 本函式只讀 schema／date／tracking（只數筆數）／new_today 四個鍵，不假設契約外欄位；
+// 頂層形狀不合＝當作無資料不推；new_today 單筆不合（代號不合白名單、score 非有限數、src 非 auto/manual）＝丟棄該筆。
+// 推播條件：台北 22:00–23:55（runEvening 外層已守交易日＝series＋國定假日）、date＝台北今日、new_today 有效筆數 >0。
+// 通道：**只推 LINE（LINE_TOKEN＋LINE_USER_ID）、不走 sendAlert**——sendAlert 會同時送 ALERT_WEBHOOK
+// 且加「【排程】」前綴，那是告警通道；本則是產品通知，比照 pushMorningCards 只走 LINE 的慣例。
+// 通道未設 → 不抓、不推、不寫去重鍵。去重鍵 alerted:<YYYYMMDD>:pick2（ALERTED_TTL），**推送成功才寫**；
+// 抓取失敗／推送非 2xx 都不寫（5 分後下一輪重試）。date 不符或 new_today 空也不寫（當晚 track 晚到時仍有機會）。
+// 刻意不做 alertJob：本步失敗不告警，避免 23:55 前每輪重試的噪音；結局看 /evening 回傳值與 jobstat（pushed 才記）。
+export const PICK2_TRACK_URL = `${POSTMKT_BASE}/data/pick2/track.json`;
+export const PICK2_PUSH_AFTER_MIN = 22 * 60;          // 台北 22:00（含）
+export const PICK2_PUSH_UNTIL_MIN = 23 * 60 + 55;     // 台北 23:55（含，晚場班最後一輪）
+export const PICK2_TEXT_MAX = 4900;                   // LINE text 上限 5000，留餘裕
+export const PICK2_LIST_MAX = 60;                     // 單則最多列出的新選入檔數
+export const PICK2_NAME_MAX = 20;
+export const PICK2_DISCLAIMER = "AI 研判，未經回測，非保證";
+const PICK2_CODE_RE = /^[0-9]{4}[0-9A-Z]{0,2}$/;
+// 外來字串只當純文字：去控制字元／換行、截斷長度
+const pk2Plain = (v, max) => String(v).replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, " ").trim().slice(0, max);
+export function pick2TrackText(track, dateISO) {
+  if (!track || typeof track !== "object" || Array.isArray(track)) return null;
+  if (track.schema !== 1 || track.date !== dateISO) return null;
+  if (!Array.isArray(track.new_today) || !Array.isArray(track.tracking)) return null;
+  const items = [];
+  for (const it of track.new_today) {
+    if (!it || typeof it !== "object") continue;
+    if (typeof it.code !== "string" || !PICK2_CODE_RE.test(it.code)) continue;
+    if (typeof it.score !== "number" || !Number.isFinite(it.score)) continue;
+    if (it.src !== "auto" && it.src !== "manual") continue;
+    const name = typeof it.name === "string" ? pk2Plain(it.name, PICK2_NAME_MAX) : "";
+    items.push({ code: it.code, name, src: it.src, score: it.score });
+  }
+  if (!items.length) return null;
+  const L = [`【選股二追蹤】${dateISO} 新選入 ${items.length} 檔`];
+  for (const it of items.slice(0, PICK2_LIST_MAX))
+    L.push(`${it.code}${it.name ? " " + it.name : ""} 總分 ${it.score.toFixed(1)}（${it.src === "auto" ? "自動" : "手動"}）`);
+  if (items.length > PICK2_LIST_MAX) L.push(`…另 ${items.length - PICK2_LIST_MAX} 檔`);
+  L.push(`目前追蹤 ${track.tracking.length} 檔`);
+  L.push(PICK2_DISCLAIMER);
+  let text = L.join("\n");
+  if (text.length > PICK2_TEXT_MAX) {   // 理論上 60 檔 × ~40 字不會到；保險絲：保留尾端兩行
+    const tail = `\n…（以下略）\n目前追蹤 ${track.tracking.length} 檔\n${PICK2_DISCLAIMER}`;
+    text = text.slice(0, PICK2_TEXT_MAX - tail.length) + tail;
+  }
+  return { text, n: items.length, tracking: track.tracking.length };
+}
+export async function pushPick2Track(env, tp, fetchFn = fetch, opts = {}) {
+  const nowMin = tp.hour * 60 + tp.minute;
+  if (nowMin < PICK2_PUSH_AFTER_MIN) return { name: "pick2", waiting: "before-22:00" };
+  if (nowMin > PICK2_PUSH_UNTIL_MIN) return { name: "pick2", skipped: "after-23:55" };
+  if (!env.LINE_TOKEN || !env.LINE_USER_ID) return { name: "pick2", skipped: "no-channel" };
+  const key = alertedKey(tp.date, "pick2");
+  if (env.FLOW_KV && await env.FLOW_KV.get(key)) return { name: "pick2", skipped: "already-pushed" };
+  let track = null;
+  try {
+    const r = await fetchFn(`${PICK2_TRACK_URL}?d=${opts.nowMs || Date.now()}`);
+    if (!r.ok) return { name: "pick2", skipped: "fetch-failed", status: r.status };
+    track = await r.json();
+  } catch (e) {
+    return { name: "pick2", skipped: "fetch-failed", error: String((e && e.message) || e) };
+  }
+  const msg = pick2TrackText(track, tp.date);
+  if (!msg) {
+    const d = track && typeof track === "object" ? track.date : undefined;
+    return { name: "pick2", skipped: d === tp.date ? "no-new-today" : "not-today",
+      trackDate: typeof d === "string" ? d.slice(0, 10) : null };
+  }
+  if (opts.dry) return { name: "pick2", wouldPush: msg.n, tracking: msg.tracking };
+  const { url, init } = lineRequest(env.LINE_TOKEN, env.LINE_USER_ID, msg.text);
+  let r;
+  try { r = await fetchFn(url, init); }
+  catch (e) { return { name: "pick2", error: `LINE ${String((e && e.message) || e)}` }; }
+  if (!r || !r.ok) return { name: "pick2", error: `LINE HTTP ${r && r.status}` };
+  if (env.FLOW_KV) await env.FLOW_KV.put(key, "pushed", { expirationTtl: ALERTED_TTL });
+  await recordJob(env, tp, "pick2", "pushed", `n=${msg.n} tracking=${msg.tracking}`);
+  return { name: "pick2", sent: true, n: msg.n, tracking: msg.tracking };
 }
 
 // ---- 晨場協調班（2026-08-10 AM slot）：晨間 LINE 圖卡渲染 dispatch ＋推播 ----

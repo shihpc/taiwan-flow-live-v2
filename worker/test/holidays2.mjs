@@ -208,10 +208,15 @@ for (const d of ["2026-09-25", "2026-09-28"]) {
 }
 
 // ---- B. 對跑：09-29 平日（行事曆正常）／09-25 行事曆 404／壞檔／拋錯（fail-open）＝改動前逐項相同 ----
+// 對跑基準 94c5773 之後**刻意新增**的步驟（不屬休市日守門的行為變化），比對前自新版結果濾掉：
+// - 2026-10-19 選股二追蹤推播 pushPick2Track（runEvening 末步：抓 postmkt data/pick2/track.json＋讀 alerted:<ymd>:pick2）
+const LATER_ADDED = /\/data\/pick2\/track\.json|alerted:\d{8}:pick2$/;
+const dropLater = (r) => ({ ...r, fetches: r.fetches.filter((u) => !LATER_ADDED.test(u)),
+  kv: r.kv.filter((k) => !LATER_ADDED.test(k)) });
 const cases = [["2026-09-29", "ok"], ["2026-09-25", "404"], ["2026-09-25", "bad"], ["2026-09-25", "throw"], ["2026-09-28", "throw"]];
 for (const [d, cal] of cases) {
   for (const R of ROLES) {
-    const r = await run(worker, { cron: R.cron, at: `${d}T${R.hm}`, cal, seed: seedFor(d), products: PRODUCTS });
+    const r = dropLater(await run(worker, { cron: R.cron, at: `${d}T${R.hm}`, cal, seed: seedFor(d), products: PRODUCTS }));
     const tag = `${d} cal=${cal} ${R.id}`;
     if (OLD) {
       const o = await run(OLD, { cron: R.cron, at: `${d}T${R.hm}`, cal, seed: seedFor(d), products: PRODUCTS });

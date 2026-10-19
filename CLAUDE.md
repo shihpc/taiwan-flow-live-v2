@@ -61,7 +61,7 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **29 支** `.mjs`；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **30 支** `.mjs`（2026-10-19 加 `pick2track.mjs`）；
   2026-09-30 `ls worker/test/*.mjs` 實查（含 09-28 的 `holidays.mjs`、09-29 的 `holidays2.mjs` 與 09-30 的 `holidays_timer.mjs`），取代舊記的 28 支）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
   （**15 支**＝帶 cron 11 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
@@ -143,6 +143,20 @@
     早晨班只縮短「23:30 仍 waiting」那種日子的續算延遲，預期資料日口徑不變。早晨班**不查國定假日**（與 pm 同：該 repo 自判休市、
     無 pending 即 no-op）。`claude-harness/docs/schedule-map.md` 另案（PR-D）同步。
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
+  - **選股二追蹤名單 LINE 通知（2026-10-19 使用者裁定，`export async function pushPick2Track`）**：`runEvening` 的**最後一步**
+    （排在 `pushDailyCards` 之後、獨立 try/catch，既有步驟順序與行為不變），所以沿用 `runEvening` 的守門（`GH_DISPATCH_TOKEN`、
+    `series:<date>` 交易日、`scheduled` handler 的國定假日 `holidaySkip`）；本身再守台北 **22:00–23:55**（`PICK2_PUSH_AFTER_MIN`／`PICK2_PUSH_UNTIL_MIN`）。
+    資料＝postmkt raw main `data/pick2/track.json`（`export const PICK2_TRACK_URL`，帶 `?d=` 破快取）；**契約正本在 postmkt**
+    （`docs/pick2-score.md`「追蹤名單」節），本站只讀 `schema`（須為 1）／`date`／`tracking`（只數筆數）／`new_today[].{code,name,src,score}`，
+    頂層形狀不合＝無資料不推，單筆不合（代號白名單 `^\d{4}[0-9A-Z]{0,2}$`、`score` 有限數、`src` 為 auto/manual）丟棄。
+    **推播條件**：`date`＝台北今日且 `new_today` 有效筆數 >0；文字由純函式 `export function pick2TrackText` 組（標題「【選股二追蹤】<date> 新選入 N 檔」、
+    每檔「代號 名稱 總分 x.x（自動/手動）」、「目前追蹤 M 檔」、「AI 研判，未經回測，非保證」；名稱去控制字元截 20 字、最多列 60 檔、總長 ≤4900）。
+    **通道只走 LINE（`LINE_TOKEN`＋`LINE_USER_ID`）、不走 `sendAlert`**——後者會同時送 `ALERT_WEBHOOK` 並加「【排程】」前綴，那是告警通道；
+    本則是產品通知，比照 `pushMorningCards`。通道未設＝不抓、不推、**不寫去重鍵**（已知限制 7 同一教訓）。
+    **去重鍵 `alerted:<YYYYMMDD>:pick2`**（`alertedKey`、`ALERTED_TTL` 2 天），**推送成功才寫**；抓取失敗／壞 JSON／LINE 非 2xx 都不寫（5 分後重試，
+    窗內至多 24 輪）；date 不符或 `new_today` 空也不寫（track 晚到仍有機會）。本步失敗**不告警**（避免每輪重試的噪音），結局看 `/evening` 回傳的 `pick2`
+    與 jobstat（只記 `pushed`）。測試 `node test/pick2track.mjs`；`test/holidays2.mjs` 的對跑（基準 `94c5773`）以 `LATER_ADDED` 濾掉本步新增的
+    track.json fetch 與去重鍵 get，其餘仍逐項比對。
 - `health` 健檢班：台北 23:50（`eve`）、09:30（`morn`），只盤點產物落地與否、不 dispatch。
   低頻班 `lastweek`／`meta` 於 2026-08-30 納入 `eve`（`mode:"lowfreq"`，判準 `export function lowFreqDue`）：
   **只在台北週一檢查**（meta 另要求已過本月第一個週六＋2 天），非檢查日整項濾掉不抓也不告警；
