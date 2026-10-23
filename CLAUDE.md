@@ -891,6 +891,53 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 驗證（2026-09-06，Playwright `page.clock`＋`/live` route 七情境：收盤後凍結檔／盤中／週日有無 `flow_last`／平日盤前殘留／延遲／500）
 全數符合預期、pageerror 零。**若日後 `/livediag` 觀測到殘留時戳 ≥09:00 的形狀，要回來改 `liveDataDate` 的分水嶺。**
 
+## 管理端點認證（2026-10-23，B3+B4 ①）
+
+**只關門**：Worker fetch handler 有幾支無認證卻會產生副作用的路徑，現在一律要管理金鑰；「免密碼更新 endpoint」
+（讓同事不帶金鑰也能觸發）**本批不做**（使用者選方案 ①）。實作在 `worker/src/index.js` grep
+`// ---- 管理端點認證`（`export function adminCheck`／`export function adminKeyEqual`／`export const ADMIN_HEADER`），
+測試 `node test/adminkey.mjs`。
+
+**路由盤點（2026-10-23 逐支讀碼）**：
+
+| 路由 | 副作用 | 本批 |
+|------|--------|------|
+| `/alerts/test` | 每打一次真送 LINE／webhook（無去重；LINE 免費月額度被洗光後真告警就發不出去）；另讀 KV `line:uid` 回顯 | **一律要 key** |
+| `/snap`（含 `?force=1`） | 打 FinMind 快照、寫 KV `f:`／`fi:`／`series:`（force=1 連收盤後都寫，會污染當日序列） | **一律要 key**（無 dry 模式） |
+| `/backup?name=…&dry=0` | `workflow_dispatch`＋寫 `bkfired:`／`jobstat:` | `dry=0` 要 key；`dry` 省略或 `=1` 不變 |
+| `/sumcheck?slot=am\|pm&dry=0` | dispatch `summary.yml`＋寫 `sumfired:`／`jobstat:` | 同上 |
+| `/evening?dry=0` | 晚場鏈 dispatch（pm summary／diag／mktbal／aetf2／圖卡渲染）、**推 LINE 圖卡** | 同上 |
+| `/health?slot=…&dry=0` | 缺件告警（`alertJob` → LINE／webhook）＋寫 `alerted:`／`jobstat:` | 同上 |
+| `/usersync?k=&set=` | 寫 KV 自選清單（以同步碼雜湊為鍵） | **不改**：taiwan-stock-news 前端的美股自選跨裝置同步直接用它（本站 `index.html` grep 零命中），加 key 功能就廢了；影響範圍限於知道同步碼的人 |
+| `/line/webhook` | 寫 KV `line:uid`（只用於 `/alerts/test` 回顯，**不**用於發送——發送用 secret `LINE_USER_ID`） | **不改**：LINE 平台送不出自訂標頭；正解是驗 `x-line-signature`（需 channel secret），另案 |
+| `/fundamentals`／`/chips`／`/technical` | 打 FinMind，結果寫 KV 快取（每 id×日一把，TTL 2 天） | 不改：公開唯讀功能，快取寫入是實作細節（殘餘風險：可被用來消耗 FinMind 額度，每次最多 30 檔） |
+| `/live`／`/livediag`／`/status`／`/cards/data`／`/replay`／`/jobs`／`/alerts/log`／`/uswatch`／`/` | 唯讀（`/live`／`/status`／`/cards/data` 只寫 cf 快取） | 不變 |
+
+**規則**：①請求標頭 `x-admin-key` 必須與 secret `env.ADMIN_KEY` 相等（固定時間逐 byte 比較，長度不同直接拒絕）；
+②**不從 query string 讀 key**（會進日誌、瀏覽器歷史、Referer）——放 query 等同沒帶；③`ADMIN_KEY` **未設定或為空字串
+時一律拒絕（fail-closed）**，reason 寫「未設定 ADMIN_KEY」；④拒絕回 **403** `{ok:false, reason}`（`no-store`），
+**不執行任何副作用**（測試斷言零對外請求、零 KV 操作）；⑤回應與 log 一律不含收到的 key；⑥參數不合法（例如
+`/backup?name=nope&dry=0`）照舊先回參數錯誤——那條路本來就沒有副作用。
+**CORS 刻意不動**：OPTIONS 回的標頭只有 `Access-Control-Allow-Origin: *`／`Allow-Methods: GET, OPTIONS`、**沒有
+`Allow-Headers`**，所以帶 `x-admin-key` 的跨站瀏覽器請求預檢必然失敗、送不出去；不帶標頭的跨站簡單 GET（例如惡意頁的
+`<img src=…/alerts/test>`）只拿到 403。我們不需要瀏覽器跨站呼叫管理端點，最小改動就是不加 Allow-Headers。
+副作用：**瀏覽器網址列直接開 `/alerts/test` 不再有效**（網址列帶不了標頭），改用下列指令。
+
+**使用者要做的事**（一次）：`cd worker && npx wrangler secret put ADMIN_KEY`，貼一串夠長的隨機字串（例如密碼管理器產生
+的 32 字元以上）。**在設定之前，上表「要 key」的請求全部回 403**——排程（cron）不經 fetch handler，完全不受影響。
+
+```powershell
+$k = Read-Host -AsSecureString "ADMIN_KEY" | ForEach-Object { [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($_)) }
+Invoke-RestMethod -Uri "https://taiwan-flow-v2.shihpc.workers.dev/alerts/test" -Headers @{'x-admin-key'=$k}
+Invoke-RestMethod -Uri "https://taiwan-flow-v2.shihpc.workers.dev/backup?name=daysummary&dry=0" -Headers @{'x-admin-key'=$k}
+```
+```bash
+read -rs K   # 貼上 ADMIN_KEY，不回顯
+curl -sS -H "x-admin-key: $K" "https://taiwan-flow-v2.shihpc.workers.dev/alerts/test"
+curl -sS -H "x-admin-key: $K" "https://taiwan-flow-v2.shihpc.workers.dev/evening?dry=0"
+```
+（key 只放在變數裡、不要寫進腳本檔或貼進對話；`dry` 省略或 `=1` 的檢查用法照舊不需 key。）
+
 ## 驗證方式
 
 ```bash
@@ -911,7 +958,7 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 
 密鑰全走 `wrangler secret put`、不寫檔：`FINMIND_TOKEN`、`GH_DISPATCH_TOKEN`
 （fine-grained PAT，對 **taiwan-flows／postmkt／taiwan-stock-news ＋本 repo taiwan-flow-live-v2
-四個 repo** Actions 讀寫）、`ALERT_WEBHOOK`、`LINE_TOKEN`、`LINE_USER_ID`。
+四個 repo** Actions 讀寫）、`ALERT_WEBHOOK`、`LINE_TOKEN`、`LINE_USER_ID`、`ADMIN_KEY`（2026-10-23，管理端點認證，見同名節）。
 
 > **2026-08-09 更正**：本段原寫「對 taiwan-flows／postmkt／taiwan-stock-news **三** repo」，
 > 漏了本 repo。**依據是程式碼與 2026-07-22 線上實測記載的「推論」，不是直接驗證**

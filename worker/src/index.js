@@ -4463,6 +4463,48 @@ const json = (obj, extra) => new Response(JSON.stringify(obj), {
   headers: { "Content-Type": "application/json; charset=utf-8", ...CORS, ...(extra || {}) },
 });
 
+// ---- 管理端點認證（2026-10-23，B3+B4 ①「只關門」）----
+// 問題：fetch handler 有幾支**無認證**卻會產生副作用的路徑——`/alerts/test` 每打一次真送 LINE／webhook（無去重，
+// LINE 免費月額度被洗光後真告警就發不出去）、`/snap` 會打 FinMind 並寫 KV frame（force=1 連收盤後都寫）、
+// `/backup`／`/sumcheck`／`/evening` 帶 `dry=0` 會真的 workflow_dispatch、`/health` 帶 `dry=0` 會真的告警。
+// 修法：這些「會產生副作用」的請求必須帶請求標頭 `x-admin-key`，且與 secret `env.ADMIN_KEY` 相等才執行；
+// 否則回 403 `{ok:false, reason}`、**不執行任何副作用**。唯讀路徑（各端點 dry 預設 1、/status、/live…）完全不變。
+//   · **fail-closed**：`env.ADMIN_KEY` 未設定（或為空字串）時一律拒絕，reason 寫明「未設定 ADMIN_KEY」。
+//   · **只讀標頭、不讀 query string**：query 會進 Cloudflare 日誌、瀏覽器歷史與 Referer。
+//   · **不回顯**：回應與 log 一律不含收到的 key（log 只記路徑與拒絕原因）。
+//   · 比較用固定時間（逐 byte XOR 累加）；長度不同直接拒絕（只洩漏「長度不同」，可接受）。
+//   · CORS 刻意**不動**：OPTIONS 回的 `CORS` 只有 Allow-Origin/Allow-Methods、**沒有 Allow-Headers**，
+//     帶 `x-admin-key` 的跨站瀏覽器請求預檢必然失敗＝瀏覽器根本送不出去；curl／PowerShell 不受 CORS 管。
+//     不帶標頭的跨站簡單 GET（例如惡意頁的 <img>）只會拿到 403、不觸發副作用——這正是要關的門。
+// 刻意**不**納入（盤點見 CLAUDE.md「管理端點認證」節）：`/usersync?set=`（前端跨裝置同步、以同步碼為鍵，
+// 加 key 會讓功能失效）、`/line/webhook`（LINE 平台發不出自訂標頭；正解是驗 x-line-signature，另案）。
+export const ADMIN_HEADER = "x-admin-key";
+export function adminKeyEqual(got, want) {
+  if (typeof got !== "string" || typeof want !== "string") return false;
+  const enc = new TextEncoder();
+  const a = enc.encode(got), b = enc.encode(want);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+// 純函式：回 null＝放行；回 { reason }＝拒絕（呼叫端回 403）
+export function adminCheck(request, env) {
+  const want = env && env.ADMIN_KEY;
+  if (typeof want !== "string" || !want) return { reason: "未設定 ADMIN_KEY（npx wrangler secret put ADMIN_KEY），管理端點一律拒絕" };
+  const got = request.headers.get(ADMIN_HEADER);
+  if (!got) return { reason: `缺少 ${ADMIN_HEADER} 請求標頭` };
+  if (!adminKeyEqual(got, want)) return { reason: `${ADMIN_HEADER} 不符` };
+  return null;
+}
+function adminForbidden(pathname, reason) {
+  console.log(`admin 拒絕: ${pathname} — ${reason}`);   // 只記路徑與原因，絕不記收到的 key
+  return new Response(JSON.stringify({ ok: false, reason }), {
+    status: 403,
+    headers: { "Content-Type": "application/json; charset=utf-8", ...CORS, "Cache-Control": "no-store" },
+  });
+}
+
 // ---- /live SWR（stale-while-revalidate）＋ in-flight 去重＋量測（2026-09-06）----
 // 問題（CLAUDE.md「已知限制／坑」第 6 條、優化計畫批次二 #9）：舊版 `rebuild` 每次被呼叫都各自跑一次
 // buildLive，stale 區（FRESH_MS ≤ age < LIVE_STALE_MS）的並發請求各自觸發一次重建、互不合併；且前端
@@ -4657,6 +4699,9 @@ export default {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
     if (url.pathname === "/snap") {  // 手動觸發存 frame（測試/補格用；force=1 略過收盤後守門）
+      // 一律需管理金鑰：storeFrame 會打 FinMind 並寫 KV frame（無 dry 模式）
+      const deny = adminCheck(request, env);
+      if (deny) return adminForbidden(url.pathname, deny.reason);
       try {
         return json(await storeFrame(env, undefined, { force: url.searchParams.get("force") === "1" }));
       } catch (e) {
@@ -4743,6 +4788,9 @@ export default {
       }
     }
     if (url.pathname === "/alerts/test") {  // 第九期：手動驗證外送通道（未設 secret 回明確 JSON，不觸外部請求）
+      // 一律需管理金鑰：每打一次真送 LINE／webhook、無去重（2026-10-23）
+      const deny = adminCheck(request, env);
+      if (deny) return adminForbidden(url.pathname, deny.reason);
       try {
         const r = await sendAlert(env, `[台股提醒 測試] 通道驗證訊息（${taipeiParts().date}），收到代表提醒通道設定成功`);
         // KV 有 line:uid（使用者傳過訊息給 bot）就附帶顯示，供設定 LINE_USER_ID 時抄用
@@ -4766,6 +4814,7 @@ export default {
       const pipe = backupPipelines(env).find((p) => p.name === name);
       if (!pipe) return json({ error: "name 需為 " + backupPipelines(env).map((p) => p.name).join("/") }, { "Cache-Control": "no-store" });
       const dry = url.searchParams.get("dry") !== "0";
+      if (!dry) { const deny = adminCheck(request, env); if (deny) return adminForbidden(url.pathname, deny.reason); }
       try {
         const out = await runBackup(env, taipeiParts(), pipe, fetch, { dry });
         return json({ dry, ...out }, { "Cache-Control": "no-store" });
@@ -4777,6 +4826,7 @@ export default {
       const slot = url.searchParams.get("slot");
       if (slot !== "am" && slot !== "pm") return json({ error: "slot 需為 am/pm" }, { "Cache-Control": "no-store" });
       const dry = url.searchParams.get("dry") !== "0";
+      if (!dry) { const deny = adminCheck(request, env); if (deny) return adminForbidden(url.pathname, deny.reason); }
       try {
         const out = await runSummaryDispatch(env, taipeiParts(), slot, fetch, { dry });
         return json({ dry, ...out }, { "Cache-Control": "no-store" });
@@ -4786,6 +4836,7 @@ export default {
     }
     if (url.pathname === "/evening") {  // 晚場協調班手動檢查（dry 預設 1；dry=0 真發，各步各自冪等）
       const dry = url.searchParams.get("dry") !== "0";
+      if (!dry) { const deny = adminCheck(request, env); if (deny) return adminForbidden(url.pathname, deny.reason); }
       try {
         const out = await runEvening(env, taipeiParts(), fetch, { dry });
         return json({ dry, ...out }, { "Cache-Control": "no-store" });
@@ -4797,6 +4848,8 @@ export default {
       const slot = url.searchParams.get("slot") || "eve";
       if (slot !== "eve" && slot !== "morn") return json({ error: "slot 需為 eve/morn" }, { "Cache-Control": "no-store" });
       const dry = url.searchParams.get("dry") !== "0";
+      // dry=0 會真的告警（alertJob → LINE／webhook）＋寫 jobstat：需管理金鑰（2026-10-23）
+      if (!dry) { const deny = adminCheck(request, env); if (deny) return adminForbidden(url.pathname, deny.reason); }
       // ?date= 可回頭盤點某一天（除錯用；健檢不 dispatch 任何東西，最壞只是多抓幾份產物）
       const d = url.searchParams.get("date");
       const tp = d ? { ...taipeiParts(), date: d } : taipeiParts();

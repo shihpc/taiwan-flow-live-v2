@@ -105,3 +105,6 @@ LIVE_TTL = "15"   # /live 聚合結果快取秒數
 #     **2026-09-14 起再加 taiwan-stock-iching**（股市易經每日班 dispatchIching → daily.yml）：PAT 的 repository access
 #     要在 GitHub 端加上該 repo（Actions: Read and write），不需重新 secret put；未加時 dispatch 回 404/403 → alertJob。
 #     哨兵／新聞／各主觸發班用來 workflow_dispatch；未設時整段跳過、其餘功能不受影響
+#   npx wrangler secret put ADMIN_KEY          # 管理端點認證（2026-10-23）：/snap、/alerts/test、/backup|/sumcheck|/evening|/health 的 dry=0
+#     須帶請求標頭 x-admin-key 等於此值才執行；**未設定時這些副作用一律 403（fail-closed）**，唯讀路徑不受影響。
+#     見 CLAUDE.md「管理端點認證」節。值只存 secret，不寫進任何檔案。

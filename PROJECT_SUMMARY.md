@@ -1592,6 +1592,8 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
     （KV `line:uid` 變化才寫；**該端點不驗 x-line-signature**——簽章需 channel secret、
     為降低設定步驟省略，僅用於一次性取 userId，取得後可關閉 LINE 平台 webhook）。
     單通道失敗不擋另一通道（/alerts/test 回應 errors 可見）。
+  - **⚠ 2026-10-23 起 `/alerts/test` 需管理金鑰**：下列步驟中「開 `/alerts/test`」一律改成帶請求標頭
+    `x-admin-key`（值＝secret `ADMIN_KEY`）呼叫，瀏覽器網址列直接開會回 403；指令範例見 CLAUDE.md「管理端點認證」節。
   - **使用者要做的動作（外送最後一哩，擇一即可；使用者 2026-07-18 裁定只用 LINE＋Telegram，
     Discord 格式僅為 webhook 預設 fallback 不使用）**：
     - Telegram（最快）：①手機找 @BotFather 建 bot 取 token ②傳一句話給新 bot，開
