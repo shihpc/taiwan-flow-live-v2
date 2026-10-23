@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import worker, {
-  HOLIDAYS_URL, FRAME_CRON, TICK_CRON, ICHING_CRON, resetHolidayMemo, holidayCalCached, holidayToday,
+  HOLIDAYS_URL, FRAME_CRON, ICHING_CRON, resetHolidayMemo, holidayCalCached, holidayToday,
   HOLIDAY_MEMO_OK_MS, HOLIDAY_MEMO_FAIL_MS, runHealthCheck, HEALTH_NON_TW, HOLIDAY_HARD_TIMEOUT_MS,
 } from "../src/index.js";
 
@@ -113,7 +113,7 @@ const ROLES = [
   { id: "frame",            cron: FRAME_CRON,              hm: "10:00", tw: true },
   { id: "frame+flowLast",   cron: FRAME_CRON,              hm: "13:30", tw: true },
   { id: "sentinel",         cron: "*/5 9-14 * * 2-6",      hm: "18:00", tw: true },
-  { id: "ticksample",       cron: TICK_CRON,               hm: "10:05", tw: true },
+  // （原 ticksample 角色已隨台指期 tick 量測班於 2026-10-23 拆除；cron 與 run 函式都已不存在，角色表由 22 列減為 21 列）
   { id: "backup-daysummary",cron: "35 5 * * 2-6",          hm: "13:35", tw: true },
   { id: "backup-intraday",  cron: "40 6 * * 2-6",          hm: "14:40", tw: true },
   { id: "backup-aetf",      cron: "35 10 * * 2-6",         hm: "18:35", tw: true },
@@ -396,9 +396,10 @@ for (const R of ROLES.filter((x) => x.cron.trim().split(/\s+/)[4] === "*")) {
   chk("fail-open 404：哨兵照探測 FinMind 四訊號", s.fetches.filter(isFin).length === 4, s.fetches.join(","));
   const f = await run(worker, { cron: FRAME_CRON, at: `${d}T10:00`, cal: "404", seed: seedFor(d) });
   chk("fail-open 404：frame 照寫 f／fi／series", ["f:2026-09-25:10:00", "fi:2026-09-25", "series:2026-09-25"].every((k) => f.kv.includes(`put ${k}`)), f.kv.join(","));
-  const t = await run(worker, { cron: TICK_CRON, at: `${d}T10:05`, cal: "throw" });
-  chk("fail-open 拋錯：tick 照抓 FinMind", t.fetches.some(isFin), t.fetches.join(","));
-  chk("fail-open 拋錯：tick 照寫樣本", t.kv.some((o) => o.startsWith("put tick:")), t.kv.join(","));
+  // 「行事曆拋錯」那一型原本由 tick 量測班代表（2026-10-23 隨該班拆除）；改由 frame 守住同一型，斷言強度不變
+  const ft = await run(worker, { cron: FRAME_CRON, at: `${d}T10:05`, cal: "throw", seed: seedFor(d) });
+  chk("fail-open 拋錯：frame 照抓 FinMind 快照", ft.fetches.some(isFin), ft.fetches.join(","));
+  chk("fail-open 拋錯：frame 照寫 f:", ft.kv.includes("put f:2026-09-25:10:05"), ft.kv.join(","));
   const he = await run(worker, { cron: "50 15 * * 2-6", at: `${d}T23:50`, cal: "bad", seed: seedFor(d) });
   const heP = he.fetches.filter((u) => u.includes("raw.githubusercontent.com"));
   chk("fail-open 壞檔：eve 健檢照舊檢查台股項（flows／postmkt／baseline）",

@@ -61,8 +61,8 @@
 ## 佈局
 
 - `src/` Python 夜間 builder（morning/aetf/baseline/daysummary/us/intraday…）；
-  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **30 支** `.mjs`（2026-10-19 加 `pick2track.mjs`）；
-  2026-09-30 `ls worker/test/*.mjs` 實查（含 09-28 的 `holidays.mjs`、09-29 的 `holidays2.mjs` 與 09-30 的 `holidays_timer.mjs`），取代舊記的 28 支）；
+  `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **31 支** `.mjs`（2026-10-23 `ls worker/test/*.mjs | wc -l` 實查：拆 tick 量測班刪 `tickdiag.mjs`、
+  其中與 tick 無關的 cron／靜態守門搬到新增的 `routing.mjs`，另加管理端點認證的 `adminkey.mjs`；前一版 30 支含 10-19 的 `pick2track.mjs`）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
   （**15 支**＝帶 cron 11 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
@@ -123,14 +123,14 @@
   該 repo 無 GH cron 兜底，dispatch 兩次都失敗走 `alertJob` tag `iching-dispatch-err`；cron `ICHING_CRON` 由 `dispatchRoleForCron`
   精確攔截，因 22:30 撞哨兵窗、23:30 撞晚場班窗。`GH_DISPATCH_TOKEN` 須涵蓋 `taiwan-stock-iching`。測試 `node test/iching.mjs`）
   - **早晨補叫班（2026-09-30 使用者裁定）**：`export const ICHING_AM_CRON = "10 23 * * 2-6"`＝UTC 23:10 週一～五＝**台北 07:10
-    週二～六**（dow 為 Quartz 慣例 2-6＝週一~五，UTC 週五 23:10 已是台北週六 07:10；`wrangler.toml` 第 22 條，**crons 由 21 增為 22 條**，
-    `test/tickdiag.mjs` 釘 toml 條數的斷言同步 21→22）。`dispatchRoleForCron` 表加 `[ICHING_AM_CRON]: "iching"`，沿用 `dispatchIching`
+    週二～六**（dow 為 Quartz 慣例 2-6＝週一~五，UTC 週五 23:10 已是台北週六 07:10；當時為 `wrangler.toml` 第 22 條、**crons 由 21 增為 22 條**；
+    2026-10-23 拆 tick 量測班後遞補為**第 21 條、全體 21 條**，toml 條數斷言現在在 `test/routing.mjs`）。`dispatchRoleForCron` 表加 `[ICHING_AM_CRON]: "iching"`，沿用 `dispatchIching`
     零新 dispatch 路徑；`export function ichingSlot(tp)` 以 `tp.hour < 12` 判 am／pm。動機：FinMind 借券餘額 09-29 在 23:30 只落地一半、
     該 repo 寫 waiting，沒有這班要等隔天 22:30 才續算（約 23 小時）；管線冪等、無 pending 即 no-op（Actions 約 40 秒）。
     07:10 當日 TAIEX 尚未落地，`daily_run` 的 `trading_days_since`（TAIEX 有列才算交易日）只會列出前一交易日，**不會替當日寫 waiting**
     （依 taiwan-stock-iching `src/iching/daily_fetch.py` 的 `trading_days_since` 讀碼，未線上實跑）。
-    **同分撞點**（逐分鐘展開一週 10,080 分鐘，與 toml 全部 21 條既有 cron 比對，腳本另存 scratchpad 不進 repo；同法對 `TICK_CRON`
-    重算得 frame 300／哨兵 180／其餘 7 條各 5＝每交易日 60／36／1，與 tick 節記載相符）：**只有 `*/5 23 * * *`（am summary 主窗）
+    **同分撞點**（逐分鐘展開一週 10,080 分鐘，與當時 toml 全部 21 條既有 cron 比對，腳本另存 scratchpad 不進 repo；當時曾以同法對
+    已拆除的 tick 量測班 cron 重算、與其記載相符，作為腳本的自我檢驗）：**只有 `*/5 23 * * *`（am summary 主窗）
     每週 5 撞點**＝這 5 個 07:10；兩條各帶自己的 `event.cron`，`dispatchRoleForCron` 精確比對後分別得 `iching`／`summary-am`，互不干擾。
     **必須被攔截**：`scheduledRole(07:10)` 不是 news／morning／sentinel／idle，而是 fallthrough 的 **`frame`**（會多寫一格
     `f:<date>:07:10` 並多打一次 FinMind），`test/iching.mjs` 7c 把這個事實釘住。
@@ -164,13 +164,7 @@
   低頻班 `lastweek`／`meta` 於 2026-08-30 納入 `eve`（`mode:"lowfreq"`，判準 `export function lowFreqDue`）：
   **只在台北週一檢查**（meta 另要求已過本月第一個週六＋2 天），非檢查日整項濾掉不抓也不告警；
   **刻意不納 `backupPipelines`、不新增 CF cron**（使用者裁定，理由見 `PROJECT_SUMMARY.md` 同段）
-- `ticksample` 台指期 tick 量測班（2026-09-09，**暫時班，見下節的拆除條件**）：台北平日
-  09:00–19:55 每 5 分（CF cron `*/5 1-11 * * 2-6`，`export const TICK_CRON`），
-  `export async function runTickSample` 抓一次 FinMind `TaiwanFuturesTick`(TX) 當日檔、
-  摘要成一筆寫 KV `tick:<YYYYMMDD>:<HHMM>`（TTL 7 天），**不 dispatch、不接哨兵、不下任何判準**。
-  ★ 這條**必須由 `dispatchRoleForCron` 最先攔截**，落到 `scheduledRole` 會變成 96 個 `frame`
-  （台北 09:00–16:55，其中 09:00–13:59 的 60 個還與 frame cron 搶同一把 `f:<date>:<HH:MM>`）
-  ＋36 個 `sentinel`（17:00–19:55 每 5 分多跑一次 `runSentinel`）。
+- （`ticksample` 台指期 tick 量測班 2026-09-09～2026-10-23，**已拆除**，見「台指期 tick 量測班（…已拆除）」節）
 - `summary-am` 窗（06:50–08:50）另掛晨場協調班 `export async function runMorning`（見下節）
   ＋us 晨間補跑 `export async function runUsCatchup`（2026-08-13：台北 07:00–08:05 檢查
   us.json 資料日是否達最近預期美股交易日（`export function lastExpectedUsTradingDate`，
@@ -186,7 +180,7 @@
 - **判定只有一處**：`worker/src/index.js` 的 `export async function holidayToday`（台北日期；**週末一律回 false、連行事曆都不讀**，
   週末仍交給各角色既有的 dow 守門，週末路徑逐字不變）→ `export async function holidayCalCached`（isolate 記憶化）→
   既有 `loadHolidayCal`（cf `cacheTtl: 3600`）＋`holidayClosed`。**守門放在 `scheduled` handler 本體**（`await` 後 `return`），
-  各 `run*` 函式一行未改——被守門的呼叫式因此逐字保留（`test/frames.mjs`／`test/tickdiag.mjs` 以原始碼字串釘住它們）。
+  各 `run*` 函式一行未改——被守門的呼叫式因此逐字保留（`test/frames.mjs` 以原始碼字串釘住它們；原本另有已隨 tick 班刪除的 `test/tickdiag.mjs`）。
 - **每分鐘 frame 的成本**：兩層快取各管各的——①`cf.cacheTtl` 是 Cloudflare 邊緣對 raw 子請求的快取（命中時不回源，
   但**仍是一次子請求**；workers.dev 上對第三方 origin 的實際命中行為**未實測**）；②`holidayCalCached` 的 isolate 記憶化：
   成功後 `HOLIDAY_MEMO_OK_MS`（30 分）內**連子請求都不發**，失敗記 `HOLIDAY_MEMO_FAIL_MS`（5 分，期間 fail-open 照寫 frame、
@@ -194,9 +188,9 @@
   **另有硬上限 `HOLIDAY_HARD_TIMEOUT_MS`（6 秒，2026-09-29 驗收退回 M1 後補）**：`holidayCalCached` 內以 `Promise.race`
   包住 `loadHolidayCal`——signal 只能中止 fetch 本身，擋不住「標頭回了但 `r.json()` 永不 resolve」或不理 signal 的 fetch；
   而 in-flight 是整個 isolate 共用、memo 只在 resolve 後寫，一旦卡住，同 isolate 之後**每一次** scheduled 都 await 同一個
-  永不結束的 promise＝frame／哨兵／tick 全停擺。逾時回 `{cal:null, err:"timeout"}`、**照寫失敗記憶**（5 分內不再撞）並清
-  in-flight → fail-open 照平日跑。選 race 而非 `AbortSignal.timeout()` 的理由同「台指期 tick 量測班」節 `tickWithTimeout`
-  （官方文件未列該靜態方法、signal 管不到 body）；代價也相同：race 不取消底層操作、卡住的 fetch 只是被放生，timer 在 finally 清。
+  永不結束的 promise＝frame／哨兵等全停擺。逾時回 `{cal:null, err:"timeout"}`、**照寫失敗記憶**（5 分內不再撞）並清
+  in-flight → fail-open 照平日跑。選 race 而非 `AbortSignal.timeout()` 的理由（原與已拆除的 tick 量測班 `tickWithTimeout` 同一套論證）：
+  Cloudflare 官方文件未列該靜態方法、signal 管不到 body；代價也相同：race 不取消底層操作、卡住的 fetch 只是被放生，timer 在 finally 清。
   **timer 確實被清由 `test/holidays_timer.mjs` 守住**（2026-09-30 補 S1 漏洞）：stub 全域 `setTimeout`／`clearTimeout`，
   對快速成功／fetch 拋錯／body 永不回（觸發硬上限）三條路徑逐一斷言 race timer 全數被 `clearTimeout`；拿掉 finally 那行 `clearTimeout` 實測三條皆紅。
   所以是「每個 isolate 每 30 分至多 1 次」，不是每分鐘一次（`test/holidays2.mjs` 以連續 4 分鐘 frame 斷言只讀 1 次）。
@@ -207,7 +201,6 @@
 |---|---|---|
 | `frame`（每分鐘，`storeFrame`＋`runAlerts`＋13:25–13:40 `storeFlowLast`） | **不跑**：不打 FinMind 快照、不寫 `f:`／`fi:`／`series:`／`flow:last`／`err:`、不偵測提醒 | **改**。09-25／09-28 假歸檔的上游（休市日快照＝前一交易日收盤，照寫會留整天 stale frame）；比照週末 cron 不醒 |
 | `sentinel`（17:00–22:55 每 5 分，`runSentinel`） | 不探測、不 dispatch、不寫 `sentinel:<date>:*`、不告警 | **改**（比照週末：`scheduledRole` 週末本來就不回 sentinel） |
-| `ticksample`（`runTickSample`） | 不抓 tick、不寫 `tick:` KV、當日不評估拆除提醒 | **改**（週末 cron 不醒）；`/tickdiag` 該日 132 格缺席＝預期 |
 | 單體班 TW 四條＋recheck（daysummary／intraday／aetf／baseline，`runBackup`） | 不讀 KV、不抓產物、不 dispatch、不告警 | **改**（多一道；原本 `series:<date>` 守門在 frame 不寫後本來也會擋，現在連那次 KV get 都省） |
 | 單體班 us＋recheck（`runBackup` us） | **照跑** | **不改**：美股日曆，台股休市與它無關 |
 | `evening`（21:00–23:55，`runEvening`：pm summary→diag→mktbal→aetf2→圖卡渲染→`pushDailyCards`） | 整條不跑 | **改**（原 series 守門本來也會擋；`pushDailyCards` 另有 baseline.date 閘門，同樣不必動） |
@@ -221,192 +214,47 @@
 | `iching`（22:30／23:30） | 照跑 | **不在本批**（另一 session 負責；該 repo `daily_run` 自己判休市） |
 | `alertJob` 本體 | 不變 | **不改**：它只看週末 dow；休市日會呼叫它的只剩 us／低頻班／news／iching，都不屬台股交易日類 |
 
-測試 `node test/holidays2.mjs`（直接打 `export default` 的 `scheduled`，stub 全域 fetch＋KV＋ctx）：22 個角色×09-25／09-28
+測試 `node test/holidays2.mjs`（直接打 `export default` 的 `scheduled`，stub 全域 fetch＋KV＋ctx）：21 個角色×09-25／09-28（2026-10-23 拆 tick 班前為 22 個，少掉的是 `ticksample` 一列）
 逐一斷言——台股角色零 FinMind／零 dispatch／零告警／零 KV；summary-am 窗只少 am summary 協調班（08:10 照 dispatch cards.yml、
 08:20 照讀 manifest，且與改動前相比「差額只有 am summary」）；06:47 morning 與 us／news／iching 與改動前相同；09-29 與行事曆
 404／壞檔／拋錯（fail-open）時，fetch 集合與 KV 操作集合**與改動前（`git show 94c5773:worker/src/index.js`）對跑逐項相同**；
 09-26 週六 dow `*` 的角色與改動前相同且不讀行事曆；記憶化／in-flight／年度未涵蓋；**F 段硬上限**（body 永不回／fetch 永不回：
 上限內 fail-open、並發一起結束、後續走失敗記憶不再卡、過 5 分重試成功；生產預設 6 秒下 scheduled frame 照寫）；
-**G 段 fail-open 正向斷言**（404／拋錯／壞檔時哨兵照探測、frame 照寫、tick 照抓照寫、eve 健檢照舊讀 series 與台股項、am summary 照讀 sumfired）。
+**G 段 fail-open 正向斷言**（404／拋錯／壞檔時哨兵照探測、frame 照寫（拋錯那型原由 tick 班代表，拆除後改由 frame 照抓照寫守住）、eve 健檢照舊讀 series 與台股項、am summary 照讀 sumfired）。
 **⚠ CI 不跑對跑**：`worker-deploy.yml` 的 `actions/checkout` 預設 `fetch-depth: 1`，取不到 `94c5773`，對跑段落（A 段的
 「與改動前相同」與整個 B 段、C 段的比對）印 WARN 略過；CI 上守住行為的是**不依賴舊版的斷言**（A 段逐角色零副作用、F、G）。
 對跑只在完整 clone 的本機跑得到；本機模擬淺 clone：`HOLIDAYS2_BASE=deadbeef node test/holidays2.mjs`。
 
-## 台指期 tick 量測班與 `/tickdiag`（2026-09-09，**暫時班，拆除條件見下**）
+## 台指期 tick 量測班（2026-09-09～2026-10-23，已拆除）
 
-**只量測、不下判準。** 動機：未來若要把台指期 tick 接進哨兵，需要一個「日盤真的收完了」的判準，
-而現有的兩個直覺判準都**已知不成立**——**原以為** FinMind 日曆日 D 的 TX tick 檔**同時含三段**
-（D 的 00:00–05:00 夜盤延續／08:45–13:45 日盤／15:00–24:00 當日夜盤），所以
-①`rows.length > 0` 早在台北 09:00 就為真（夜盤段先在檔裡）→ 假陽性；
-②連 `max(time) >= "13:44"` 也不安全——15:00 之後的當日夜盤列同樣滿足它。
-**⚠ 這個「同時含三段」的前提，2026-09-14 首日實測不成立**（見下「首日實測」：檔案 15:05 才出現、
-最早的列是 08:45、15:05 之後到 19:55 一格都沒長）。**保留原文是因為它是當初建班的動機**，
-刪掉會看不懂為什麼要量；同時**標明 N=1**——一天不足以推翻通則，只能說「首日觀測與前提不符，
-需要更多交易日」，兩個直覺判準在拿到分布之前一樣不可採用。
-分辨只能看**分段**的列數與時間邊界，而那個分布**沒有人量過**（既有觀測只有台北 16:54 的一筆，N=1，
-且那筆只存在於對話、不在版控裡）。故先蒐集原始分布，判準留待有資料再定。
+**結案紀錄。** 建班動機：日後若要把台指期 tick 接進哨兵，需要「日盤真的收完了」的判準，而直覺判準
+（`rows.length>0`、`max(time)>=13:44`）因 FinMind 檔內含夜盤段而可疑，故先以暫時班量原始分布、不下判準。
+**2026-10-23 依使用者裁定拆除**（依據：已取得 4 個交易日樣本、檔案形狀在各日一致，拆除條件中的三個未知都已有答案；
+2026-10-09 起本班每個平日發「拆除到期」告警）。拆除範圍：`wrangler.toml` 原第 20 條 cron `*/5 1-11 * * 2-6`
+（crons 22→21 條，後兩條 iching 遞補為 20／21）、`dispatchRoleForCron` 的 `ticksample` 分流與 `scheduled` handler 的
+休市日守門分支、`runTickSample`／`summarizeTickRows`／`maskTickErr`／`tickWithTimeout`／`tickSampleSlots`／
+`tickAgeDays`／`tickTeardownDue`／全部 `TICK_*` 常數、`tick-teardown-due` 告警、`GET /tickdiag`、`worker/test/tickdiag.mjs`
+（其中與 tick 無關的 toml 條數／cron 歸屬／全檔零 `.list(`／endpoints 不列診斷路徑等守門搬到 `worker/test/routing.mjs`）。
+KV 中殘留的 `tick:<YYYYMMDD>:<HHMM>` 樣本 TTL 7 天，自然過期、不需手動清。`/livediag` 的節流（`diagThrottle`）原與
+`/tickdiag` 共用，現在只剩 `/livediag` 一個使用者，行為不變。`/live` 的 `finFuturesVix` 仍照舊打 `TaiwanFuturesTick`
+（那是 VIX／正逆價差卡，與本班無關）。
 
-- **CF cron 由 19 條增為 20 條**（`worker/wrangler.toml` 第 20 條 `*/5 1-11 * * 2-6`，
-  需與 `export const TICK_CRON` 逐字一致）：台北平日 09:00–19:55 每 5 分＝**132 slot/交易日**。
-  **窗必須含上午**，否則「夜盤段是否先落地」驗不到。程式端二次守門在
-  `export async function runTickSample`（非平日／時窗外／缺 token 或 KV binding 一律不採樣）。
-- **同分撞點 9 條**（逐分鐘展開比對）：`* 1-5`（frame）60、`*/5 9-14`（哨兵）36、
-  `35 5`／`5 6`／`40 6`／`10 7`／`35 10`／`0 11` 各 1、`30 1`（晨間健檢）1。
-  各帶自己的 `event.cron`，`dispatchRoleForCron` 精確比對先攔截（後果見上節 `ticksample` 條）。
-- **樣本欄位**（`export function summarizeTickRows` 是純函式、可離線測）：
-  `seg.a`/`b`/`c`＝三段列數（門檻 08:00／14:00）、`d13`＝`time∈[13:44,14:00)` 的列數
-  （＝「日盤收盤段」的直接量測值）、`mn`/`mx`＝原始時間字串字典序極值、`tk`＝實際偵到的時間欄位名、
-  `bytes`/`clen`/`ms`＝payload 大小與耗時、`st`＝HTTP status（`0`＝fetch 本身例外）。
-  **讀樣本前先看 `tk`**：`tk` 為 `null` 時三段一律 0 但 `n` 仍是全部列數，那是「有列但量不到時間」、
-  **不是**「當下真的沒有列」。**`n:0` 也不等於「真的沒有列」**——fetch 例外與 JSON 壞掉時
-  `n` 同樣是 0，判讀順序是**先看 `err`／`skip`，都沒有時 `n:0` 才是真的沒列**；
-  `skip` 非空時 `n` 為 `null`（未知）而非 0，`bytes` 在 `too-large:clen` 那關也是 `null`
-  （body 從未讀取＝沒量到，**不是 0＝回應是空的**）。
-  四種「`seg` 總和 < `n`」的成因逐條寫在 `summarizeTickRows` 上方註解。
-- **首日實測（2026-09-14 週一，N=1）與 `TICK_TIME_KEYS` 補 `"date"`**：首日 **132/132 格全採到**、
-  無 `err`、無 `skip`、`st` 全 200，但 **`tk` 132/132 為 `null`** → `seg`／`d13` 全 0、`mn`／`mx` 全 `null`，
-  **整天的時間分布零資訊量**——正是上一條「讀樣本前先看 `tk`」講的那個形狀，第一天就踩到。
-  成因：`export const TICK_TIME_KEYS` 原本只列 `time`／`Time`／`datetime`／`Datetime`，而 FinMind
-  `TaiwanFuturesTick` 把**完整時戳**放在 **`date`** 欄（線上樣本的 `dates` 欄實見
-  `2026-09-14 08:45:00`，**不是純日期**）。`summarizeTickRows` 另有一行把 `r.date` 收進 `dates`，
-  所以「`dates` 有值、`tk` 卻是 `null`」——下游解析器接得住、上游鍵名清單漏了。
-  已把 `"date"` 補在**陣列最後**（只增不減：上游哪天真的出現 `time`／`datetime` 仍優先取它），
-  `tickHm`／`TICK_HM_RE` 本來就吃得下這個形狀、**一字未動**。**分段要等 2026-09-15 之後的班才重新量得到。**
-  首日**不受 `tk` 影響、確實量到**的三項事實：
-  - **首次落地時點 15:05**：09:00–15:00 共 **73 格** `n:0`（`bytes`／`clen` 皆 40＝空 payload），
-    15:05–19:55 共 **59 格**有資料。
-  - **單日 payload 量級**：59 格的 `n`／`bytes` **逐格完全相同**（**64,712 列／6,634,907 bytes**），
-    `ct`（合約數）**10**，`ms` 547–7,317（中位 813；空檔格 32–408）。
-    **約為 `TICK_MAX_PARSE_BYTES`(20e6) 的三分之一，兩關尺寸閘門一次都沒觸發。**
-  - **「夜盤段先落地」首日不成立**：全體 `date` 最小值＝`2026-09-14 08:45:00`（`dates` 是排序後
-    取前 5 筆，故此為真正的最小值），**檔裡沒有 00:00–05:00 的列**；且 15:05 之後到 19:55
-    檔案**一格都沒長**，所以 15:00 起的當日夜盤在這段時間內**沒有被追加**進 `date=2026-09-14` 這個檔。
-  - ⚠ **沒量到、不可回推的**：`mx` 因 `tk` 為 `null` 而是 `null`，所以「15:05 那一刻檔裡最晚的列是
-    幾點」**首日完全沒有資料**——不得由「檔案不再長」推論檔內只有日盤段。
-
-- **鐵律 1 相關**：請求 URL 含 `token=<FINMIND_TOKEN>`，而 workerd 的 fetch 例外訊息**會帶 URL**
-  （`TypeError: Fetch API cannot load: <url>` 是常見形狀——**這是推測、我方未實測**；
-  原本引 cloudflare/workerd #1957 是**引錯了**，那張 issue 講的是前導空白 URL 的解析不一致），
-  樣本又活 7 天且由**無認證**的 `/tickdiag` 對外吐出。
-  故例外訊息一律過 `export function maskTickErr` 雙重遮罩（token 字面量替換＋`token=` 後綴遮罩；
-  token 為空／過短時**跳過**字面量替換，否則 `split("")` 會把訊息炸成逐字元）後才寫 KV。
-  **不可宣稱「兩道任一失效另一道必定有效」**——2026-09-09 覆驗構造出反例：token 同時含
-  需百分比編碼的字元（使第一道失效）與 `'`／`)`（原本被當停止字元，使第二道提前停下）就會半遮。
-  停止字元已收窄到只剩 `&` 與空白（寧可多遮）；對現行 JWT 形狀的 token 兩道都成立，
-  但那是**目前的**事實不是結構保證，上游換發別種形狀要回來重看。
-  **改這段前先跑 `node test/tickdiag.mjs`**，那裡有「注入含假 token 的例外、斷言 KV 值不含它」的測試。
-- **尺寸閘門** `export const TICK_MAX_PARSE_BYTES`（20e6）**分兩關，順序是重點**：
-  ①`skip:"too-large:clen"`——上游有給 `content-length` 且超標時，**在讀 body 之前**就短路
-  （`bytes` 為 `null`＝從未讀取）。**這關才是真的擋 OOM 的那道**：真會打爆 isolate 的檔在
-  `.text()` 當下就爆了，事後拿 `text.length` 判等於沒判（2026-09-09 覆驗退回的正是這點）。
-  ②`skip:"too-large:text"`——上游沒給 `content-length`（chunked／被中介改寫）時的後備，
-  body 已讀進來所以 `bytes` 有值，擋掉的是「字串與解析後物件同時常駐」那一半峰值。
-  兩關**正常走完時**都不寫 `err`（**太大所以沒讀 ≠ 抓失敗**），`n` 一律 `null`。
-  ——**不是無條件**（2026-09-10 覆驗構造出反例）：第一關短路的過程中若再拋例外
-  （實測手法＝讓 `r.body` 的 getter 自己拋），樣本會同時帶 `skip` 與 `err`；那形狀反而更誠實，
-  但敘述不能寫死。**判讀陷阱**：上游謊報一個很大的 `content-length` 時，第一關照樣短路，
-  樣本與「檔案真的很大」**長得一模一樣**（`bytes:null`＋`clen` 很大＋`skip:"too-large:clen"`），
-  **沒有欄位分辨得出來**——第一關觸發時 `clen` 只能當「上游宣告的值」，不能當實際大小。
-  量測班不能把 Worker 打爆，而「大到不敢 parse」本身就是要量的答案之一。
-  **⚠ 2026-09-14 首日實測：第一關在本端點上一次都沒有機會觸發**——59 格有資料的樣本 `clen`
-  **全是 `null`**，上游根本不給 `content-length`（只有空 payload 的 73 格有 `clen:40`）。
-  所以上面那句「**這關才是真的擋 OOM 的那道**」**對本端點不成立**：真正可能生效的只有後備的
-  ②`too-large:text`，第一關形同備而不用。**兩關的設計、順序與門檻常數一律不動**（上游哪天開始給
-  `content-length`，第一關就會回來當第一道，而 OOM 論證本身沒被推翻），**只更正敘述**；N=1。
-- **`GET /tickdiag`**（唯讀樣本讀回）：`?date=YYYY-MM-DD`（非法值靜默退回台北今日）。
-  三個性質與 `/livediag` 同一套——①**唯讀**，本路徑一個 put 都沒有；②**零 KV list**，
-  key 由 `export function tickSampleSlots()` 依 cron 決定性重建（KV list 額度曾爆過，見已知限制 1；
-  全檔 `.list(` 零命中有靜態測試守著，**連註解都不要寫出那個字面形式**）；
-  ③**刻意不列進根路徑 `endpoints` 清單**。節流沿用 `/livediag` 那組 in-isolate 計數（兩者共用額度）。
-  132 把 key 一次 get 完——額度歸屬是 **internal services 子請求上限（Free 1,000／Paid 預設 10,000）**，
-  不是對外 fetch 那條（Free 50／**Paid 10,000，可調到 10M**）。KV get 另算進「同時 6 條等待回應」
-  上限，132 把會**排隊**分批完成而非失敗，延遲未實測。
-  **2026-09-13 新增三個欄位**（拆除提醒的讀側，見下）：`since`（＝`TICK_SAMPLE_SINCE`）／
-  `age_days`／`teardown_due`。三者都是**純算術、唯讀**，一律以**台北今日**計而不是查詢的
-  `?date=`——問的是「這班活多久了」，不是「這份樣本多舊」。既有欄位形狀不變。
-- **五個 `await` 全部逾時（2026-09-13 補，同日覆驗退回後補齊）**：`runTickSample` 共
-  **5 個 `await`**——`fetchFn(url)`／`r.body.cancel()`／`r.text()`／`env.FLOW_KV.put(...)`／
-  `alertJob(...)`（最後一個是同批「拆除提醒」新增的）。`origin/main`（`e035ba0`）版本只有
-  **4 個**（無 alertJob 那個），**四個全部無上限**。
-  **本節原本寫「原本三處無上限」「全鏈逾時」是錯的**：本批第一版只包了 fetch／body／cancel
-  三個，漏掉 `FLOW_KV.put` 與自己新增的 `alertJob`——而**漏掉的 put 正是「樣本寫不出去」
-  那一條**，錯的數字剛好蓋住了沒修好的失效模式（2026-09-13 覆驗實查退回，留此紀錄）。
-  覆驗實測：讓 `r.body.cancel()`、`FLOW_KV.put` 或 `alertJob` 任一回一個**永不 resolve** 的
-  promise，整支都卡住（400ms race 得 `HUNG`）；`put` 掛住時**連樣本都寫不出去**。影響確實有限
-  （`TICK_CRON` 獨佔那次 invocation、掛在自己的 `ctx.waitUntil`，掛住只讓那一格樣本缺席），
-  但**「樣本缺席」與「cron 沒醒」在 `/tickdiag` 讀回時分辨不出來**，正是本班一直在治的那類問題。
-  現在**五處各包一層** `export function tickWithTimeout`，門檻
-  `export const TICK_FETCH_TIMEOUT_MS`／`TICK_BODY_TIMEOUT_MS`（各 45 秒）／
-  `TICK_CANCEL_TIMEOUT_MS`（5 秒）／`TICK_KV_TIMEOUT_MS`／`TICK_ALERT_TIMEOUT_MS`（各 10 秒，
-  KV put 是 internal service 子請求、正常在毫秒級，10 秒是留兩個數量級的餘裕）。
-  - **為什麼是 `Promise.race` 而不是 `AbortSignal.timeout()`（查證後的選擇，不是憑印象）**：
-    ①Cloudflare Workers 官方文件 runtime-apis/web-standards 只寫「The `AbortController` and
-    `AbortSignal` APIs provide a common model for canceling asynchronous operations」、
-    runtime-apis/request 只記 `signal` 欄與 `enable_request_signal` 旗標，**兩頁都沒有列出
-    `AbortSignal.timeout()` 這個靜態方法**（2026-09-13 實查）。它很可能可用，但官方文件沒承諾
-    的東西不該押在合併即部署的路徑上。②就算可用，signal 只中止 **fetch**，**`r.body.cancel()`
-    不吃 signal**——而那正是實測會掛住的那一條。③`cloudflare/workerd` issue #1020 記載過
-    `AbortSignal.timeout()` 逾時丟出的 DOMException 在本機 wrangler 下 `try/catch` **抓不到**
-    （已由 PR #1177 修掉、issue 已關；該串當時建議的替代寫法是 `AbortController`＋`setTimeout`）。
-  - **誠實的代價**：`Promise.race` **不取消底層操作**，掛住的 promise 仍 pending、只是被放生；
-    換到的是「逾時後照樣把樣本寫出去」，**不是**「把連線收回來」。timer 一律在 `finally` 清掉。
-  - **`FLOW_KV.put` 逾時的語意是「未知」不是「沒寫入」**（這條不可含糊）：`Promise.race`
-    不取消底層操作，逾時只保證**這次 invocation 會結束**，那筆 put 仍可能事後由執行環境完成。
-    因此標記 `kx`（值為例外類別名，逾時即 `TickTimeout`）讀作**「這次沒等到寫入確認」**——
-    看到 `kx` 不得斷言樣本沒寫進去；反過來 `/tickdiag` 上某時點缺席也不得回推成「一定是 put
-    逾時」（TTL 過期、cron 沒醒長得一樣）。`alertJob` 逾時同理記 `ax`。
-    **`kx`／`ax` 只在回傳值與 log、不進 KV**：樣本在 put 之前就序列化好了，要記的正是那一筆
-    自己的寫入結果，塞不回自己；`ax` 發生時樣本更是早已落地，不值得為了告警結果再寫一次 KV。
-  - **逾時的樣本形狀**：`ern === "TickTimeout"`，`err` 帶得出階段（`fetch`／`body`）。
-    **`st` 依階段不同、這是刻意的**——fetch 階段逾時 `st` 維持 `0`（還沒拿到 status，與 fetch
-    本身例外同一類）；body 階段逾時 `st` 已是**真實 HTTP status**（標頭已到、卡在讀 body），
-    比硬寫回 0 誠實。**分辨階段要看 `err`，不要只看 `st`。**
-    `r.body.cancel()` 逾時另記 `cx`（值為例外類別名，逾時即 `TickTimeout`）——取消失敗本來就
-    不影響量測，**但「無妨」不等於「可以完全不留痕跡」**；它**不寫 `err`／`ern`**（cancel 卡住
-    不是抓失敗），樣本其餘欄位仍是 clen 閘門的正常形狀。
-  - **45 秒是餘裕的選擇、不是量出來的最適值**（同 pm 牌鐘 23:00 那條的立場）：下界要遠大於正常
-    耗時否則會把「單日 payload 耗時」這個要量的未知自己截斷，上界要遠小於 cron 間隔 300 秒
-    否則掛住的那格會壓到下一格（最壞 45+45+5+10+10＝**115 秒**）。cancel 給 5 秒是因為它是本地
-    連線收尾、不是網路往返，而 clen 閘門已經決定不讀 body 了。**沒有足夠的耗時分布可算最適值。**
-  - `runTickSample` 多一個第四參數 `opts`（`{fetchMs, bodyMs, cancelMs, kvMs, alertMs}`）
-    **只供測試把門檻壓成毫秒級**，生產呼叫仍是 `runTickSample(env, tp)`、一字未變。
-- **拆除提醒機制（2026-09-13 補）**：下面的拆除條件原本**只有文件、沒有機制**，沒有任何東西會
-  提醒，最可能的結局是這班長住。現在補一道最小機制——
-  - **首採樣日寫成常數 `export const TICK_SAMPLE_SINCE`（`2026-09-09`）而不是 KV**：上線日是
-    已知且不會變的事實，為它多一次 KV 讀寫是白花額度（132 slot/日；KV 額度在本 repo 爆過），
-    常數也讓判斷變成純函式 `export function tickAgeDays`／`export function tickTeardownDue`、可離線測。
-  - **門檻 `export const TICK_TEARDOWN_DUE_DAYS`＝30 個日曆日**（≈21 個交易日）。刻意用日曆日：
-    日曆日是純算術、不依賴國定假日行事曆（2026-09-28 起本 repo 已有 `data/twse_holidays.json`，
-    但提醒門檻刻意不接它：行事曆讀不到時也不會誤判）。**它是提醒門檻、不是判準**——到期只代表「該回來看樣本、決定收窄或移除」，
-    不代表資料一定夠。`age` 算不出來（日期解析失敗）時**一律不判到期**。
-  - **告警一天最多一則，但那不等於「總共一則」**：只在**當日第一格**
-    （`tp.hour === TICK_START_HOUR && tp.minute === 0`）評估，再疊 `alertJob` 既有的
-    `alerted:<date>:tick-teardown-due` 去重，兩道都在。**`tickTeardownDue` 用 `>=`，所以
-    2026-10-09（＝`TICK_SAMPLE_SINCE` + 30 日）起的每個平日都會各發一則**（`alertJob` 週末
-    直接 skip），**直到有人動手收窄或拆掉這班為止，它不會自己停**。這是刻意的常駐提醒——
-    會自己安靜下來的提醒，對一個本來就容易被遺忘的暫時班等於沒提醒。
-    評估**排在 KV put 之後**，告警出任何事都不影響樣本（這個順序有測試鎖住：反過來的話，
-    告警一掛住連樣本都寫不出去，而「告警送不出去」可以接受、「樣本缺席」不行）。
-  - **不重蹈已知限制 7 的覆轍**：`alertJob` → `sendAlert` 本身靠 secret，所以先用
-    `alertChannelReady(env)` 擋——通道未設時只 `console.error`、**不呼叫 `alertJob`**，
-    否則它會在送不出去的情況下照樣寫掉當天那把去重鍵。
-  - **硬約束不變**：本班**不 dispatch、不碰其他班**，這一項一個 dispatch 都沒加。
-- **⚠ 這是暫時班，拆除條件（量到就回來動手）**：以下三個未知都拿到**跨多個交易日**的穩定分布後，
-  這班就該收窄或整段移除，不要讓它長住——
-  1. **日盤收盤段最早幾點拿得到**：`d13` 首次為正的時點在多日之間穩定下來；
-  2. **夜盤段是否先落地**：`seg.a`／`seg.c` 相對 `seg.b` 的出現順序有定論（**這一項需要上午樣本**）；
-  3. **單日 payload 量級與耗時**：`bytes`／`clen`／`ms` 的量級與尾端穩定。
-  **首日（2026-09-14）進度（N=1，事實陳述、不構成判準）**：③拿到了一天的量級
-  （64,712 列／6,634,907 bytes／`ms` 中位 813，`clen` 全 `null`）；另外多拿到一項原本沒列進來的
-  「**首次落地時點**」＝15:05。①的 `d13` 與②的段內順序**因 `tk` 為 `null` 而整天零資訊**，
-  要等補上 `"date"` 鍵名後的班次重量。**三項都還沒有跨多個交易日的分布，一項都還不能結案。**
-  收窄＝把窗縮到真正有資訊量的那幾小時（改 `TICK_START_HOUR`／`TICK_END_HOUR` ＋ cron，兩邊同步）；
-  移除＝拿掉第 20 條 cron、`ticksample` 分流、`runTickSample`／`/tickdiag`／`test/tickdiag.mjs`
-  （一併拿掉 `TICK_SAMPLE_SINCE`／`TICK_TEARDOWN_DUE_DAYS`／`tickAgeDays`／`tickTeardownDue`
-  與 `tick-teardown-due` 那則告警）。**2026-09-13 起到期會自己來敲門**（見上一項），
-  但敲門的是「該回來看了」，**不是「資料已經夠了」**——夠不夠仍要人看上面三個未知的分布。
-  **判準定案後才輪到「接哨兵」，那是另一批工作**（本批對 `SENTINEL_SIGNALS`／`signalLanded`／
-  `runSentinel`／既有 19 條 cron 一個字都沒動）。
+**實測結論（日後接哨兵要用；樣本 2026-09-14、10-16（只剩午後）、10-20、10-21，共 N=4）**：
+- FinMind `TaiwanFuturesTick`(TX) **日曆日 D 的檔＝D 的 00:00–04:59（前一晚夜盤的延續；前一天沒有夜盤時就沒有，
+  例如週一 09-14）＋D 的日盤 08:45–13:44:59**。D 當晚的夜盤到台北 19:55 都**沒有**被追加進 D 的檔（`seg.c` 恆 0）。
+  建班時「同一個檔含三段（含當晚 15:00–24:00 夜盤）」的前提因此不成立。
+- 10-20：09:00–14:55 只有 4,430 列（00:00–04:59 段，0.45MB）；15:00 起日盤整段出現（全檔 83,169 列、最晚 13:44:59、
+  `d13`（13:44–14:00 列數）＝1,417、8,492,219 bytes），之後到 19:55 不再變。
+  10-21：09:00–14:55 為 3,767 列（0.38MB）；15:00 起 51,340 列、最晚 13:44:59、`d13`＝1,040、5,194,096 bytes，之後不變。
+  09-14（週一、無前晚夜盤）：15:05 首次出現、64,712 列、6,634,907 bytes。
+- 耗時：有資料的格多為 0.5–1.5 秒，最慢 7.3 秒（09-14）；上游**從未**提供 `content-length`；20MB 尺寸閘門從未觸發。
+- **判準（推論，N=4，未定案）**：`rows>0` **不可用**（09:00 起就為真，夜盤延續段造成假陽性）；
+  「檔內最晚時間 ≥ 13:44」或「13:44–14:00 列數 > 0」可判日盤收完，首次為真落在 15:00–15:05；建議另加
+  「15:30 前不判定」的保險。**接哨兵是另一批工作、尚未排**（本次拆除對 `SENTINEL_SIGNALS`／`signalLanded`／
+  `runSentinel` 一個字都沒動）。
+- 工程面留下的教訓（細節見 git 歷史 `41f6da1` 以前的本節全文）：①時間欄位名不可憑印象（首日 `TICK_TIME_KEYS`
+  漏了 `date`，整天零資訊）②含 token 的 URL 會跟著 fetch 例外訊息外洩，寫進可對外讀取的地方前要遮罩
+  ③`Promise.race` 逾時不取消底層操作，KV put 逾時的語意是「未知」不是「沒寫入」④暫時班要有自己會來敲門的拆除提醒。
 
 ## 晚間 LINE 圖卡：主動ETF 動作總覽（`pm-aetf-2`，2026-09-10 改版）
 
@@ -1049,8 +897,8 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 cd worker && npm run dev            # 本機 Worker
 cd worker && npm run deploy         # 手動部署（正常情況不需要，見下）
 cd worker && npm test               # 注意：只跑 test/parity.mjs
-node test/sentinel.mjs              # 其餘 28 支要個別跑（離線、免 token；2026-09-30 實查 worker/test/*.mjs 共 29 支，
-                                    #   含 swr.mjs 與新增的 tickdiag.mjs。舊記的「22 支」已過時）
+node test/sentinel.mjs              # 其餘 30 支要個別跑（離線、免 token；2026-10-23 實查 worker/test/*.mjs 共 31 支，
+                                    #   tickdiag.mjs 已隨 tick 班刪除，新增 routing.mjs／adminkey.mjs）
 for f in test/*.mjs; do node "$f" || echo FAIL $f; done   # 一次跑完全部（同 worker-deploy.yml 的 glob）
 npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
 ```
@@ -1169,7 +1017,7 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    - **量到之後才輪到決定 25／30**（優化計畫批次二 #9）。**在那之前任何調整都是猜**——
      `LIVE_TTL` 直接決定 `/live` 的 cf 快取行為，猜錯的代價是線上，而量它不用改任何程式。
    - **這件事目前沒有自動化**：沒有排程在收這兩個比例，也刻意不加（為了量一個一次性的決策
-     而長出一個常駐班不划算，同 tick 量測班的教訓）。要量就是人去打，把數字記回這一節。
+     而長出一個常駐班不划算，同 tick 量測班（已拆除）的教訓）。要量就是人去打，把數字記回這一節。
      **2026-09-30 補：已提供手動觸發的量測 workflow，仍刻意不排程**——`.github/workflows/measure-live-swr.yml`
      （workflow 名 `measure-live-swr`，**只有 `workflow_dispatch`**，`permissions: contents: read`、不 commit、
      不需 secret、不掛 notify-failure）跑 `tools/measure_live_swr.py`。
