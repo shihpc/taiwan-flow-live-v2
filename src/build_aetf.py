@@ -231,6 +231,8 @@ def main():
                         "aum": d["aum"], "source": f"issuer:{d['fallback_src']}"})
             cur.pop("not_advanced", None)
             cur.pop("stale", None)
+            if code not in out["etfs"]:   # 由超過沿用上限的舊快照救回：舊快照的集保規模已過期，不沿用
+                cur["twse_aum_yi"] = None
             out["etfs"][code] = cur
             out.setdefault("fallback_used", {})[code] = {
                 "issuer": d["fallback_src"], "from": before, "to": d["src_date"]}

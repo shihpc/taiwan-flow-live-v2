@@ -131,10 +131,13 @@ def test_dropped_still_offered_to_fallback(tmp_path, monkeypatch):
     prev = {"run_date": "2026-10-22", "etfs": {
         "OLDA": {"name": "olda", "src_date": "2026-09-21", "stocks": {"2330": [1, "x", 1.0]}},
         "OLDB": {"name": "oldb", "src_date": "2026-09-21", "stocks": {"2330": [1, "x", 1.0]}},
+        "OLDC": {"name": "oldc", "src_date": "2026-09-21", "stocks": {"2330": [1, "x", 1.0]}},
     }, "errors": {}}
+    prev["etfs"]["OLDA"]["twse_aum_yi"] = 5
     (tmp_path / "latest.json").write_text(json.dumps(prev), encoding="utf-8")
     monkeypatch.setattr(build_aetf, "OUTDIR", tmp_path)
-    monkeypatch.setattr(build_aetf, "list_active_etfs", lambda: [("OLDA", "olda"), ("OLDB", "oldb")])
+    monkeypatch.setattr(build_aetf, "list_active_etfs",
+                        lambda: [("OLDA", "olda"), ("OLDB", "oldb"), ("OLDC", "oldc")])
 
     def grab(code):
         raise RuntimeError("Holding 近 14 日無資料")
@@ -154,15 +157,21 @@ def test_dropped_still_offered_to_fallback(tmp_path, monkeypatch):
     def fetch_fallback(codes):
         seen.extend(codes)
         return {"OLDA": {"stocks": {"2317": [2, "y", 2.0]}, "src_date": "2026-10-22",
+                         "aum": 9, "fallback_src": "stub"},
+                # 補位資料不比舊快照新（同日、不同格式）→ 不得寫回
+                "OLDC": {"stocks": {"2317": [2, "y", 2.0]}, "src_date": "2026/09/21",
                          "aum": 9, "fallback_src": "stub"}}
     stub.fetch_fallback = fetch_fallback
     monkeypatch.setitem(sys.modules, "aetf_fallback", stub)
     build_aetf.main()
     out = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
-    assert set(seen) == {"OLDA", "OLDB"}
+    assert set(seen) == {"OLDA", "OLDB", "OLDC"}
     assert out["etfs"]["OLDA"]["src_date"] == "2026-10-22"
     assert out["etfs"]["OLDA"]["name"] == "olda"
     assert out["etfs"]["OLDA"]["source"] == "issuer:stub"
     assert "stale" not in out["etfs"]["OLDA"]
+    assert out["etfs"]["OLDA"]["twse_aum_yi"] is None   # 舊快照的集保規模已過期，不沿用
     assert "OLDB" not in out["etfs"]
-    assert set(out["errors"]) == {"OLDA", "OLDB"}
+    assert "OLDC" not in out["etfs"]
+    assert set(out.get("fallback_used", {})) == {"OLDA"}
+    assert set(out["errors"]) == {"OLDA", "OLDB", "OLDC"}
