@@ -173,6 +173,7 @@ def main():
         prev = {}
     today_tpe = datetime.now(TPE).date()   # 沿用上限以台北日計（runner 是 UTC，不可用 date.today()）
     cal_box = [None]                        # 延遲載入的行事曆（tuple 包一層，區分「未載入」與「載入結果為 None」）
+    dropped = {}                            # 超過沿用上限而未寫回 etfs 的舊快照（仍交給投信補位一次機會）
     for code, name in etfs:
         last = None
         for attempt in range(3):
@@ -209,6 +210,7 @@ def main():
                     out["etfs"][code] = carried
                     print(f"{code} {name}: 全數重試失敗，{why}", flush=True)
                 else:
+                    dropped[code] = prev[code]   # 仍交給下方投信補位一次機會（補位成功才寫回 etfs）
                     print(f"{code} {name}: 全數重試失敗，{why}；只列 errors", flush=True)
         time.sleep(0.3)   # FinMind 請求間節流（擴充後檔數上升）
 
@@ -219,9 +221,9 @@ def main():
     # 不得影響主幹 FinMind 的產出。
     try:
         import aetf_fallback
-        fb = aetf_fallback.fetch_fallback(list(out["etfs"]))
+        fb = aetf_fallback.fetch_fallback(list(out["etfs"]) + [c for c in dropped if c not in out["etfs"]])
         for code, d in fb.items():
-            cur = out["etfs"].get(code) or {}
+            cur = out["etfs"].get(code) or dict(dropped.get(code) or {})
             if str(d["src_date"]).replace("-", "/") <= str(cur.get("src_date") or "").replace("-", "/"):
                 continue   # 沒有比較新，不覆蓋
             before = cur.get("src_date")

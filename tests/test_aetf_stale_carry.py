@@ -122,3 +122,47 @@ def test_main_integration(tmp_path, monkeypatch):
     assert "OLD" not in out["etfs"]
     assert out["etfs"]["NEW"]["stale"] is True and out["etfs"]["NEW"]["src_date"] == "2026/10/21"
     assert "OK" in out["etfs"] and "stale" not in out["etfs"]["OK"]
+
+
+def test_dropped_still_offered_to_fallback(tmp_path, monkeypatch):
+    """超過上限被移出 etfs 的檔仍交給投信補位；補位拿到較新資料就寫回（名稱沿用舊快照）、
+    沒拿到就維持缺席。驗收 2026-10-23 指出的疑慮：否則已登記補位的檔會連補位機會一起失去。"""
+    import json
+    prev = {"run_date": "2026-10-22", "etfs": {
+        "OLDA": {"name": "olda", "src_date": "2026-09-21", "stocks": {"2330": [1, "x", 1.0]}},
+        "OLDB": {"name": "oldb", "src_date": "2026-09-21", "stocks": {"2330": [1, "x", 1.0]}},
+    }, "errors": {}}
+    (tmp_path / "latest.json").write_text(json.dumps(prev), encoding="utf-8")
+    monkeypatch.setattr(build_aetf, "OUTDIR", tmp_path)
+    monkeypatch.setattr(build_aetf, "list_active_etfs", lambda: [("OLDA", "olda"), ("OLDB", "oldb")])
+
+    def grab(code):
+        raise RuntimeError("Holding 近 14 日無資料")
+    monkeypatch.setattr(build_aetf, "grab_holding", grab)
+    monkeypatch.setattr(build_aetf, "grab_twse_aum", lambda c: None)
+    monkeypatch.setattr(build_aetf.time, "sleep", lambda s: None)
+    monkeypatch.setattr(build_aetf.twse_holidays, "load", lambda *a, **k: CAL)
+
+    class FixedDT(build_aetf.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return build_aetf.datetime(2026, 10, 23, 2, 30, tzinfo=tz)
+    monkeypatch.setattr(build_aetf, "datetime", FixedDT)
+    seen = []
+    stub = type(sys)("aetf_fallback_stub")
+
+    def fetch_fallback(codes):
+        seen.extend(codes)
+        return {"OLDA": {"stocks": {"2317": [2, "y", 2.0]}, "src_date": "2026-10-22",
+                         "aum": 9, "fallback_src": "stub"}}
+    stub.fetch_fallback = fetch_fallback
+    monkeypatch.setitem(sys.modules, "aetf_fallback", stub)
+    build_aetf.main()
+    out = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert set(seen) == {"OLDA", "OLDB"}
+    assert out["etfs"]["OLDA"]["src_date"] == "2026-10-22"
+    assert out["etfs"]["OLDA"]["name"] == "olda"
+    assert out["etfs"]["OLDA"]["source"] == "issuer:stub"
+    assert "stale" not in out["etfs"]["OLDA"]
+    assert "OLDB" not in out["etfs"]
+    assert set(out["errors"]) == {"OLDA", "OLDB"}

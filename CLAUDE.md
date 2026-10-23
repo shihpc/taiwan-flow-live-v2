@@ -587,7 +587,7 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 `00411A`／`00998A` 都卡在更前面的 `grab_holding`、落在 `errors`，根本沒走到 AUM 那一步。
 非台股型若混入，`grab_holding` 因無台股持股會落 `errors` 自動排除。**這是 postmkt 的上游，改口徑＝跨站變更。**
 
-**aetf 抓取失敗沿用舊快照的上限（2026-10-23，使用者裁定 A3″-a，觀察兩週）**：`src/build_aetf.py` 某檔三次重試皆失敗時，原本無條件沿用上一份 `latest.json` 的該檔並標 `stale`，00996A 因此自 10-06 起一直頂著 `src_date=2026-09-21` 的持股。現改為由 `carry_decision` 判定：舊快照 `src_date` 之後到今天（台北，含今天）的**交易日數**超過 `STALE_MAX_TRADING_DAYS`（5）就不沿用，只留在 `errors`；交易日判定走 `src/twse_holidays.py`（fail-open 只排週末，此時國定假日會多算一天、偏向較早停止）；`src_date` 缺或解析不了一律不沿用。下游影響（讀碼推論，尚未在真實班次觀測）：`diff.json` 讀的是全部日檔歷史，不受影響（該檔照列 `laggards`）；Worker `fxCardAetf2` 的 `foot` 用 `errors` 計數，不變；postmkt aetf tab 的比較候選、ETF 總覽與個股側欄「主動ETF 持有」不再出現該檔。投信補位（`aetf_fallback`）只看 `out["etfs"]`，被移出的檔不會被補位，這是既有限制、未改。「抓取成功但 `src_date` 沒前進」（`not_advanced`）不在此上限內，由 `grab_holding` 的 14 日查詢窗口自然截斷。測試 `tests/test_aetf_stale_carry.py`。**觀察到 2026-11-06**：看 aetf 班 log 的「不沿用」行與 00996A／00415A 是否恢復。
+**aetf 抓取失敗沿用舊快照的上限（2026-10-23，使用者裁定 A3″-a，觀察兩週）**：`src/build_aetf.py` 某檔三次重試皆失敗時，原本無條件沿用上一份 `latest.json` 的該檔並標 `stale`，00996A 因此自 10-06 起一直頂著 `src_date=2026-09-21` 的持股。現改為由 `carry_decision` 判定：舊快照 `src_date` 之後到今天（台北，含今天）的**交易日數**超過 `STALE_MAX_TRADING_DAYS`（5）就不沿用，只留在 `errors`；交易日判定走 `src/twse_holidays.py`（fail-open 只排週末，此時國定假日會多算一天、偏向較早停止）；`src_date` 缺或解析不了一律不沿用。下游影響（讀碼推論，尚未在真實班次觀測）：`diff.json` 讀的是全部日檔歷史，不受影響（該檔照列 `laggards`）；Worker `fxCardAetf2` 的 `foot` 用 `errors` 計數，不變；postmkt aetf tab 的比較候選、ETF 總覽與個股側欄「主動ETF 持有」不再出現該檔。被上限移出的檔**仍交給投信補位一次**（`dropped` 併入 `fetch_fallback` 的輸入；補位拿到比舊快照新的資料才寫回 `etfs`，名稱等欄位沿用舊快照，否則維持缺席）——2026-10-23 驗收指出若不這樣做，`FETCHERS` 已登記的檔（00403A／00981A／00980A／00985A／00999A）一旦 FinMind 長期抓不到就連補位機會一起失去；00996A 不在登記名單，實際不受影響。「抓取成功但 `src_date` 沒前進」（`not_advanced`）不在此上限內，由 `grab_holding` 的 14 日查詢窗口自然截斷。測試 `tests/test_aetf_stale_carry.py`。**觀察到 2026-11-06**：看 aetf 班 log 的「不沿用」行與 00996A／00415A 是否恢復。
 
 **日期／時戳欄位語意一律查 `postmkt/docs/date-semantics.md`**（跨五站的唯一對照表）。
 其中 Worker `/live` 的 **`ts` ＝指數列時戳**（2026-09-08 C 案落地後的新語意，取代舊的
@@ -915,6 +915,8 @@ context 測**——Playwright 攔截模式會停用瀏覽器 HTTP cache，有 ro
 | `/line/webhook` | 寫 KV `line:uid`（只用於 `/alerts/test` 回顯，**不**用於發送——發送用 secret `LINE_USER_ID`） | **不改**：LINE 平台送不出自訂標頭；正解是驗 `x-line-signature`（需 channel secret），另案 |
 | `/fundamentals`／`/chips`／`/technical` | 打 FinMind，結果寫 KV 快取（每 id×日一把，TTL 2 天） | 不改：公開唯讀功能，快取寫入是實作細節（殘餘風險：可被用來消耗 FinMind 額度，每次最多 30 檔） |
 | `/live`／`/livediag`／`/status`／`/cards/data`／`/replay`／`/jobs`／`/alerts/log`／`/uswatch`／`/` | 唯讀（`/live`／`/status`／`/cards/data` 只寫 cf 快取） | 不變 |
+
+**殘餘風險（既有行為、非本批引入，2026-10-23 驗收補記、未改程式）**：不帶 key 的 `dry=1` 仍有少量寫入——`runBackup`／`runSummaryDispatch`／`runChain` 在「產物已落地」時會寫 `bkfired`／`sumfired` 的 `produced` 狀態（反映真實狀態、危害低）；`/evening?dry=1` 的 `runEvening` 在 `pushDailyCards` 拋錯時的 catch 分支仍會 `alertJob`（每日每 tag 去重，至多一則）。
 
 **規則**：①請求標頭 `x-admin-key` 必須與 secret `env.ADMIN_KEY` 相等（固定時間逐 byte 比較，長度不同直接拒絕）；
 ②**不從 query string 讀 key**（會進日誌、瀏覽器歷史、Referer）——放 query 等同沒帶；③`ADMIN_KEY` **未設定或為空字串

@@ -56,7 +56,7 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 | Worker frame 存 KV（`frame` 角色，`storeFrame` 一帶） | 休市日不寫 frame／`series:<date>`／`fi:<date>`——**假歸檔的上游**（09-25／09-28 KV 殘留快照）。行事曆沿用 `loadHolidayCal`（cf 快取），每分鐘一次 frame 不得因此多打 raw（確認快取命中路徑） |
 | `runSentinel` | 休市日不探測 FinMind、不 dispatch（比照週末：`scheduledRole` 本來就不排週末） |
 | `runHealthCheck`（eve／morn） | 休市日不對「當日應有產物」告警（比照週末的既有處理）；假日隔天的晨間健檢以「前一交易日」為準 |
-| `runTickSample`、`runMorning`、`runBackup`／`backupPipelines`、`runAlerts`、其餘平日才跑的班 | 逐一盤點：凡是以「平日」為前提、會在休市日空打 API／dispatch／告警者，比照週末跳過；盤點結果（哪些改、哪些刻意不改與理由）寫進 CLAUDE.md。**iching dispatch 不在本批**（另一 session 負責） |
+| `runTickSample`（2026-10-23 已隨 tick 量測班拆除）、`runMorning`、`runBackup`／`backupPipelines`、`runAlerts`、其餘平日才跑的班 | 逐一盤點：凡是以「平日」為前提、會在休市日空打 API／dispatch／告警者，比照週末跳過；盤點結果（哪些改、哪些刻意不改與理由）寫進 CLAUDE.md。**iching dispatch 不在本批**（另一 session 負責） |
 | `src/build_baseline.py` 假日空等 | 休市日不空等（比照週末），沿用 `src/twse_holidays.py` |
 | 前端 `index.html`：`prevWeekday`／`liveStatus`／`liveDataDate` 後備／`ovRrgTaipeiToday`（週末走定格）／`ovRrgBaseDays` | 同源讀 `data/twse_holidays.json`（非阻塞、失敗 fail-open）；休市日頂列顯示「休市定格」、輪動雷達直接走定格（比照週末），前一交易日跳過休市日 |
 
@@ -66,7 +66,7 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 | Worker frame 存 KV | 已實作 | `worker/src/index.js` `scheduled` handler 的 frame 分支（`holidaySkip`）；行事曆走 `holidayCalCached`（isolate 記憶化 30 分／失敗 5 分＋in-flight 共用，其下仍是 `loadHolidayCal` 的 cf 快取）——連續每分鐘 frame 同一 isolate 只讀 1 次（`test/holidays2.mjs` 實測） |
 | `runSentinel` | 已實作 | handler 的 sentinel 分支 |
 | `runHealthCheck` | 已實作 | `opts.marketClosed` → 只留 `HEALTH_NON_TW`（us／lastweek／meta／news／morning）；全濾光才零副作用 return。**news 假日照檢**（使用者裁決 2026-09-29：news 每日由 Worker dispatch、不看休市）；morning 因 06:47 照跑而照檢；summary-am／台股日產物不檢。假日隔天：eve／morn 每項都是「今日」產物，無需改基準 |
-| `runTickSample`、`runBackup`（TW 班）、`runAlerts`、晚場班、am summary 協調班 | 已實作（跳過） | handler 各分支；盤點表與「刻意不改」（us 班／`runUsCatchup`／news／iching／`alertJob`）理由見 CLAUDE.md「休市日（國定假日）各排程角色」節 |
+| `runTickSample`（2026-10-23 已拆除）、`runBackup`（TW 班）、`runAlerts`、晚場班、am summary 協調班 | 已實作（跳過） | handler 各分支；盤點表與「刻意不改」（us 班／`runUsCatchup`／news／iching／`alertJob`）理由見 CLAUDE.md「休市日（國定假日）各排程角色」節 |
 | `runMorning`（晨間圖卡渲染＋推播）、`dispatchMorning`（06:47） | **刻意不改＝維持改動前、國定假日照跑照推** | **使用者裁決 2026-09-29：晨間產品每天出、照推 LINE**（改動前兩者只守週末，週末路徑不變）。同窗的 am summary 協調班仍擋——summary.yml 進場查到休市自己會 skip，擋與不擋產出相同 |
 | 行事曆讀取硬上限 | 已實作（驗收退回 M1 後補） | `holidayCalCached` 以 `Promise.race` 包 `HOLIDAY_HARD_TIMEOUT_MS`（6 秒）：body 或 fetch 不理 signal 而永不回時，逾時 `{cal:null, err:"timeout"}`、寫失敗記憶、清 in-flight → fail-open；否則同 isolate 之後每次 scheduled 都會卡在同一個 promise |
 | `src/build_baseline.py` | 已實作 | `fresh_wait_skip`＋收集交易日迴圈跳過休市日（`src/twse_holidays.py`）；測試 `tests/test_baseline_holidays.py` |
