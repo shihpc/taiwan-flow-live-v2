@@ -1808,7 +1808,11 @@ function ovRrgFrozenView(){
   }finally{ OV_RRG_BASE=sB; OV_RRG_BASE_IDX=sI; OV_RRG=sR; }
   return out;
 }
-// 候補清單側欄：三頁——改善象限（資金剛輪入）／領先象限（動能領先）／位移異常。
+// 候補清單側欄：三頁——改善象限（資金剛輪入）／領先象限（依位移）／位移異常。
+// 前兩頁都依 move30（最新取樣點與 30 分前座標的歐氏距離＝30 分淨位移）由大到小排序，第三頁依 z 遞減。
+// 第二頁按鈕原寫「動能領先」，但排序鍵是位移、不是 RS-Momentum 水準，2026-10-23 改成「領先象限（依位移）」
+// 與實際排序一致（只改顯示文字；data-ovrrg-tab 值仍是 "lead"、排序邏輯未動。postmkt 同型清單依 RS-Ratio
+// 排序，名為「相對強度領先（領先象限）」，兩站排序鍵不同，所以名稱刻意不同）。
 // 從**全部**產業鏈撈（不受畫布 Top N 限制）——畫布外的小族群是主要發現管道。
 // **三頁一律列出全部符合者，不截斷**（理由見 OV_RRG_IMPMAX 上方；三頁同規則，
 // 免得使用者要記「這頁全、那頁截」）。
@@ -1833,7 +1837,7 @@ function ovRrgSideHtml(rows,picks){
     : rows.filter(r=>r.quad===want).sort((a,b)=>b.move30-a.move30);
   const tabs=`<div class="ovrrgtabs">`+
     `<button class="seg2 ${tab==="in"?"on":""}" data-ovrrg-tab="in">資金剛輪入</button>`+
-    `<button class="seg2 ${tab==="lead"?"on":""}" data-ovrrg-tab="lead">動能領先</button>`+
+    `<button class="seg2 ${tab==="lead"?"on":""}" data-ovrrg-tab="lead" title="領先象限的產業鏈，依近 30 分位移由大到小排序">領先象限（依位移）</button>`+
     `<button class="seg2 ${tab==="odd"?"on":""}" data-ovrrg-tab="odd">位移異常</button>`+
     (picks.size?`<button class="seg2" data-ovrrg-clear>清除選取(${picks.size})</button>`:"")+`</div>`;
   // 空清單提示三頁各自合理：象限頁說「沒有落在該象限的」；位移異常頁要分「停止判定」與「真的沒有」
