@@ -175,3 +175,39 @@ def test_dropped_still_offered_to_fallback(tmp_path, monkeypatch):
     assert "OLDC" not in out["etfs"]
     assert set(out.get("fallback_used", {})) == {"OLDA"}
     assert set(out["errors"]) == {"OLDA", "OLDB", "OLDC"}
+
+
+def test_normal_fallback_keeps_twse_aum(tmp_path, monkeypatch):
+    """一般補位（抓取成功的檔、≤5 日沿用中的檔）不得清掉 twse_aum_yi——只有從 dropped 救回的才清。"""
+    import json
+    prev = {"run_date": "2026-10-22", "etfs": {
+        "ST1": {"name": "st1", "src_date": "2026-10-21", "twse_aum_yi": 8, "stocks": {"2330": [1, "x", 1.0]}},
+    }, "errors": {}}
+    (tmp_path / "latest.json").write_text(json.dumps(prev), encoding="utf-8")
+    monkeypatch.setattr(build_aetf, "OUTDIR", tmp_path)
+    monkeypatch.setattr(build_aetf, "list_active_etfs", lambda: [("OK1", "ok1"), ("ST1", "st1")])
+
+    def grab(code):
+        if code == "OK1":
+            return {"stocks": {"2330": [1, "x", 1.0]}, "src_date": "2026-10-21", "units": None, "aum": 1}
+        raise RuntimeError("Holding 近 14 日無資料")
+    monkeypatch.setattr(build_aetf, "grab_holding", grab)
+    monkeypatch.setattr(build_aetf, "grab_twse_aum", lambda c: 11)
+    monkeypatch.setattr(build_aetf.time, "sleep", lambda s: None)
+    monkeypatch.setattr(build_aetf.twse_holidays, "load", lambda *a, **k: CAL)
+
+    class FixedDT(build_aetf.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return build_aetf.datetime(2026, 10, 23, 2, 30, tzinfo=tz)
+    monkeypatch.setattr(build_aetf, "datetime", FixedDT)
+    stub = type(sys)("aetf_fallback_stub")
+    stub.fetch_fallback = lambda codes: {
+        c: {"stocks": {"2317": [2, "y", 2.0]}, "src_date": "2026-10-22", "aum": 9, "fallback_src": "stub"}
+        for c in ("OK1", "ST1")}
+    monkeypatch.setitem(sys.modules, "aetf_fallback", stub)
+    build_aetf.main()
+    out = json.loads((tmp_path / "latest.json").read_text(encoding="utf-8"))
+    assert set(out["fallback_used"]) == {"OK1", "ST1"}
+    assert out["etfs"]["OK1"]["twse_aum_yi"] == 11
+    assert out["etfs"]["ST1"]["twse_aum_yi"] == 8
