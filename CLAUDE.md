@@ -587,6 +587,8 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 `00411A`／`00998A` 都卡在更前面的 `grab_holding`、落在 `errors`，根本沒走到 AUM 那一步。
 非台股型若混入，`grab_holding` 因無台股持股會落 `errors` 自動排除。**這是 postmkt 的上游，改口徑＝跨站變更。**
 
+**aetf 抓取失敗沿用舊快照的上限（2026-10-23，使用者裁定 A3″-a，觀察兩週）**：`src/build_aetf.py` 某檔三次重試皆失敗時，原本無條件沿用上一份 `latest.json` 的該檔並標 `stale`，00996A 因此自 10-06 起一直頂著 `src_date=2026-09-21` 的持股。現改為由 `carry_decision` 判定：舊快照 `src_date` 之後到今天（台北，含今天）的**交易日數**超過 `STALE_MAX_TRADING_DAYS`（5）就不沿用，只留在 `errors`；交易日判定走 `src/twse_holidays.py`（fail-open 只排週末，此時國定假日會多算一天、偏向較早停止）；`src_date` 缺或解析不了一律不沿用。下游影響（讀碼推論，尚未在真實班次觀測）：`diff.json` 讀的是全部日檔歷史，不受影響（該檔照列 `laggards`）；Worker `fxCardAetf2` 的 `foot` 用 `errors` 計數，不變；postmkt aetf tab 的比較候選、ETF 總覽與個股側欄「主動ETF 持有」不再出現該檔。投信補位（`aetf_fallback`）只看 `out["etfs"]`，被移出的檔不會被補位，這是既有限制、未改。「抓取成功但 `src_date` 沒前進」（`not_advanced`）不在此上限內，由 `grab_holding` 的 14 日查詢窗口自然截斷。測試 `tests/test_aetf_stale_carry.py`。**觀察到 2026-11-06**：看 aetf 班 log 的「不沿用」行與 00996A／00415A 是否恢復。
+
 **日期／時戳欄位語意一律查 `postmkt/docs/date-semantics.md`**（跨五站的唯一對照表）。
 其中 Worker `/live` 的 **`ts` ＝指數列時戳**（2026-09-08 C 案落地後的新語意，取代舊的
 「全體有分類個股 max(date)」）：取指數列 `001`（加權指數）的 `date`，`001` 取不到退 `101`
@@ -683,6 +685,7 @@ intraday.yml 照 cron `10 6 * * 1-5` 觸發（實際 commit 落在台北 19:43�
   `ok=0` ＋ 延後紅燈模式，**禁止 `continue-on-error`**（會被靜默吞掉，理由寫在該檔最後一步註解）。
   ③commit 步驟的 pages dispatch 判斷已改成 `grep -qE '^data/rrg_(base|frozen)\.json$'`——
   定格檔是前端以同源相對路徑載入的產物，不 dispatch 就只進 repo、不上 Pages。
+- **輪動雷達候補清單第二頁按鈕 2026-10-23 由「動能領先」改為「領先象限（依位移）」**（使用者裁定 A2′-b）：該頁與「資金剛輪入」頁同依 `move30`（30 分淨位移）遞減排序，原名與排序鍵不符；只改顯示文字，`data-ovrrg-tab="lead"` 與排序未動。postmkt 盤後版同型清單依 RS-Ratio 排序、名為「相對強度領先（領先象限）」，兩站排序鍵不同、名稱刻意不同。
 - **前端降級順序**（`function ovRrgHtml`）：**台北週末**（`function ovRrgTaipeiToday` 取星期，
   沿用 `liveStatus` 既有做法）直接走定格、連 `/replay` 都不打——降級②那兩句（「盤前時段」
   「盤中資料累積中」）依的是**牆鐘**，週末說出口是**假的斷言**（覆驗實測週六 00:15/03:00/09:10
