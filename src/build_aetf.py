@@ -30,6 +30,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fin
+import twse_holidays
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTDIR = ROOT / "data" / "aetf"
@@ -103,6 +104,52 @@ def grab_holding(code: str) -> dict:
             "aum": round(aum) if aum else None}
 
 
+# ---------- 抓取失敗時沿用舊快照的天數上限（2026-10-23，使用者裁定 A3″-a）----------
+# 起因：00996A 自 10-06 起 FinMind 連續抓不到，main() 的「全數重試失敗 → 沿用上次快照＋stale」
+#   沒有上限，每班把同一份 src_date=2026-09-21 的持股原封不動寫回 latest.json，近一個月。
+#   沿用本意是「偶發一班失敗時不讓該檔缺席」，不是無限期頂替。
+# 規則：舊快照 src_date 之後、到今天（台北）為止（含今天）經過的**交易日數** > STALE_MAX_TRADING_DAYS
+#   就不沿用，該檔只留在 out["errors"]。交易日＝非週末且非行事曆休市日（src/twse_holidays.py，
+#   fail-open：行事曆讀不到或年度未涵蓋時只排週末——此時國定假日會被多算一天，偏向「較早停止沿用」）。
+# src_date 缺或解析不了 → **不沿用**：無法證明它夠新，而本規則要擋的正是「不知道多舊的資料被無限期頂替」；
+#   不沿用的代價只是該檔當班缺席（errors 照列，下游本來就要處理缺席），沿用的代價可能是無上限的舊持股。
+STALE_MAX_TRADING_DAYS = 5
+
+
+def parse_src_date(v) -> date | None:
+    """src_date 可能是 YYYY/MM/DD 或 YYYY-MM-DD；其他形狀回 None。"""
+    s = str(v or "").strip().replace("/", "-")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def trading_days_since(src: date, today: date, cal) -> int:
+    """(src, today] 區間內的交易日數；src >= today 回 0。cal＝twse_holidays.load() 結果（可為 None）。"""
+    n, d = 0, src + timedelta(days=1)
+    while d <= today:
+        if not twse_holidays.is_closed(d.isoformat(), cal):
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
+def carry_decision(prev_entry: dict, today: date, cal,
+                   max_days: int = STALE_MAX_TRADING_DAYS) -> tuple[bool, int | None, str]:
+    """回 (是否沿用, 交易日落後數或 None, 說明)。純函式，供 main() 與離線測試共用。"""
+    src = parse_src_date((prev_entry or {}).get("src_date"))
+    if src is None:
+        return False, None, f"舊快照 src_date 無法解析（{(prev_entry or {}).get('src_date')!r}），不沿用"
+    lag = trading_days_since(src, today, cal)
+    if lag > max_days:
+        return False, lag, (f"舊快照 src={src.isoformat()} 已落後 {lag} 個交易日"
+                            f"（> 上限 {max_days}），不沿用")
+    return True, lag, f"舊快照 src={src.isoformat()} 落後 {lag} 個交易日（≤ {max_days}），沿用"
+
+
 # ---------- TWSE ETFortune AUM（集保口徑，全 ETF 通用；前端規模欄顯示用） ----------
 def grab_twse_aum(code: str):
     try:
@@ -124,6 +171,8 @@ def main():
         prev = (json.loads((OUTDIR / "latest.json").read_text(encoding="utf-8"))).get("etfs", {})
     except Exception:
         prev = {}
+    today_tpe = datetime.now(TPE).date()   # 沿用上限以台北日計（runner 是 UTC，不可用 date.today()）
+    cal_box = [None]                        # 延遲載入的行事曆（tuple 包一層，區分「未載入」與「載入結果為 None」）
     for code, name in etfs:
         last = None
         for attempt in range(3):
@@ -150,10 +199,17 @@ def main():
                     time.sleep(3 * (attempt + 1))
         if last is not None:
             out["errors"][code] = str(last)
-            if code in prev:   # 沿用上次快照，並標記 stale 供前端/診斷辨識
-                carried = dict(prev[code]); carried["stale"] = True
-                out["etfs"][code] = carried
-                print(f"{code} {name}: 全數重試失敗，沿用上次快照（src={carried.get('src_date')}）", flush=True)
+            if code in prev:   # 沿用上次快照，並標記 stale 供前端/診斷辨識——但有交易日數上限
+                if cal_box[0] is None:   # 行事曆只在真的需要時讀一次（load 不拋、失敗回 None＝只排週末）
+                    cal_box[0] = (twse_holidays.load(),)
+                ok, lag, why = carry_decision(prev[code], today_tpe, cal_box[0][0])
+                if ok:
+                    carried = dict(prev[code])
+                    carried["stale"] = True
+                    out["etfs"][code] = carried
+                    print(f"{code} {name}: 全數重試失敗，{why}", flush=True)
+                else:
+                    print(f"{code} {name}: 全數重試失敗，{why}；只列 errors", flush=True)
         time.sleep(0.3)   # FinMind 請求間節流（擴充後檔數上升）
 
     # ---- 投信端點補位（2026-07-31）----
