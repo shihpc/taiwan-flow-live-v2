@@ -32,6 +32,8 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
     22:30 才續算。am 週末守門收週二～六（週六補週五）、告警 tag 改 `iching-am-dispatch-err`／`secret-missing-iching-am` 與當晚分家；
     同分撞點只有 am summary 主窗 `*/5 23 * * *`（每週 5 撞點，各帶 event.cron 精確分流）。`/status` iching `dueHour 23.75` 不動。
     已知限制：週六 07:10 失敗不告警（`alertJob` 週末 skip）。細節見 `CLAUDE.md`「其他 scheduled 角色」iching 條。
+- **🗑 台指期 tick 量測班已於 2026-10-23 拆除**（cron、`runTickSample`、`/tickdiag`、`test/tickdiag.mjs` 全數移除；
+  N=4 實測結論與判準推論見 `CLAUDE.md`「台指期 tick 量測班（2026-09-09～2026-10-23，已拆除）」節）。以下為上線當時的紀錄，保留供對照。
 - **🔬 台指期 tick 量測班上線（2026-09-09）——暫時班，只量測、不下判準**：
   CF cron 第 20 條 `*/5 1-11 * * 2-6`（台北平日 09:00–19:55 每 5 分，132 slot/交易日）
   ＋唯讀端點 `GET /tickdiag`。程式在 `worker/src/index.js` 的 `export async function runTickSample`
