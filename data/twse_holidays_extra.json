@@ -1,0 +1,7 @@
+{
+ "schema": 1,
+ "note": "TWSE OpenAPI holidaySchedule 不會列的臨時停市（颱風等），由 src/build_holidays.py 每次重建時併入 twse_holidays.json。規格 docs/holiday-calendar.md §1b。",
+ "closed": {
+  "2026-10-23": "颱風停市"
+ }
+}

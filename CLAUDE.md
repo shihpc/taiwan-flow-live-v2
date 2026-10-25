@@ -575,6 +575,7 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 （見 `PROJECT_SUMMARY.md`「五、目前待辦與已知限制」）。
 **`data/twse_holidays.json`（2026-09-28）是家族共用休市行事曆的唯一來源**（契約見 `docs/holiday-calendar.md` §1）：
 本 repo Worker `/status`、taiwan-flows、claude-harness 看門狗以 raw URL 讀它；`schema`／`years`／`closed` 改形狀＝跨站變更。
+**颱風等臨時停市（2026-10-25 起）**：TWSE `holidaySchedule` 不會列，改登在手寫清單 `data/twse_holidays_extra.json`，`src/build_holidays.py` 每次重建時併入（只限已涵蓋年度、產物形狀不變、清單壞檔＝exit 1 不寫檔）；首筆 `2026-10-23 颱風停市`。規格 `docs/holiday-calendar.md` §1b。
 
 **aetf 入池口徑 2026-08-29 放寬**（`src/build_aetf.py:54` `list_active_etfs`，commit `5d046c0`）：
 由「`category=='domestic'` 且 `type=='twse'` 且 A 結尾」改為「**A 結尾且 `category != 'foreign'`**」
