@@ -5,6 +5,7 @@ name: holidays
 # - 失敗不覆寫：build_holidays.py 抓取失敗／形狀不對／休市 0 筆 → 不寫檔、exit 1 → 本 job 紅＋notify-failure。
 # - 內容無變化（忽略 fetched_at）時 builder 不寫檔 → git diff 空 → 不 commit。
 #   不用 tools/noop_guard.py：它只忽略頂層 generated_at／built_at，本檔的時戳鍵是 fetched_at。
+# - 手動補登（2026-10-25）：data/twse_holidays_extra.json 的臨時停市（颱風等）每次重建都併入；補登後手動 dispatch 本 workflow。
 # - 不 dispatch pages：批次一沒有任何前端讀此檔（Worker 走 raw.githubusercontent.com）。
 # 時段選定理由：每週日 02:17 UTC＝台北週日 10:17。本 repo 既有帶 cron 的 workflow 全排在平日或
 # 週六 08:00（meta）、週一 09:00（lastweek）、週日 22:10 UTC（us），週日上午沒有任何班；

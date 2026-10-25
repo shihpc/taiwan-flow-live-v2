@@ -142,3 +142,91 @@ def test_corrupt_old_file_treated_as_absent(tmp_path):
     out.write_text("{not json", encoding="utf-8")
     assert bh.run(out, fetch=fx(ROWS_2026), now=NOW1) == 0
     assert read(out)["years"] == [2026]
+
+
+# ---- 手動補登清單（2026-10-25 使用者裁定 A）----
+
+def write_extra(tmp_path: Path, obj) -> Path:
+    p = tmp_path / "extra.json"
+    p.write_text(obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def test_extra_added_to_closed_and_names(tmp_path):
+    out = tmp_path / "h.json"
+    ex = write_extra(tmp_path, {"schema": 1, "closed": {"2026-10-23": "颱風停市"}})
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW1, extra_path=ex) == 0
+    d = read(out)
+    assert "2026-10-23" in d["closed"] and d["names"]["2026-10-23"] == "颱風停市"
+    assert d["closed"] == sorted(d["closed"]) and list(d["names"]) == d["closed"]
+    assert d["years"] == [2026]
+    assert set(d) == {"schema", "source", "fetched_at", "years", "closed", "names", "raw_n"}
+
+
+def test_no_extra_file_is_identical_to_before(tmp_path):
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    assert bh.run(a, fetch=fx(ROWS_2026), now=NOW1) == 0
+    assert bh.run(b, fetch=fx(ROWS_2026), now=NOW1, extra_path=tmp_path / "missing.json") == 0
+    assert a.read_bytes() == b.read_bytes()
+
+
+def test_extra_survives_twse_rebuild(tmp_path):
+    out = tmp_path / "h.json"
+    ex = write_extra(tmp_path, {"schema": 1, "closed": {"2026-10-23": "颱風停市"}})
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW1, extra_path=ex) == 0
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW2, extra_path=ex) == 0
+    assert "2026-10-23" in read(out)["closed"]
+    # 從清單刪掉（同年度仍由 TWSE 整年覆寫）→ 下一班就消失
+    ex2 = write_extra(tmp_path, {"schema": 1, "closed": {}})
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW2, extra_path=ex2) == 0
+    assert "2026-10-23" not in read(out)["closed"]
+
+
+def test_extra_year_not_covered_is_skipped(tmp_path, capsys):
+    out = tmp_path / "h.json"
+    ex = write_extra(tmp_path, {"schema": 1, "closed": {"2027-07-01": "颱風停市"}})
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW1, extra_path=ex) == 0
+    d = read(out)
+    assert "2027-07-01" not in d["closed"] and d["years"] == [2026]
+    assert "略過" in capsys.readouterr().out
+
+
+def test_extra_does_not_rename_twse_day(tmp_path):
+    out = tmp_path / "h.json"
+    ex = write_extra(tmp_path, {"schema": 1, "closed": {"2026-09-25": "別名"}})
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW1, extra_path=ex) == 0
+    assert read(out)["names"]["2026-09-25"] == "中秋節"
+
+
+def test_extra_kept_for_old_year_after_rollover(tmp_path):
+    out = tmp_path / "h.json"
+    ex = write_extra(tmp_path, {"schema": 1, "closed": {"2026-10-23": "颱風停市"}})
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW1, extra_path=ex) == 0
+    rows_2027 = [{"Name": "中華民國開國紀念日", "Date": "1160101", "Weekday": "五", "Description": "依規定放假1日。"}]
+    assert bh.run(out, fetch=fx(rows_2027), now=NOW2, extra_path=ex) == 0
+    d = read(out)
+    assert d["years"] == [2026, 2027] and "2026-10-23" in d["closed"]
+
+
+@pytest.mark.parametrize("bad", [
+    "{not json",
+    {"schema": 2, "closed": {}},
+    {"schema": True, "closed": {}},
+    {"schema": 1, "closed": ["2026-10-23"]},
+    {"schema": 1, "closed": {"2026/10/23": "x"}},
+    {"schema": 1, "closed": {"2026-02-30": "x"}},
+    {"schema": 1, "closed": {"2026-10-23": ""}},
+    {"schema": 1, "closed": {"2026-10-23": 1}},
+])
+def test_bad_extra_fails_without_writing(tmp_path, bad):
+    out = tmp_path / "h.json"
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW1) == 0
+    before = out.read_bytes()
+    ex = write_extra(tmp_path, bad)
+    assert bh.run(out, fetch=fx(ROWS_2026), now=NOW2, extra_path=ex) == 1
+    assert out.read_bytes() == before
+
+
+def test_repo_extra_file_is_valid():
+    d = bh.load_extra(bh.DEFAULT_EXTRA)
+    assert d.get("2026-10-23") == "颱風停市"

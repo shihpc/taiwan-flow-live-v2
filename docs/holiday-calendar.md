@@ -22,6 +22,21 @@ taiwan-flows 判 `missing`、重試後亮紅開 issue；Worker `/status` 與 cla
 - 排程：`.github/workflows/holidays.yml`，每週一次＋`workflow_dispatch`，比照其他 workflow 掛 `notify-failure`；
   內容無變化（忽略 `fetched_at`）不 commit。
 
+### 1b. 手動補登清單 `data/twse_holidays_extra.json`（2026-10-25 使用者裁定 A）
+
+- **起因**：2026-10-23 颱風停市，TWSE OpenAPI `holidaySchedule` 事後仍未列入（10-25 實查 27 筆、無 `1151023`），
+  照原流程家族行事曆永遠不會有這一天。直接改 `twse_holidays.json` 無效——下一班 `holidays.yml` 會以 TWSE 內容整年覆寫。
+- **格式**：`{"schema": 1, "note": "…", "closed": {"YYYY-MM-DD": "名稱"}}`（`note` 等其他鍵僅供說明、不讀）。
+- **合併規則**（`src/build_holidays.py` 的 `load_extra`／`apply_extra`）：每次重建都併入 `closed`／`names`；
+  **只併入已在 `years` 內的年度**（未涵蓋的年度略過並印 warning——年度未涵蓋＝未知，只標一天會讓消費端誤以為該年已知）；
+  TWSE 已列同一天時沿用 TWSE 名稱。產物 **schema 與鍵不變**，消費端零改動，補登日只多出在 `closed`／`names`。
+- **失敗語意**：清單檔不存在＝沒有補登；壞檔／`schema` 不是整數 1／`closed` 不是物件／日期格式不合或不存在／名稱非空字串以外
+  → 視同抓取失敗：不寫檔、exit 1（workflow 紅燈＋issue）。手寫檔寫錯要大聲失敗，不能默默產出少了補登日的行事曆。
+- **何時補登**：TWSE 宣布臨時停市（颱風等）後，直接在清單加一行並手動 dispatch `holidays.yml`；不需等 TWSE。
+  若之後 TWSE 自己補列，清單條目可留著（無害）或刪除。
+- **已知限制**：跨年後舊年度改由舊檔保留（§1「合併」），此時才從清單刪掉舊年度的條目，舊檔裡那天不會被移除，需手動處理。
+- **事後補登的效果邊界**：只影響之後的判定（例如「往回數交易日」跳過 10-23）；不會回頭改寫任何已產出的資料或已發出的告警。
+
 ## 2. 消費端共同規則
 
 - 讀不到／壞檔／年度未涵蓋 → **fail-open 退回現行行為（只排週末）**，不得因行事曆掛掉而擋掉真交易日或拋例外。
