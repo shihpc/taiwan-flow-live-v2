@@ -36,6 +36,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "backtest" / "cache"
+# 個股名單讀凍結快照、不讀每月重建的 data/classify.json（2026-10-28 使用者裁定）：
+# 快照＝data/classify.json @ 9dab5e9（2026-07-18 月重建版，3,118 檔），即 report_sorting.md 07-27 產出時的版本。
+# 讀現行檔時，月重建會讓次產業樣本變動，backtest-regen 的逐字比對因此每月必紅（2026-10-01 run 36923660384）。
+CLASSIFY_SNAPSHOT = ROOT / "backtest" / "classify_snapshot.json"
 START, END = date(2025, 6, 15), date(2026, 7, 1)  # 含訊號期前 5 日基準與 T+3 前瞻
 
 
@@ -76,7 +80,7 @@ def api(dataset: str, d: str) -> list:
 
 
 def classify() -> dict:
-    return json.loads((ROOT / "data" / "classify.json").read_text(encoding="utf-8"))["map"]
+    return json.loads(CLASSIFY_SNAPSHOT.read_text(encoding="utf-8"))["map"]
 
 
 def wgz(p: Path, obj):
