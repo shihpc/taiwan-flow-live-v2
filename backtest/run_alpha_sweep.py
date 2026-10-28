@@ -9,7 +9,7 @@
 # **本檔不得自行增刪候選、不得改判準門檻**——那會讓「先註冊後測」失去意義。
 #
 # 沿用既有程式（不重造）：
-#   run_sorting.load()               快取載入（price_*.json.gz / inst_*.json.gz / classify.json）
+#   run_sorting.load()               快取載入（price_*.json.gz / inst_*.json.gz / backtest/classify_snapshot.json）
 #   run_sorting.build_stock_samples()樣本結構（27 個 key，含 e1/e3、流動性過濾、排除 ETF）
 #   run_sorting.stat()/fmt()/monthly() 統計與輸出格式
 #   run_sorting.max_tie_rate()       排序欄平手率診斷（本檔只印診斷，不當判準）
@@ -1094,7 +1094,7 @@ def build_report(days, samples, results, diag, doc_info, dirty, results_p2=None,
         "",
         "# 注意事項",
         "- 收盤對收盤報酬，未含交易成本/滑價；股價未除權息調整（7-8 月除息季偏多）。",
-        "- 個股名單以目前 classify 為準，期間內下市股不在樣本（輕微存活偏差）。",
+        "- 個股名單以凍結快照 backtest/classify_snapshot.json（data/classify.json @ 9dab5e9）為準（快取依它抓取），期間內下市股不在樣本（輕微存活偏差）。",
         "- A 層結果不直接進圖卡規格；每一個要單獨複驗（獨立 subagent、fresh context）後才進（§4.3）。",
         "- 本報告未做分位（quintile）分析：預註冊書未列，臨時加會增加實際檢定次數，"
         "與 §1.7 的多重比較揭露互相矛盾。排序欄只印平手率診斷。",

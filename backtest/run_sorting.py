@@ -13,6 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "backtest" / "cache"
+# 個股名單讀凍結快照（同 fetch.py 的 CLASSIFY_SNAPSHOT，理由見該處註解）。load() 也被 run_alpha_sweep 等腳本共用，
+# 那些腳本經 load() 一併改讀快照；快取（fetch.py）本來就依快照名單抓，兩者一致才不會出現有名單無價格的檔。
+CLASSIFY_SNAPSHOT = ROOT / "backtest" / "classify_snapshot.json"
 LIQ = 1e8
 SEC_AMT_MIN = 10e8
 MIN_MEMBERS = 5
@@ -43,7 +46,7 @@ def load():
         price[ds] = d
         f2 = CACHE / f"inst_{ds}.json.gz"
         inst[ds] = rgz(f2) if f2.exists() else {}
-    cl = json.loads((ROOT / "data" / "classify.json").read_text(encoding="utf-8"))["map"]
+    cl = json.loads(CLASSIFY_SNAPSHOT.read_text(encoding="utf-8"))["map"]
     return days, price, inst, cl
 
 
@@ -787,7 +790,8 @@ def main():
         "\n# 注意事項",
         "- 收盤對收盤報酬，未含交易成本/滑價；漲停/跌停鎖死另列。",
         "- 股價未除權息調整（7-8月除息季偏多），對超額報酬影響小但存在。",
-        "- 個股名單以目前 classify 為準，期間內下市股不在樣本（輕微存活偏差）。",
+        "- 個股名單以凍結快照 backtest/classify_snapshot.json（data/classify.json @ 9dab5e9，2026-07-18 月重建版）為準，"
+        "期間內下市股不在樣本（輕微存活偏差）。",
         "- 五分位切分：N<250 改三分位並標註；切分依等分 index。",
         "- 連續日數計算：中間缺資料日（停牌/不過流動性門檻）視為中斷。",
         "- Regime 定義：TAIEX 收盤在自身 20 日均線之上＝多頭，之下＝空頭。",
