@@ -2362,7 +2362,7 @@ const fxRegimeNote = (ctx) => ctx.regime.undetermined
 
 // ---- 訊號卡 6 張（baseline.json；stocks: [a5,it,fi,y1,y2,ints,nl,its,nh,a20]、
 //      subs_y: {sub:[y1,y2,C,R]}——Phase A 後 schema，src/build_baseline.py:4-22）----
-function fxCardSubSurge(s, ctx) {   // 卡1 次產業湧入：subs_y y1==1，依 R 降序（分離度 0.97%）
+function fxCardSubSurge(s, ctx) {   // 卡1 次產業湧入：subs_y y1==1，依 R 降序（分離度 0.98%；2026-10-28 報告重生前為 0.97%）
   if (ctx.regime.regime === "bear") return { skip: "regime-bear" };
   const b = fxNeed(s.baseline, "baseline");
   const subs = Object.entries(b.subs_y || {}).filter(([, v]) => v && v[0] === 1);
@@ -2371,7 +2371,7 @@ function fxCardSubSurge(s, ctx) {   // 卡1 次產業湧入：subs_y y1==1，依
   const rows = subs.slice(0, FX_ROWS_MAX).map(([n, v]) => ({ m: n,
     r: v[3] == null ? "R —" : `R ${fxSgn(v[3] * 100, "%")}`, c: v[3] == null ? "neutral" : fxC(v[3]) }));
   return { title: "次產業湧入", sub: `資料日 ${b.date}`, rows,
-    note: ["依成員等權漲跌 R 降序，歷史分離度 0.97%、非單調", fxRegimeNote(ctx)].filter(Boolean).join("；") };
+    note: ["依成員等權漲跌 R 降序，歷史分離度 0.98%、非單調", fxRegimeNote(ctx)].filter(Boolean).join("；") };
 }
 // 回測母體＝訊號日成交額 ≥1 億（run_sorting.py LIQ=1e8）。個股訊號卡（2-6）必須鏡像
 // 同一過濾，否則低流動股的比率型欄位（ints 等）天然灌爆、榜面被冷門股佔據
