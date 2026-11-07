@@ -221,8 +221,14 @@ def main():
     # 不得影響主幹 FinMind 的產出。
     try:
         import aetf_fallback
-        fb = aetf_fallback.fetch_fallback(list(out["etfs"]) + [c for c in dropped if c not in out["etfs"]])
+        # 補位輸入＝本班 etfs ∪ errors（2026-11-07 擴大）：原本只給 etfs＋dropped，FinMind 從未
+        # 有過持股的新檔（例 00415A，10-15 起一直只在 errors、也不在 prev）連補位機會都沒有。
+        # fetch_fallback 只會處理 FETCHERS 有登記的代號，其餘傳進去也是略過。dropped ⊂ errors。
+        cand = list(out["etfs"]) + [c for c in out["errors"] if c not in out["etfs"]]
+        fb = aetf_fallback.fetch_fallback(cand)
+        names = dict(etfs)
         for code, d in fb.items():
+            fresh = code not in out["etfs"] and code not in dropped   # 本班只在 errors、沒有任何舊快照
             cur = out["etfs"].get(code) or dict(dropped.get(code) or {})
             if str(d["src_date"]).replace("-", "/") <= str(cur.get("src_date") or "").replace("-", "/"):
                 continue   # 沒有比較新，不覆蓋
@@ -231,7 +237,11 @@ def main():
                         "aum": d["aum"], "source": f"issuer:{d['fallback_src']}"})
             cur.pop("not_advanced", None)
             cur.pop("stale", None)
-            if code not in out["etfs"]:   # 由超過沿用上限的舊快照救回：舊快照的集保規模已過期，不沿用
+            if fresh:   # 首次由補位寫入：名稱取 ETF 清單、集保規模照一般路徑現抓（失敗回 None）
+                cur["name"] = names.get(code) or code
+                cur["units"] = None
+                cur["twse_aum_yi"] = grab_twse_aum(code)
+            elif code not in out["etfs"]:   # 由超過沿用上限的舊快照救回：舊快照的集保規模已過期，不沿用
                 cur["twse_aum_yi"] = None
             out["etfs"][code] = cur
             out.setdefault("fallback_used", {})[code] = {

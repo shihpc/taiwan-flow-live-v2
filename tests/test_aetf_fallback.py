@@ -51,9 +51,10 @@ def main() -> int:
     chk("raw 早於整段日曆 → None", fb.resolve_date("2026/07/01", -1, CAL), None)
 
     print("\nFETCHERS 登記表：")
-    chk("涵蓋統一 2 檔＋野村 3 檔", len(fb.FETCHERS), 5)
+    chk("涵蓋統一 2 檔＋野村 3 檔＋群益 1 檔", len(fb.FETCHERS), 6)
     chk("登記代號正確", sorted(fb.FETCHERS),
-        ["00403A", "00980A", "00981A", "00985A", "00999A"])
+        ["00403A", "00415A", "00980A", "00981A", "00985A", "00999A"])
+    chk("00415A 登記為群益", fb.FETCHERS["00415A"][0], "群益")
     chk("統一 offset 為 0（TranDate 即基準日）",
         [k for k, v in fb.FETCHERS.items() if v[0] == "統一"] and True, True)
 
@@ -64,6 +65,11 @@ def main() -> int:
         return 1
     print("\n全部通過")
     return 0
+
+
+def test_script_main():
+    """讓 pytest 也跑到上面這組 chk（原本只有直接執行才會跑）。"""
+    assert main() == 0
 
 
 if __name__ == "__main__":

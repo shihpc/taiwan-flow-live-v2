@@ -7,7 +7,7 @@
 # 對策：主幹仍是 FinMind（涵蓋 20+ 檔，不動），僅對本檔登記的 ETF 在「FinMind 落後」時補位。
 #   補位失敗一律靜默略過 → 退回補位前的行為（該檔續列 laggards），不讓爬蟲拖垮整條管線。
 #
-# 本批涵蓋統一 2 檔＋野村 3 檔（2026-07-31 起）。端點沿用 2026-07-20 遷移 FinMind 前的實作
+# 涵蓋統一 2 檔＋野村 3 檔（2026-07-31 起）＋群益 1 檔（2026-11-07 起）。端點沿用 2026-07-20 遷移 FinMind 前的實作
 #   （commit cdb00eb^ src/build_aetf.py），當時已在生產跑過，非重新逆向。
 #
 # ⚠ 日期語意逐家不同，弄錯會整批錯一天（實測 2026-07-31 00:19 確認）：
@@ -15,6 +15,16 @@
 #   野村 `CPcfdate`          = PCF 生效日（T+1 標記） → 必須回推一個交易日才是持股基準日
 #   驗證：野村 00980A 標 2026/07/31、台積電 634,000 股，與 MoneyDJ 標 2026/07/30 的數字相同。
 #   這正是 build_aetf_diff.py 檔頭註解所稱「原 PCF 的 T+1 標記問題」。
+#   群益 buyback `pcf.date1`  = 次一營業日（T+1 標記） → 同野村回推一個交易日
+#   （依據：遷移前 `git show cdb00eb^:src/build_aetf_diff.py` 的 TPLUS1_ETFS 註解「群益 buyback
+#    pcf.date1、野村 CPcfdate 皆為次一交易日」；**2026-11-07 未對真實端點重新驗證**。）
+#
+# 群益（2026-11-07 恢復，使用者裁定）：端點與欄位取自遷移前的 `grab_capital`
+#   （`git show cdb00eb^:src/build_aetf.py`；2026-07-20 隨整批 PCF 爬蟲改走 FinMind 而移除，
+#   不是因為群益端點本身出問題）。登記 00415A（群益台灣核心50，2026-10-20 掛牌，FinMind 無持股）。
+#   fundId=504 取自群益官網產品頁網址 /etf/product/detail/504（搜尋結果標題「00415A 主動群益核心50」）；
+#   舊碼的 00982A=399／00992A=500 同為產品頁編號，故推定 buyback 的 fundId 與產品頁編號同一套——
+#   **此為推論，未以真實回應驗證**（沙箱連不到 capitalfund.com.tw）。
 #
 # 用法：python src/aetf_fallback.py          # 單獨實跑，印各檔結果不寫檔（診斷用）
 #       由 build_aetf.py 匯入 fetch_fallback() 於主迴圈後補位。
@@ -104,6 +114,43 @@ def grab_nomura(code: str) -> dict:
     return {"stocks": stocks, "src_date": _norm(e.get("CPcfdate")), "pcf_offset": -1}
 
 
+# ---------- 群益（buyback API；pcf.date1 是 T+1 標記，需回推一個交易日） ----------
+CAPITAL_BUYBACK_URL = "https://www.capitalfund.com.tw/CFWeb/api/etf/buyback"
+
+
+def parse_capital(payload) -> dict:
+    """群益 buyback 回應 → {stocks, src_date, pcf_offset}。純函式，供離線測試。
+    形狀（舊碼依據）：{"data": {"pcf": {"date1", "totUnit", "nav"}, "stocks": [{"stocNo","stocName","share","weight"}]}}"""
+    if not isinstance(payload, dict):
+        raise TypeError("buyback 回應不是 JSON 物件")
+    data = payload.get("data") or {}
+    if not isinstance(data, dict):
+        raise TypeError("buyback data 形狀不符")
+    pcf = data.get("pcf") or {}
+    stocks = {}
+    for row in data.get("stocks") or []:
+        if not isinstance(row, dict):
+            continue
+        c = str(row.get("stocNo") or "").strip()
+        sh = fnum(row.get("share"))
+        if STOCK_RE.match(c) and sh:
+            stocks[c] = [round(sh), str(row.get("stocName") or "").strip(), fnum(row.get("weight"))]
+    if not stocks:
+        raise RuntimeError("buyback stocks 為空（無台股持股或頁面改版?）")
+    src = _norm(pcf.get("date1") if isinstance(pcf, dict) else None)
+    if not re.fullmatch(r"\d{4}/\d{2}/\d{2}", src):
+        raise RuntimeError(f"buyback pcf.date1 無法解析（{src!r}）")
+    return {"stocks": stocks, "src_date": src, "pcf_offset": -1}
+
+
+def grab_capital(fund_id: str) -> dict:
+    s = requests.Session()
+    s.headers.update(UA)
+    r = s.post(CAPITAL_BUYBACK_URL, json={"fundId": fund_id, "date": None}, timeout=60)
+    r.raise_for_status()
+    return parse_capital(r.json())
+
+
 # 登記表：code → (投信, 抓取函式)。加新投信只動這裡＋新增對應 grab_*。
 FETCHERS = {
     "00403A": ("統一", lambda: grab_uni("63YTW")),
@@ -111,6 +158,7 @@ FETCHERS = {
     "00980A": ("野村", lambda: grab_nomura("00980A")),
     "00985A": ("野村", lambda: grab_nomura("00985A")),
     "00999A": ("野村", lambda: grab_nomura("00999A")),
+    "00415A": ("群益", lambda: grab_capital("504")),   # fundId 推定，見檔頭
 }
 
 
