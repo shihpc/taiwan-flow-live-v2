@@ -14,6 +14,7 @@ import build_aetf
 import twse_holidays
 
 SAMPLE = {"data": {
+    "fundName": "群益台灣核心50主動式ETF基金",
     "pcf": {"date1": "2026-11-07T00:00:00", "totUnit": "123,456,000", "nav": "940000000"},
     "stocks": [
         {"stocNo": "2330", "stocName": "台積電 ", "share": "1,234,000", "weight": "9.87"},
@@ -26,16 +27,66 @@ SAMPLE = {"data": {
 
 
 def test_parse_capital_ok():
-    d = fb.parse_capital(SAMPLE)
+    d = fb.parse_capital(SAMPLE, "核心50")
     assert d["src_date"] == "2026/11/07"
     assert d["pcf_offset"] == -1
     assert d["stocks"] == {"2330": [1234000, "台積電", 9.87], "2317": [500000, "鴻海", 3.2]}
+    assert d["fund_name"] == "群益台灣核心50主動式ETF基金"
+
+
+def test_parse_capital_name_mismatch_raises():
+    # fundId 推錯抓到別檔（例 500＝00992A）→ 不得當成 00415A 寫入
+    p = json.loads(json.dumps(SAMPLE))
+    p["data"]["fundName"] = "群益台灣科技創新主動式ETF基金"
+    with pytest.raises(RuntimeError, match="科技創新"):
+        fb.parse_capital(p, "核心50")
+
+
+@pytest.mark.parametrize("name", [None, "", "  "])
+def test_parse_capital_missing_fund_name_raises(name):
+    p = json.loads(json.dumps(SAMPLE))
+    if name is None:
+        del p["data"]["fundName"]
+    else:
+        p["data"]["fundName"] = name
+    with pytest.raises(RuntimeError, match="缺 fundName"):
+        fb.parse_capital(p, "核心50")
+
+
+def test_parse_capital_top_level_fund_name_accepted():
+    p = json.loads(json.dumps(SAMPLE))
+    p["fundName"] = p["data"].pop("fundName")
+    assert fb.parse_capital(p, "核心50")["fund_name"].endswith("主動式ETF基金")
+
+
+def test_fetch_fallback_wrong_fund_is_skipped(monkeypatch):
+    """端到端：回應是別檔 → grab 失敗 → fetch_fallback 不列入（安全降級）。"""
+    wrong = json.loads(json.dumps(SAMPLE))
+    wrong["data"]["fundName"] = "群益美國增長主動式ETF基金"
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return wrong
+
+    class Sess:
+        def __init__(self):
+            self.headers = {}
+
+        def post(self, url, json=None, timeout=None):
+            return Resp()
+    monkeypatch.setattr(fb.requests, "Session", Sess)
+    monkeypatch.setattr(fb, "trading_days", lambda: ["2026/11/06"])
+    monkeypatch.setattr(fb, "close_prices", lambda d: {})
+    assert fb.fetch_fallback(["00415A"]) == {}
 
 
 def test_parse_capital_slash_date():
     p = json.loads(json.dumps(SAMPLE))
     p["data"]["pcf"]["date1"] = "2026/11/07"
-    assert fb.parse_capital(p)["src_date"] == "2026/11/07"
+    assert fb.parse_capital(p, "核心50")["src_date"] == "2026/11/07"
 
 
 def test_capital_date_t_plus_1_resolves_to_prev_trading_day():
@@ -46,17 +97,18 @@ def test_capital_date_t_plus_1_resolves_to_prev_trading_day():
 
 
 @pytest.mark.parametrize("payload", [
-    {}, {"data": None}, {"data": {"stocks": []}}, {"data": {"pcf": {}, "stocks": None}},
+    {"data": {"fundName": "核心50"}}, {"fundName": "核心50", "data": None}, {"data": {"fundName": "核心50", "stocks": []}},
+    {"data": {"fundName": "核心50", "pcf": {}, "stocks": None}},
 ])
 def test_parse_capital_empty_raises(payload):
     with pytest.raises(RuntimeError, match="stocks 為空"):
-        fb.parse_capital(payload)
+        fb.parse_capital(payload, "核心50")
 
 
 @pytest.mark.parametrize("payload", [[], "x", None, {"data": [1, 2]}])
 def test_parse_capital_bad_shape_raises(payload):
     with pytest.raises((RuntimeError, TypeError)):
-        fb.parse_capital(payload)
+        fb.parse_capital(payload, "核心50")
 
 
 @pytest.mark.parametrize("date1", [None, "", "20261107", "N/A"])
@@ -64,7 +116,7 @@ def test_parse_capital_bad_date_raises(date1):
     p = json.loads(json.dumps(SAMPLE))
     p["data"]["pcf"]["date1"] = date1
     with pytest.raises(RuntimeError, match="date1"):
-        fb.parse_capital(p)
+        fb.parse_capital(p, "核心50")
 
 
 def test_fetch_fallback_capital_end_to_end(monkeypatch):

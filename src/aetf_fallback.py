@@ -22,9 +22,11 @@
 # 群益（2026-11-07 恢復，使用者裁定）：端點與欄位取自遷移前的 `grab_capital`
 #   （`git show cdb00eb^:src/build_aetf.py`；2026-07-20 隨整批 PCF 爬蟲改走 FinMind 而移除，
 #   不是因為群益端點本身出問題）。登記 00415A（群益台灣核心50，2026-10-20 掛牌，FinMind 無持股）。
-#   fundId=504 取自群益官網產品頁網址 /etf/product/detail/504（搜尋結果標題「00415A 主動群益核心50」）；
-#   舊碼的 00982A=399／00992A=500 同為產品頁編號，故推定 buyback 的 fundId 與產品頁編號同一套——
-#   **此為推論，未以真實回應驗證**（沙箱連不到 capitalfund.com.tw）。
+#   fundId=504 為推論：依官網產品頁網址 /etf/product/detail/504（搜尋結果標題「00415A 主動群益核心50」）
+#   推定 buyback 的 fundId 與產品頁編號相同；repo 內無對應證據，**未以真實回應驗證**（沙箱連不到
+#   capitalfund.com.tw）。fundId 是群益全產品共用流水號（docs/aetf-expansion-research.md：399＝00982A、
+#   500＝00992A、501＝群益標普500、502＝00997A），推錯就會抓到別檔——所以 parse_capital 一律比對回應的
+#   fundName（須含期望關鍵字），缺或不符就 raise＝走「抓取失敗」略過，不會把別檔持股寫成 00415A。
 #
 # 用法：python src/aetf_fallback.py          # 單獨實跑，印各檔結果不寫檔（診斷用）
 #       由 build_aetf.py 匯入 fetch_fallback() 於主迴圈後補位。
@@ -118,14 +120,31 @@ def grab_nomura(code: str) -> dict:
 CAPITAL_BUYBACK_URL = "https://www.capitalfund.com.tw/CFWeb/api/etf/buyback"
 
 
-def parse_capital(payload) -> dict:
-    """群益 buyback 回應 → {stocks, src_date, pcf_offset}。純函式，供離線測試。
-    形狀（舊碼依據）：{"data": {"pcf": {"date1", "totUnit", "nav"}, "stocks": [{"stocNo","stocName","share","weight"}]}}"""
+def _capital_fund_name(payload: dict, data: dict) -> str:
+    """回應中的基金名稱。依 docs/aetf-expansion-research.md 的 2026-07-13 實測紀錄有 `fundName`，
+    但文件未寫它在哪一層 → 依序找 data.fundName、頂層 fundName、data.pcf.fundName（位置未驗證）。"""
+    pcf = data.get("pcf") if isinstance(data.get("pcf"), dict) else {}
+    for v in (data.get("fundName"), payload.get("fundName"), pcf.get("fundName")):
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def parse_capital(payload, expect_name: str) -> dict:
+    """群益 buyback 回應 → {stocks, src_date, pcf_offset, fund_name}。純函式，供離線測試。
+    形狀（舊碼依據）：{"data": {"fundName", "pcf": {"date1", "totUnit", "nav"},
+                               "stocks": [{"stocNo","stocName","share","weight"}]}}
+    expect_name：回應 fundName 必須包含的關鍵字（身分驗證；缺 fundName 或不含此字一律 raise）。"""
     if not isinstance(payload, dict):
         raise TypeError("buyback 回應不是 JSON 物件")
     data = payload.get("data") or {}
     if not isinstance(data, dict):
         raise TypeError("buyback data 形狀不符")
+    fund_name = _capital_fund_name(payload, data)
+    if not fund_name:
+        raise RuntimeError(f"buyback 回應缺 fundName，無法確認身分（期望含「{expect_name}」）")
+    if not expect_name or expect_name not in fund_name:
+        raise RuntimeError(f"buyback fundName={fund_name!r} 不含期望關鍵字「{expect_name}」（fundId 可能推錯）")
     pcf = data.get("pcf") or {}
     stocks = {}
     for row in data.get("stocks") or []:
@@ -140,15 +159,17 @@ def parse_capital(payload) -> dict:
     src = _norm(pcf.get("date1") if isinstance(pcf, dict) else None)
     if not re.fullmatch(r"\d{4}/\d{2}/\d{2}", src):
         raise RuntimeError(f"buyback pcf.date1 無法解析（{src!r}）")
-    return {"stocks": stocks, "src_date": src, "pcf_offset": -1}
+    return {"stocks": stocks, "src_date": src, "pcf_offset": -1, "fund_name": fund_name}
 
 
-def grab_capital(fund_id: str) -> dict:
+def grab_capital(fund_id: str, expect_name: str) -> dict:
     s = requests.Session()
     s.headers.update(UA)
     r = s.post(CAPITAL_BUYBACK_URL, json={"fundId": fund_id, "date": None}, timeout=60)
     r.raise_for_status()
-    return parse_capital(r.json())
+    d = parse_capital(r.json(), expect_name)
+    print(f"[fallback] 群益 fundId={fund_id} fundName={d['fund_name']!r} date1={d['src_date']}", flush=True)
+    return d
 
 
 # 登記表：code → (投信, 抓取函式)。加新投信只動這裡＋新增對應 grab_*。
@@ -158,7 +179,7 @@ FETCHERS = {
     "00980A": ("野村", lambda: grab_nomura("00980A")),
     "00985A": ("野村", lambda: grab_nomura("00985A")),
     "00999A": ("野村", lambda: grab_nomura("00999A")),
-    "00415A": ("群益", lambda: grab_capital("504")),   # fundId 推定，見檔頭
+    "00415A": ("群益", lambda: grab_capital("504", "核心50")),   # fundId 推論、以 fundName 驗身分，見檔頭
 }
 
 
@@ -216,7 +237,7 @@ def fetch_fallback(codes) -> dict:
         try:
             d = fn()
         except Exception as e:
-            print(f"[fallback] {code} {issuer} 抓取失敗：{type(e).__name__}: {str(e)[:120]}", flush=True)
+            print(f"[fallback] {code} {issuer} 抓取失敗：{type(e).__name__}: {str(e)[:200]}", flush=True)
             continue
         sd = resolve_date(d["src_date"], d["pcf_offset"], cal)
         if not sd:

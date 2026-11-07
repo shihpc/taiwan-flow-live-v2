@@ -142,7 +142,7 @@ def test_dropped_still_offered_to_fallback(tmp_path, monkeypatch):
     def grab(code):
         raise RuntimeError("Holding 近 14 日無資料")
     monkeypatch.setattr(build_aetf, "grab_holding", grab)
-    monkeypatch.setattr(build_aetf, "grab_twse_aum", lambda c: None)
+    monkeypatch.setattr(build_aetf, "grab_twse_aum", lambda c: 11)   # 非 None：守住「dropped 救回仍清 null」（2026-11-07）
     monkeypatch.setattr(build_aetf.time, "sleep", lambda s: None)
     monkeypatch.setattr(build_aetf.twse_holidays, "load", lambda *a, **k: CAL)
 
