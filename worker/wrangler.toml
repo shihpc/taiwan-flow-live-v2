@@ -74,6 +74,10 @@ crons = [
   #   同分撞點（逐分鐘展開一週 10,080 分鐘比對）只有 am summary 主窗 `*/5 23 * * *`（每週 5 撞點＝這 5 個 07:10），
   #   各帶自己的 event.cron，dispatchRoleForCron 以 ICHING_AM_CRON 精確攔截；落到 scheduledRole 會 fallthrough 成 frame。
   "10 23 * * 2-6",           # 21) ※ 需與 src/index.js 的 ICHING_AM_CRON 完全一致
+  # 22) 股市易經試算卦班（#77 T4，2026-11-08；使用者 2026-10-31 選定）：台北 08:15／08:45 週二～六＝UTC 00:15／00:45 週二～六
+  #   （UTC 00:xx 與台北同日；dow 為 Quartz 慣例 1＝週日～7＝週六，Cloudflare 文件明載 1-7 → 週二～六＝3-7）。dispatch 同一支 daily.yml，
+  #   沿用 dispatchIching（slot＝trial）；試算時窗由該 repo build trial 步驟自守。同分撞點：無；仍以 ICHING_TRIAL_CRON 精確攔截。
+  "15,45 0 * * 3-7",         # 22) ※ 需與 src/index.js 的 ICHING_TRIAL_CRON 完全一致
 ]
 
 # Workers Logs（2026-07-25）：原本 console.log 不落地，事後根本查不到「這班 cron 到底有沒有被叫起來」

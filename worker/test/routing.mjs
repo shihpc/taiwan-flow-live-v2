@@ -5,7 +5,7 @@
 // tickdiag.mjs 刪除，這些守門搬到這裡保留（數字依拆除後的實況更新：22→21 條）。
 // 無需 token、不打網路。執行：cd worker && node test/routing.mjs
 import { readFileSync } from "node:fs";
-import { dispatchRoleForCron, scheduledRole, taipeiParts, FRAME_CRON, ICHING_CRON, ICHING_AM_CRON }
+import { dispatchRoleForCron, scheduledRole, taipeiParts, FRAME_CRON, ICHING_CRON, ICHING_AM_CRON, ICHING_TRIAL_CRON }
   from "../src/index.js";
 
 let pass = 0, fail = 0;
@@ -20,12 +20,13 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
 
 // ---- wrangler.toml：條數、無重複 ----
 {
-  chk("crons 共 21 條", CRONS.length === 21, String(CRONS.length));   // 2026-10-23 拆 tick 量測班：22→21
+  chk("crons 共 22 條", CRONS.length === 22, String(CRONS.length));   // 2026-10-23 拆 tick 量測班：22→21；2026-11-08 #77 T4 試算卦班：21→22
   chk("crons 無重複字串", new Set(CRONS).size === CRONS.length);
   chk("已拆除的 tick 量測班 cron 不在 toml 內", !CRONS.includes("*/5 1-11 * * 2-6"));
   chk("FRAME_CRON 是 toml 第一條", CRONS[0] === FRAME_CRON, CRONS[0]);
   chk("ICHING_CRON 在 toml 內且僅一次", CRONS.filter((c) => c === ICHING_CRON).length === 1);
   chk("ICHING_AM_CRON 在 toml 內且僅一次", CRONS.filter((c) => c === ICHING_AM_CRON).length === 1);
+  chk("ICHING_TRIAL_CRON 在 toml 內且僅一次", CRONS.filter((c) => c === ICHING_TRIAL_CRON).length === 1);
 }
 
 // ---- toml 每一條的路由歸屬（null＝不走 dispatchRoleForCron、落 scheduledRole 由台北時刻分流）----
@@ -38,10 +39,10 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
     "35 21 * * *": "backup", "*/5 13-15 * * 2-6": "evening", "50,55 22 * * *": "summary-am",
     "*/5 23 * * *": "summary-am", "*/10 0 * * *": "summary-am",
     "50 15 * * 2-6": "health", "30 1 * * 2-6": "health",
-    [ICHING_CRON]: "iching", [ICHING_AM_CRON]: "iching",
+    [ICHING_CRON]: "iching", [ICHING_AM_CRON]: "iching", [ICHING_TRIAL_CRON]: "iching",
   };
-  chk("路由表恰 21 條且與 toml 集合相同",
-    Object.keys(EXPECT).length === 21 && CRONS.every((c) => c in EXPECT),
+  chk("路由表恰 22 條且與 toml 集合相同",
+    Object.keys(EXPECT).length === 22 && CRONS.every((c) => c in EXPECT),
     CRONS.filter((c) => !(c in EXPECT)).join(" | "));
   for (const [cron, kind] of Object.entries(EXPECT)) {
     const got = dispatchRoleForCron(cron);

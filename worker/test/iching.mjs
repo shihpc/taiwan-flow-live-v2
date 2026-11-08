@@ -1,7 +1,7 @@
 // 股市易經每日班主觸發角色 iching（2026-09-14）：cron 路由、dispatch 請求形狀、週末守門、secret 缺失告警、失敗重試＋告警。
 // 離線、免 token：fetch／sleep／KV 全部注入。跑法：node test/iching.mjs
 import { readFileSync } from "node:fs";
-import { dispatchIching, dispatchRoleForCron, ICHING_CRON, ICHING_AM_CRON, ichingSlot, DISPATCH_ROLES, taipeiParts, scheduledRole,
+import { dispatchIching, dispatchRoleForCron, ICHING_CRON, ICHING_AM_CRON, ICHING_TRIAL_CRON, ichingSlot, DISPATCH_ROLES, taipeiParts, scheduledRole,
   alertedKey } from "../src/index.js";
 
 let pass = 0, fail = 0;
@@ -188,6 +188,64 @@ const SAT = taipeiParts(tpe("2026-09-12T22:30:00"));
     const r = await dispatchIching({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" }, SAT_0710, fetchFn, noSleep);
     chk("週六 07:10 失敗 → 有重試、回 dispatched:false，但 alertJob 週末 skip（零告警、零去重鍵）",
       r.dispatched === false && calls.gh.length === 2 && calls.hook.length === 0 && kv.m.size === 0, JSON.stringify(r));
+  }
+}
+
+// 8. 試算卦班（#77 T4，ICHING_TRIAL_CRON＝台北 08:15／08:45 週二～六）
+{
+  // 8a. cron 路由：字面量、toml 一致、精確攔截、與其他 iching cron 不同字串
+  chk("ICHING_TRIAL_CRON 字面量", ICHING_TRIAL_CRON === "15,45 0 * * 3-7", ICHING_TRIAL_CRON);
+  chk("ICHING_TRIAL_CRON 與 am／pm 不同字串", ICHING_TRIAL_CRON !== ICHING_CRON && ICHING_TRIAL_CRON !== ICHING_AM_CRON);
+  const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf-8");
+  const crons = toml.split("crons = [")[1].split("]")[0].split("\n").map((l) => (l.match(/^\s*"([^"]+)"/) || [])[1]).filter(Boolean);
+  chk("wrangler.toml 含 ICHING_TRIAL_CRON 且僅一次", crons.filter((c) => c === ICHING_TRIAL_CRON).length === 1);
+  chk("dispatchRoleForCron(ICHING_TRIAL_CRON) → iching", dispatchRoleForCron(ICHING_TRIAL_CRON)?.kind === "iching" && DISPATCH_ROLES[ICHING_TRIAL_CRON] === "iching");
+  // 8b. 時點：UTC 00:15／00:45 與台北 08:15／08:45 同日；Quartz dow 3-7＝週二～六
+  const TUE_0815 = taipeiParts(new Date("2026-11-10T00:15:00Z"));   // 週二
+  const SAT_0845 = taipeiParts(new Date("2026-11-14T00:45:00Z"));   // 週六
+  const SUN_0815 = taipeiParts(tpe("2026-11-15T08:15:00"));
+  const MON_0845 = taipeiParts(tpe("2026-11-09T08:45:00"));
+  chk("UTC 週二 00:15 → 台北週二 08:15", TUE_0815.dow === 2 && TUE_0815.hour === 8 && TUE_0815.minute === 15, JSON.stringify(TUE_0815));
+  chk("UTC 週六 00:45 → 台北週六 08:45", SAT_0845.dow === 6 && SAT_0845.hour === 8 && SAT_0845.minute === 45, JSON.stringify(SAT_0845));
+  chk("ichingSlot：08:15／08:45＝trial；07:10 仍 am、22:30 仍 pm", ichingSlot(TUE_0815) === "trial" && ichingSlot(SAT_0845) === "trial"
+    && ichingSlot(taipeiParts(tpe("2026-11-10T07:10:00"))) === "am" && ichingSlot(taipeiParts(tpe("2026-11-10T07:59:00"))) === "am"
+    && ichingSlot(WEEKDAY) === "pm" && ichingSlot(taipeiParts(tpe("2026-11-10T11:59:00"))) === "trial" && ichingSlot(taipeiParts(tpe("2026-11-10T12:00:00"))) === "pm");
+  // 8c. 落到 scheduledRole 會成 frame（證明必須精確攔截）
+  chk("scheduledRole(08:15) 是 fallthrough 的 frame", scheduledRole(TUE_0815, ICHING_TRIAL_CRON) === "frame", scheduledRole(TUE_0815, ICHING_TRIAL_CRON));
+  // 8d. 週二～六 dispatch、週日／週一 skip；body 同一支 daily.yml 無 inputs
+  {
+    const { calls, fetchFn } = mockNet([204]);
+    const rT = await dispatchIching({ GH_DISPATCH_TOKEN: "TOK" }, TUE_0815, fetchFn, noSleep);
+    const rS = await dispatchIching({ GH_DISPATCH_TOKEN: "TOK" }, SAT_0845, fetchFn, noSleep);
+    chk("週二 08:15／週六 08:45 → dispatched（slot trial）", rT.dispatched === true && rT.slot === "trial" && rS.dispatched === true && rS.slot === "trial" && calls.gh.length === 2);
+    chk("trial body 恰為 {ref:main}、同一支 daily.yml", calls.gh[0].init.body === JSON.stringify({ ref: "main" })
+      && calls.gh[0].url.endsWith("/taiwan-stock-iching/actions/workflows/daily.yml/dispatches"));
+    const rSun = await dispatchIching({ GH_DISPATCH_TOKEN: "TOK" }, SUN_0815, fetchFn, noSleep);
+    const rMon = await dispatchIching({ GH_DISPATCH_TOKEN: "TOK" }, MON_0845, fetchFn, noSleep);
+    chk("週日 08:15／週一 08:45 → skipped weekend、零呼叫", rSun.skipped === "weekend" && rMon.skipped === "weekend" && calls.gh.length === 2);
+  }
+  // 8e. 告警 tag 三者分家：同一台北日早晨、試算、當晚各自一則；試算兩班同 tag 不重複
+  {
+    const kv = mockKV();
+    const { calls, fetchFn } = mockNet([401]);
+    const env = { GH_DISPATCH_TOKEN: "T", FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" };
+    const D = "2026-11-10";
+    await dispatchIching(env, taipeiParts(tpe(`${D}T07:10:00`)), fetchFn, noSleep);
+    const r1 = await dispatchIching(env, taipeiParts(tpe(`${D}T08:15:00`)), fetchFn, noSleep);
+    chk("試算失敗 → 第二則、tag iching-trial-dispatch-err", r1.dispatched === false && calls.hook.length === 2 && kv.m.has(alertedKey(D, "iching-trial-dispatch-err")), JSON.stringify(calls.hook));
+    chk("試算文案標明只影響試算卦", calls.hook[1].includes("試算卦班") && calls.hook[1].includes("正式卦不受影響"), calls.hook[1]);
+    await dispatchIching(env, taipeiParts(tpe(`${D}T08:45:00`)), fetchFn, noSleep);
+    chk("08:45 再失敗 → 同 trial tag、不重複", calls.hook.length === 2);
+    await dispatchIching(env, taipeiParts(tpe(`${D}T22:30:00`)), fetchFn, noSleep);
+    chk("當晚失敗 → 第三則（試算沒吃掉當晚額度）", calls.hook.length === 3 && kv.m.has(alertedKey(D, "iching-dispatch-err")));
+  }
+  // 8f. secret 缺失：trial 走 secret-missing-iching-trial
+  {
+    const kv = mockKV();
+    const { calls, fetchFn } = mockNet([204]);
+    const r = await dispatchIching({ FLOW_KV: kv, ALERT_WEBHOOK: "https://hook.example/x" }, TUE_0815, fetchFn, noSleep);
+    chk("無 token：trial 告警一則、tag secret-missing-iching-trial", r.skipped === "no-token" && r.slot === "trial" && calls.hook.length === 1
+      && kv.m.has(alertedKey("2026-11-10", "secret-missing-iching-trial")) && calls.gh.length === 0, JSON.stringify(calls.hook));
   }
 }
 
