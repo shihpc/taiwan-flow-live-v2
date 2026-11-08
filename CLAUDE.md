@@ -142,6 +142,16 @@
     7h 釘住現況），影響＝週五 waiting 要等週一 22:30 才續算。**`/status` iching 的 `dueHour 23.75` 不動**：正常日仍是晚上落地、
     早晨班只縮短「23:30 仍 waiting」那種日子的續算延遲，預期資料日口徑不變。早晨班**不查國定假日**（與 pm 同：該 repo 自判休市、
     無 pending 即 no-op）。`claude-harness/docs/schedule-map.md` 另案（PR-D）同步。
+  - **試算卦班（#77 T4，2026-11-08；使用者 2026-10-31 選「08:15 與 08:45」）**：`export const ICHING_TRIAL_CRON = "15,45 0 * * 3-7"`＝UTC 00:15／00:45
+    週二～六＝**台北 08:15／08:45 週二～六**（UTC 00:xx 與台北同日；Cloudflare 文件明載 dow 1＝週日～7＝週六，週二～六＝3-7）。`wrangler.toml` 第 22 條，
+    **crons 21→22 條**（`test/routing.mjs` 條數斷言同步）。`DISPATCH_ROLES` 加 `[ICHING_TRIAL_CRON]: "iching"`，沿用 `dispatchIching`；`ichingSlot` 改三段
+    （`hour < 8`＝am、`< 12`＝trial、其餘 pm），trial 的 dow 守門同 am（週二～六），告警 tag `iching-trial-dispatch-err`／`secret-missing-iching-trial`
+    （同日早晨／試算／當晚三者各自去重）。dispatch 同一支 `taiwan-stock-iching/daily.yml`、不帶 inputs：正式卦部分冪等，試算由該 repo `build trial`
+    步驟自守時窗（台北週二～六 08:00–09:59，規格 `taiwan-stock-iching/docs/P4-PREVIEW.md` §16.8／§21／§22）。**同分撞點：無**（逐分鐘展開一週與既有 21 條比對，
+    腳本不進 repo；`*/10 0 * * *` 只有 :00/:10/…、`7,47 0-14,22-23` 只有 :07/:47）；仍須精確攔截——落到 `scheduledRole` 的 08:15 會 fallthrough 成 frame（`test/iching.mjs` 8c）。
+    **已知限制**：①同 am，週六兩班 dispatch 失敗不告警（`alertJob` 週末 skip）；試算缺班只影響畫面上的試算卦，不影響正式卦 ②`taiwan-stock-iching` 的 daily／checks／collect-events
+    共用 concurrency 群組 `iching-commit`（`cancel-in-progress: false`），08:15 班還在跑、08:45 班排隊時若有其他 run 排入，08:45 可能在開始前被取消（依 GitHub 文件推論、未實測；
+    該 repo §22 已記）——不另做補叫，08:15 班已有一份試算；不查國定假日（休市日試算本來就是裁定 #77 的用途）。`/status` iching dueHour 23.75 不動（試算不寫 `latest.json`）。
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
   - **選股二追蹤名單 LINE 通知（2026-10-19 使用者裁定，`export async function pushPick2Track`）**：`runEvening` 的**最後一步**
     （排在 `pushDailyCards` 之後、獨立 try/catch，既有步驟順序與行為不變），所以沿用 `runEvening` 的守門（`GH_DISPATCH_TOKEN`、

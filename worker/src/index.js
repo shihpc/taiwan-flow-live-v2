@@ -1112,16 +1112,23 @@ export async function dispatchMorning(env, fetchFn = fetch, sleepFn = sleep) {
 // 影響＝週五 waiting 要等週一 22:30 才續算。刻意不動 alertJob（CLAUDE.md 休市表「alertJob 本體不改」）。
 const ICHING_REPO = "taiwan-stock-iching";
 const ICHING_WF = "daily.yml";
-export function ichingSlot(tp) { return tp.hour < 12 ? "am" : "pm"; }
+// ---- 試算卦班（#77 T4，2026-11-08；ICHING_TRIAL_CRON＝台北 08:15／08:45 週二～六）也沿用本函式：slot＝"trial"（台北 08:00–11:59）----
+// 同一支 daily.yml、同樣不帶 inputs；正式卦部分冪等（無 pending 即 no-op），試算由該 repo 的 build trial 步驟自守時窗（08:00–09:59）。
+// dow 與 am 同為週二～六；告警 tag 另立 `iching-trial-dispatch-err`／`secret-missing-iching-trial`（同日早晨、試算、當晚三者各自去重）。
+// 已知限制同 am：週六 08:15／08:45 的 dispatch 失敗不告警（alertJob 對週末 skip）；試算缺一班的影響＝畫面不出現試算卦，不影響正式卦。
+export function ichingSlot(tp) { return tp.hour < 8 ? "am" : tp.hour < 12 ? "trial" : "pm"; }
+const ICHING_LABEL = { am: "股市易經早晨補叫班", trial: "股市易經試算卦班", pm: "股市易經每日班" };
+const ICHING_TAG = { am: "iching-am", trial: "iching-trial", pm: "iching" };
 export async function dispatchIching(env, tp = taipeiParts(), fetchFn = fetch, sleepFn = sleep) {
   const slot = ichingSlot(tp);
-  const label = slot === "am" ? "股市易經早晨補叫班" : "股市易經每日班";
-  // cron 已限 dow，程式再守一次（Quartz dow 誤植的前例）：pm 週一～五、am 週二～六
-  const dowOk = slot === "am" ? (tp.dow >= 2 && tp.dow <= 6) : (tp.dow >= 1 && tp.dow <= 5);
+  const label = ICHING_LABEL[slot];
+  // cron 已限 dow，程式再守一次（Quartz dow 誤植的前例）：pm 週一～五、am／trial 週二～六
+  const dowOk = slot === "pm" ? (tp.dow >= 1 && tp.dow <= 5) : (tp.dow >= 2 && tp.dow <= 6);
   if (!dowOk) return { skipped: "weekend", slot };
   if (!env.GH_DISPATCH_TOKEN) {
-    await alertSecretMissing(env, tp, slot === "am" ? "iching-am" : "iching", ["GH_DISPATCH_TOKEN"], fetchFn,
-      `${ICHING_REPO} 無 GH cron 兜底，今日不會計分（請 wrangler secret put 後手動 Run workflow）`);   // 共用文案的預設尾句對本班不成立
+    await alertSecretMissing(env, tp, ICHING_TAG[slot], ["GH_DISPATCH_TOKEN"], fetchFn,
+      slot === "trial" ? `本班只產試算卦（正式卦另由 22:30 主班計分）；請 wrangler secret put，否則當晚主班同樣不會計分`
+        : `${ICHING_REPO} 無 GH cron 兜底，今日不會計分（請 wrangler secret put 後手動 Run workflow）`);   // 共用文案的預設尾句對本班不成立
     return { skipped: "no-token", slot };
   }
   try {
@@ -1129,9 +1136,10 @@ export async function dispatchIching(env, tp = taipeiParts(), fetchFn = fetch, s
   } catch (e) {
     const msg = (e && e.message) || String(e);
     console.error(`iching(${slot}): dispatch ${ICHING_REPO}/${ICHING_WF} 失敗（${msg}）`);
-    await alertJob(env, tp, slot === "am" ? "iching-am-dispatch-err" : "iching-dispatch-err",
+    await alertJob(env, tp, `${ICHING_TAG[slot]}-dispatch-err`,
       `❌ ${label} dispatch 失敗：${msg}（${tp.date} ${String(tp.hour).padStart(2, "0")}:${String(tp.minute).padStart(2, "0")}；` +
-      (slot === "am" ? `當晚 22:30 主班仍會叫，但前一交易日若停在 waiting 要等到當晚才續算；` : `無 GH cron 兜底，`) +
+      (slot === "am" ? `當晚 22:30 主班仍會叫，但前一交易日若停在 waiting 要等到當晚才續算；`
+        : slot === "trial" ? `本班只影響試算卦（正式卦不受影響），另一班 08:15／08:45 仍會叫；` : `無 GH cron 兜底，`) +
       `請手動 Run workflow 或檢查 GH_DISPATCH_TOKEN 是否涵蓋 ${ICHING_REPO}）`, fetchFn);
     return { dispatched: false, error: msg, slot };
   }
@@ -1212,6 +1220,11 @@ export const ICHING_CRON = "30 14,15 * * 2-6";   // 股市易經每日班；需�
 // 各帶自己的 event.cron、dispatchRoleForCron 精確比對分流；**必須被攔截**——落到 scheduledRole 的 07:10 是 fallthrough 的 frame
 // （會多寫一格 f:<date>:07:10 並多打一次 FinMind）。需與 wrangler.toml crons 內該條完全一致。
 export const ICHING_AM_CRON = "10 23 * * 2-6";
+// 股市易經試算卦班（#77 T4，使用者 2026-10-31 選「08:15 與 08:45」）：UTC 00:15／00:45 **週二～六**＝台北 08:15／08:45 週二～六
+// （UTC 00:xx 與台北同日；dow 為 Quartz 慣例 1＝週日～7＝週六，Cloudflare 文件明載 1-7，故週二～六寫 3-7）。
+// 同分撞點：無（逐分鐘展開一週與既有 21 條比對；`*/10 0 * * *` 只有 :00/:10/…/:50，`7,47 0-14,22-23` 只有 :07/:47）。
+// 仍以 DISPATCH_ROLES 精確攔截——落到 scheduledRole 的 08:15／08:45 會 fallthrough 成 frame（同 07:10 的理由）。需與 wrangler.toml 該條完全一致。
+export const ICHING_TRIAL_CRON = "15,45 0 * * 3-7";
 export const DISPATCH_ROLES = {
   "*/5 13-15 * * 2-6": "evening",      // 台北 21:00–23:55 每 5 分：pm summary→diag 鏈→mktbal 鏈→aetf2
   "50,55 22 * * *":    "summary-am",   // 台北 06:50/06:55 起手（dow 程式守門）
@@ -1219,6 +1232,7 @@ export const DISPATCH_ROLES = {
   "*/10 0 * * *":      "summary-am",   // 台北 08:00–08:50 尾窗兜底（morning 遲到仍趕 09:00 前）
   [ICHING_CRON]:       "iching",       // 台北 22:30／23:30 週一～五：股市易經每日班（taiwan-stock-iching/daily.yml）
   [ICHING_AM_CRON]:    "iching",       // 台北 07:10 週二～六：同班的早晨補叫（沿用 dispatchIching，slot 由 tp.hour 判 am／pm）
+  [ICHING_TRIAL_CRON]: "iching",       // 台北 08:15／08:45 週二～六：試算卦班（同一支 daily.yml，slot＝trial）
 };
 // 健檢班（2026-07-25 P1）：不 dispatch 任何東西，只「盤點當日該有的產物有沒有落地」→ 缺就告警。
 // 補的是 recheck 之後的最後一個洞：達 BK_MAX_ATTEMPTS 上限、或某條管線根本不在 Worker 管轄
@@ -4630,7 +4644,7 @@ export default {
         }
         ctx.waitUntil(runHealthCheck(env, tp, droute.slot).catch((e) => console.log("health:", e && e.message)));
       } else if (droute.kind === "iching") {
-        // 股市易經每日班主觸發（台北 22:30／23:30）＋早晨補叫班（07:10 週二～六，ICHING_AM_CRON）：失敗已在函式內告警，
+        // 股市易經每日班主觸發（台北 22:30／23:30）＋早晨補叫班（07:10 週二～六，ICHING_AM_CRON）＋試算卦班（08:15／08:45，ICHING_TRIAL_CRON）：失敗已在函式內告警，
         // 這裡只 log；同分醒的哨兵／晚場班／am summary 主窗各自獨立
         ctx.waitUntil(dispatchIching(env, tp).catch((e) => console.log("iching:", e && e.message)));
       } else if (droute.kind === "summary-am") {
