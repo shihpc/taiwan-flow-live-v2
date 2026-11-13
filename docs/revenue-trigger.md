@@ -60,3 +60,13 @@ postmkt `.github/workflows/revenue.yml`（月營收 Beat／Miss，規格 `postmk
 5. 部署：push 後 `worker-deploy` workflow 成功；**線上驗證**：`GET https://taiwan-flow-v2.shihpc.workers.dev/backup?name=revenue`（dry）在台北 11–16 日
    回 `fresh: true`、`productDate: "2026-10"`（或當時最新月份）——證明線上跑的是新版且讀得到產物；窗外日期回 `out-of-window`。
 6. 首次 cron 實際觸發（台北 2026-11-14 07:13）後，以 `/jobs` 或 `wrangler tail` 可見該班的決策紀錄（預期 `fresh`，因 10 月已產出）。
+
+## 5. 驗收結果
+
+- 1–4：✅ fresh-context 驗收者對 `a944810` 逐條通過（31 支測試全過＋獨立 67 項；既有 7 條班 241,920 組情境新舊對跑差異 0；一年逐分鐘同分撞點 0）。
+  驗收後只更正 CLAUDE.md 一個對跑次數（`06789fb`，純文件）。
+- 5：✅ `worker-deploy` run 43342980254 成功（2026-11-13 01:11Z，Version `0797be21-e9eb-40b2-af81-179db689aca1`）；部署 log 列出 23 條 schedule、
+  含 `13 23 10-15 * *`＝Cloudflare 接受日期欄範圍寫法。線上 `GET /backup?name=revenue`（使用者 2026-11-13 台北 15:32 以瀏覽器開啟，
+  雲端 session 連不到 workers.dev）回 `{"dry":true,"name":"revenue","fresh":true,"productDate":"2026-10"}`。窗外日的 `out-of-window` 未線上實測（要等 11/17 起），
+  以測試為依據。
+- 6：⏳ 待台北 2026-11-14 07:13 首次觸發後看 `/jobs`。
