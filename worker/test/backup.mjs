@@ -1,8 +1,10 @@
 // 排程備援離線單元測試（無需 token、不打真實網路——fetch 全用 mock）
 // 執行：cd worker && node test/backup.mjs
-import { backupPipelines, backupPipelineForCron, BACKUP_CRONS, bkfiredKey,
+import worker, { backupPipelines, backupPipelineForCron, BACKUP_CRONS, bkfiredKey,
   productFresh, runBackup, parseBkState, bkGate, bkStateValue, alertedKey,
-  BK_RECHECK_MS, BK_MAX_ATTEMPTS, HEALTH_CRONS, jobstatKey } from "../src/index.js";
+  BK_RECHECK_MS, BK_MAX_ATTEMPTS, HEALTH_CRONS, jobstatKey,
+  prevMonthOf, inDayWindow, REV_DAY_WINDOW, dispatchRoleForCron, HOLIDAYS_URL, resetHolidayMemo } from "../src/index.js";
+import { readFile } from "node:fs/promises";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -13,9 +15,9 @@ const ENV = { DATA_BASE: "https://raw.githubusercontent.com/shihpc/taiwan-flow-l
 const pipes = backupPipelines(ENV);
 const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
 
-// ---- 設定表：七條班、repo、workflow 檔、產物 URL、日期欄、模式、交易日守門 ----
+// ---- 設定表：八條班（2026-11-13 加 revenue；原七條）、repo、workflow 檔、產物 URL、日期欄、模式、交易日守門 ----
 {
-  chk("七條班齊全", pipes.length === 7 && ["daysummary","aetf","baseline","us","intraday","diag","mktbal"].every((n) => byName[n]));
+  chk("八條班齊全", pipes.length === 8 && ["daysummary","aetf","baseline","us","intraday","diag","mktbal","revenue"].every((n) => byName[n]));
   chk("daysummary 設定", byName.daysummary.wf === "daysummary.yml" && byName.daysummary.field === "date" &&
     byName.daysummary.url.endsWith("/daysummary/latest.json") && byName.daysummary.repo === "taiwan-flow-live-v2");
   chk("aetf 用 run_date 欄", byName.aetf.field === "run_date" && byName.aetf.wf === "aetf.yml");
@@ -36,9 +38,9 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
 }
 
 // ---- event.cron → pipeline 對應（2026-07-22 主排程化：單體班五條；diag/mktbal 併入晚場協調班無專屬 cron）
-//      2026-07-25：每班再加一條 recheck cron → 共十條 ----
+//      2026-07-25：每班再加一條 recheck cron → 共十條；2026-11-13 加 revenue 主觸發一條（無 recheck）→ 十一條 ----
 {
-  chk("BACKUP_CRONS 十條（五班 × 主觸發＋recheck）", Object.keys(BACKUP_CRONS).length === 10, String(Object.keys(BACKUP_CRONS).length));
+  chk("BACKUP_CRONS 十一條（五班 × 主觸發＋recheck，＋revenue 主觸發）", Object.keys(BACKUP_CRONS).length === 11, String(Object.keys(BACKUP_CRONS).length));
   for (const n of ["daysummary", "intraday", "aetf", "baseline", "us"]) {
     const crons = Object.entries(BACKUP_CRONS).filter(([, v]) => v === n).map(([k]) => k);
     chk(`${n} 恰兩條 cron（主＋recheck）`, crons.length === 2, crons.join(" | "));
@@ -51,7 +53,7 @@ const byName = Object.fromEntries(pipes.map((p) => [p.name, p]));
   // cron 字串不得與既有任何一條重複（重複＝覆蓋掉別班的路由）
   const all = ["* 1-5 * * 2-6", "*/5 9-14 * * 2-6", "7,47 0-14,22-23 * * *", "*/5 13-15 * * 2-6",
     "50,55 22 * * *", "*/5 23 * * *", "*/10 0 * * *", ...Object.keys(BACKUP_CRONS), ...Object.keys(HEALTH_CRONS)];
-  chk("全部 cron 字串互不重複（含健檢班共 19 條）", new Set(all).size === all.length && all.length === 19, String(all.length));
+  chk("全部 cron 字串互不重複（含健檢班共 20 條；2026-11-13 加 revenue，原 19）", new Set(all).size === all.length && all.length === 20, String(all.length));
   chk("cron 命中 daysummary（主觸發 13:35）", backupPipelineForCron("35 5 * * 2-6", ENV)?.name === "daysummary");
   chk("cron 命中 intraday（備援 14:40）", backupPipelineForCron("40 6 * * 2-6", ENV)?.name === "intraday");
   chk("cron 命中 aetf（主觸發 18:35）", backupPipelineForCron("35 10 * * 2-6", ENV)?.name === "aetf");
@@ -389,6 +391,206 @@ const ALERT_ENV = (kv) => ({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv, ALERT_WEBHOOK:
   await runBackup(ALERT_ENV(kv), TP, byName.baseline, f({ date: "2026-07-20" }), { nowMs: NOW + 40 * 60e3 });
   ev = JSON.parse(kv._m.get(jobstatKey("2026-07-20")));
   chk("recheck 確認落地 → 記 landed", ev.length === 2 && ev[1].r === "landed", JSON.stringify(ev));
+}
+
+// ==== 2026-11-13：月營收 revenue（規格 docs/revenue-trigger.md §2、§4.1）====
+const REV = byName.revenue;
+const REV_URL = "https://raw.githubusercontent.com/shihpc/postmkt/main/data/revenue/index.json";
+// 20) 設定與 cron 路由
+{
+  chk("revenue 設定：postmkt/revenue.yml＋index.json latest＋revMonth＋tw:false＋anyDay＋窗 11–16",
+    REV.repo === "postmkt" && REV.wf === "revenue.yml" && REV.url === REV_URL && REV.field === "latest" &&
+    REV.mode === "revMonth" && REV.tw === false && REV.anyDay === true &&
+    REV.dayWindow === REV_DAY_WINDOW && REV_DAY_WINDOW.from === 11 && REV_DAY_WINDOW.to === 16, JSON.stringify(REV));
+  chk("anyDay 只有 revenue 帶（us 等既有班未帶）", pipes.filter((p) => p.anyDay).map((p) => p.name).join() === "revenue");
+  chk("dayWindow 只有 revenue 帶", pipes.filter((p) => p.dayWindow).map((p) => p.name).join() === "revenue");
+  const crons = Object.entries(BACKUP_CRONS).filter(([, v]) => v === "revenue").map(([k]) => k);
+  chk("revenue 恰一條 cron（無 recheck）", crons.length === 1 && crons[0] === "13 23 10-15 * *", crons.join(" | "));
+  const r = dispatchRoleForCron("13 23 10-15 * *");
+  chk("dispatchRoleForCron(13 23 10-15 * *) → {kind:backup, name:revenue}",
+    r && r.kind === "backup" && r.name === "revenue" && Object.keys(r).length === 2, JSON.stringify(r));
+  chk("backupPipelineForCron 命中 revenue", backupPipelineForCron("13 23 10-15 * *", ENV)?.name === "revenue");
+}
+// 21) 純函式：prevMonthOf／inDayWindow
+{
+  chk("prevMonthOf 11 月 → 10 月", prevMonthOf("2026-11-13") === "2026-10");
+  chk("prevMonthOf 1 月跨年 → 前一年 12 月", prevMonthOf("2027-01-11") === "2026-12", prevMonthOf("2027-01-11"));
+  chk("prevMonthOf 12 月 → 11 月", prevMonthOf("2026-12-16") === "2026-11");
+  chk("prevMonthOf 10 月 → 09 月（補零）", prevMonthOf("2026-10-11") === "2026-09");
+  chk("prevMonthOf 格式不合 → null", prevMonthOf("2026-11") === null && prevMonthOf("") === null &&
+    prevMonthOf(null) === null && prevMonthOf("2026-13-01") === null && prevMonthOf("2026-00-01") === null);
+  const W = REV_DAY_WINDOW;
+  chk("窗：10 日外、11 日內、16 日內、17 日外",
+    !inDayWindow("2026-11-10", W) && inDayWindow("2026-11-11", W) && inDayWindow("2026-11-16", W) && !inDayWindow("2026-11-17", W));
+  chk("窗：1 日／31 日外", !inDayWindow("2026-12-01", W) && !inDayWindow("2026-12-31", W));
+  chk("窗：格式不合 → false", !inDayWindow("2026-11", W) && !inDayWindow(null, W) && !inDayWindow("2026-11-13", null));
+}
+// 22) productFresh revMonth
+{
+  chk("revMonth 上一月 → fresh", productFresh({ latest: "2026-10" }, REV, "2026-11-13") === true);
+  chk("revMonth 當月（理論上不會有，但 ≥ 上一月）→ fresh", productFresh({ latest: "2026-11" }, REV, "2026-11-13") === true);
+  chk("revMonth 更早（前兩月）→ 非fresh", productFresh({ latest: "2026-09" }, REV, "2026-11-13") === false);
+  chk("revMonth 1 月：前一年 12 月 → fresh", productFresh({ latest: "2026-12" }, REV, "2027-01-12") === true);
+  chk("revMonth 1 月：前一年 11 月 → 非fresh", productFresh({ latest: "2026-11" }, REV, "2027-01-12") === false);
+  chk("revMonth latest 缺 → 非fresh", productFresh({ months: ["2026-10"] }, REV, "2026-11-13") === false);
+  chk("revMonth latest 非字串 → 非fresh", productFresh({ latest: 202610 }, REV, "2026-11-13") === false &&
+    productFresh({ latest: ["2026-10"] }, REV, "2026-11-13") === false && productFresh({ latest: null }, REV, "2026-11-13") === false);
+  chk("revMonth 格式不合 → 非fresh", productFresh({ latest: "2026-10-31" }, REV, "2026-11-13") === false &&
+    productFresh({ latest: "2026/10" }, REV, "2026-11-13") === false && productFresh({ latest: "2026-1" }, REV, "2026-11-13") === false &&
+    productFresh({ latest: " 2026-10" }, REV, "2026-11-13") === false);
+  chk("revMonth obj null → 非fresh", productFresh(null, REV, "2026-11-13") === false);
+}
+// 23) runBackup(revenue)
+// KV spy：記錄每次 get/put
+function spyKV(init = {}) {
+  const kv = fakeKV(init); const ops = [];
+  return { ops, _m: kv._m,
+    async get(k, t) { ops.push(`get ${k}`); return kv.get(k, t); },
+    async put(k, v, o) { ops.push(`put ${k}`); return kv.put(k, v, o); } };
+}
+const revFetch = (prod, spy, prodCalls) => async (u, init) => {
+  const s = String(u);
+  if (s.includes("/dispatches")) { spy.push(s); return { status: 204 }; }
+  prodCalls.push(s);
+  return { ok: prod != null, status: prod ? 200 : 404, json: async () => prod };
+};
+const dowOf = (d) => new Date(d + "T00:00:00Z").getUTCDay();
+const TPr = (date, hour = 7, minute = 13) => ({ date, dow: dowOf(date), hour, minute });
+const REV_ENV = (kv) => ({ GH_DISPATCH_TOKEN: "T", FLOW_KV: kv });
+{
+  // 窗外：10 日、17 日 → out-of-window、零 fetch、零 KV、零 dispatch
+  for (const d of ["2026-11-10", "2026-11-17"]) {
+    const spy = [], prod = [], kv = spyKV();
+    const out = await runBackup(REV_ENV(kv), TPr(d), REV, revFetch({ latest: "2026-09" }, spy, prod), { nowMs: NOW });
+    chk(`revenue ${d} → out-of-window`, out.skipped === "out-of-window" && out.name === "revenue", JSON.stringify(out));
+    chk(`revenue ${d} → 零 fetch／零 KV／零 dispatch`, prod.length === 0 && spy.length === 0 && kv.ops.length === 0,
+      `${prod} | ${kv.ops} | ${spy}`);
+  }
+  // dry 窗外也一樣（/backup?name=revenue 在窗外回 out-of-window）
+  {
+    const spy = [], prod = [], kv = spyKV();
+    const out = await runBackup(REV_ENV(kv), TPr("2026-11-20"), REV, revFetch({ latest: "2026-09" }, spy, prod), { dry: true });
+    chk("revenue dry 窗外 → out-of-window、零副作用", out.skipped === "out-of-window" && prod.length + spy.length + kv.ops.length === 0);
+  }
+  // 窗內 11 日、16 日 → 進入判定（產物過期 → dispatch）
+  for (const d of ["2026-11-11", "2026-11-16"]) {
+    const spy = [], prod = [], kv = spyKV();
+    const out = await runBackup(REV_ENV(kv), TPr(d), REV, revFetch({ latest: "2026-09" }, spy, prod), { nowMs: NOW });
+    chk(`revenue ${d}（窗內）產物過期 → 恰 dispatch 一次 postmkt/revenue.yml`,
+      out.fired === true && out.attempt === 1 && spy.length === 1 &&
+      spy[0] === "https://api.github.com/repos/shihpc/postmkt/actions/workflows/revenue.yml/dispatches", `${JSON.stringify(out)} ${spy}`);
+    chk(`revenue ${d} 產物 URL＝postmkt data/revenue/index.json（帶破快取）`, prod.length === 1 && prod[0].startsWith(REV_URL + "?_="), prod[0]);
+    const st = parseBkState(kv._m.get(bkfiredKey(d, "revenue")));
+    chk(`revenue ${d} 寫 bkfired:${d.replaceAll("-", "")}:revenue（fired, n=1）`, st && st.s === "fired" && st.n === 1, JSON.stringify(st));
+    chk(`revenue ${d} 不讀 series（不看交易日）`, !kv.ops.some((o) => o.includes("series:")), kv.ops.join(","));
+  }
+  // 週六（11-14）、週日（11-15）照樣進入判定（產物過期 → dispatch）——us 的週末守門不套用
+  for (const d of ["2026-11-14", "2026-11-15"]) {
+    const spy = [], prod = [], kv = spyKV();
+    const tp = TPr(d);
+    const out = await runBackup(REV_ENV(kv), tp, REV, revFetch({ latest: "2026-09" }, spy, prod), { nowMs: NOW });
+    chk(`revenue ${d}（dow ${tp.dow}）週末照樣判定 → dispatch`, (tp.dow === 6 || tp.dow === 0) && out.fired === true && spy.length === 1,
+      JSON.stringify(out));
+  }
+  // 產物新鮮（latest＝上個月）→ 不 dispatch；週末亦同
+  for (const d of ["2026-11-13", "2026-11-14"]) {
+    const spy = [], prod = [], kv = spyKV();
+    const out = await runBackup(REV_ENV(kv), TPr(d), REV, revFetch({ latest: "2026-10" }, spy, prod), { nowMs: NOW });
+    chk(`revenue ${d} 產物新鮮 → fresh、不 dispatch、不寫 bkfired`,
+      out.fresh === true && out.productDate === "2026-10" && spy.length === 0 && kv._m.get(bkfiredKey(d, "revenue")) === undefined,
+      JSON.stringify(out));
+  }
+  // 1 月跨年：2027-01-12 產物 2026-12 → fresh；2026-11 → dispatch
+  {
+    const spy = [], prod = [];
+    const a = await runBackup(REV_ENV(spyKV()), TPr("2027-01-12"), REV, revFetch({ latest: "2026-12" }, spy, prod), { nowMs: NOW });
+    const b = await runBackup(REV_ENV(spyKV()), TPr("2027-01-12"), REV, revFetch({ latest: "2026-11" }, spy, prod), { nowMs: NOW });
+    chk("revenue 1 月跨年：上年 12 月 fresh、上年 11 月 dispatch", a.fresh === true && b.fired === true && spy.length === 1,
+      `${JSON.stringify(a)} ${JSON.stringify(b)}`);
+  }
+  // 產物 404 → 不新鮮 → dispatch
+  {
+    const spy = [], prod = [];
+    const out = await runBackup(REV_ENV(spyKV()), TPr("2026-11-12"), REV, revFetch(null, spy, prod), { nowMs: NOW });
+    chk("revenue 產物 404 → dispatch", out.fired === true && spy.length === 1, JSON.stringify(out));
+  }
+  // 同日第二次呼叫 → already-fired 短路（不抓產物、不 dispatch）
+  {
+    const spy = [], prod = [], kv = spyKV();
+    const f = revFetch({ latest: "2026-09" }, spy, prod);
+    await runBackup(REV_ENV(kv), TPr("2026-11-13"), REV, f, { nowMs: NOW });
+    const n0 = prod.length;
+    const out2 = await runBackup(REV_ENV(kv), TPr("2026-11-13"), REV, f, { nowMs: NOW + 60e3 });
+    chk("revenue 同日第二次 → already-fired、不抓產物、不再 dispatch",
+      out2.skipped === "already-fired" && spy.length === 1 && prod.length === n0, `${JSON.stringify(out2)} spy=${spy.length}`);
+  }
+  // dry：只回決策，不 dispatch、不寫 bkfired
+  {
+    const spy = [], prod = [], kv = spyKV();
+    const out = await runBackup(REV_ENV(kv), TPr("2026-11-13"), REV, revFetch({ latest: "2026-09" }, spy, prod), { dry: true });
+    chk("revenue dry 過期 → wouldDispatch、零 dispatch、零 KV 寫入",
+      out.wouldDispatch === true && out.fired === undefined && out.productDate === "2026-09" && spy.length === 0 &&
+      !kv.ops.some((o) => o.startsWith("put ")), `${JSON.stringify(out)} ${kv.ops}`);
+    const spy2 = [], kv2 = spyKV();
+    const out2 = await runBackup(REV_ENV(kv2), TPr("2026-11-13"), REV, revFetch({ latest: "2026-10" }, spy2, []), { dry: true });
+    chk("revenue dry 新鮮 → fresh:true、productDate 2026-10、零寫入",
+      out2.fresh === true && out2.productDate === "2026-10" && spy2.length === 0 && !kv2.ops.some((o) => o.startsWith("put ")),
+      `${JSON.stringify(out2)} ${kv2.ops}`);
+  }
+  // 無 token → no-token（沿用既有守門）
+  {
+    const spy = [], prod = [];
+    const out = await runBackup({ FLOW_KV: spyKV() }, TPr("2026-11-13"), REV, revFetch({ latest: "2026-09" }, spy, prod));
+    chk("revenue 無 token → no-token、零 fetch", out.skipped === "no-token" && spy.length + prod.length === 0);
+  }
+}
+// 24) us 週末守門不變（anyDay 未帶）：週日（dow 0）同樣 skipped
+{
+  const spy = [];
+  const out = await runBackup({ GH_DISPATCH_TOKEN: "T", FLOW_KV: fakeKV() }, { date: "2026-07-26", dow: 0 }, byName.us,
+    mkFetch({ date: "2026-07-17" }, 204, spy));
+  chk("us 週日（台北 dow0）→ skipped non-trading-day（未受 anyDay 影響）", out.skipped === "non-trading-day" && spy.length === 0);
+}
+// 25) scheduled handler：revenue cron 在國定假日照樣呼叫 runBackup（不讀行事曆、照 dispatch）
+//     2026-02-16（週一）為 data/twse_holidays.json 所列休市日（農曆春節），且在 11–16 日窗內。
+//     對照組：同日 daysummary（tw:true）主觸發被休市守門擋下——證明該日確實被判為國定假日。
+{
+  const REAL_CAL = await readFile(new URL("../../data/twse_holidays.json", import.meta.url), "utf8");
+  const origFetch = globalThis.fetch, origLog = console.log;
+  const runSched = async (cron, atTpe, prodObj) => {
+    resetHolidayMemo();
+    const calls = [], kv = spyKV(), waits = [];
+    globalThis.fetch = async (input) => {
+      const u = typeof input === "string" ? input : input.url;
+      calls.push(u);
+      if (u.startsWith(HOLIDAYS_URL)) return new Response(REAL_CAL, { status: 200 });
+      if (u.includes("/dispatches")) return new Response(null, { status: 204 });
+      if (u.startsWith(REV_URL)) return Response.json(prodObj);
+      return new Response("nf", { status: 404 });
+    };
+    console.log = () => {};
+    try {
+      await worker.scheduled({ cron, scheduledTime: Date.parse(`${atTpe}:00+08:00`) },
+        { FLOW_KV: kv, GH_DISPATCH_TOKEN: "gh-test", DATA_BASE: ENV.DATA_BASE }, { waitUntil: (p) => waits.push(p) });
+      await Promise.allSettled(waits);
+    } finally { globalThis.fetch = origFetch; console.log = origLog; }
+    return { calls, kv };
+  };
+  const r = await runSched("13 23 10-15 * *", "2026-02-16T07:13", { latest: "2025-12" });
+  chk("scheduled revenue 國定假日（02-16）→ 照 dispatch postmkt/revenue.yml",
+    r.calls.filter((u) => u.includes("/dispatches")).length === 1 &&
+    r.calls.some((u) => u === "https://api.github.com/repos/shihpc/postmkt/actions/workflows/revenue.yml/dispatches"), r.calls.join(","));
+  chk("scheduled revenue 國定假日 → 不讀行事曆（tw:false 不問休市）", !r.calls.some((u) => u.startsWith(HOLIDAYS_URL)), r.calls.join(","));
+  chk("scheduled revenue → 寫 bkfired:20260216:revenue", r.kv.ops.includes("put bkfired:20260216:revenue"), r.kv.ops.join(","));
+  const f = await runSched("13 23 10-15 * *", "2026-02-16T07:13", { latest: "2026-01" });
+  chk("scheduled revenue 國定假日、產物新鮮 → 不 dispatch", !f.calls.some((u) => u.includes("/dispatches")) &&
+    f.calls.some((u) => u.startsWith(REV_URL)), f.calls.join(","));
+  const w = await runSched("13 23 10-15 * *", "2026-02-10T07:13", { latest: "2025-12" });
+  chk("scheduled revenue 窗外（02-10）→ 零 fetch、零 KV", w.calls.length === 0 && w.kv.ops.length === 0, `${w.calls} ${w.kv.ops}`);
+  const c = await runSched("35 5 * * 2-6", "2026-02-16T13:35", null);
+  chk("對照：同日 daysummary（tw:true）被休市守門擋（讀了行事曆、零 dispatch、零 KV）",
+    c.calls.some((u) => u.startsWith(HOLIDAYS_URL)) && !c.calls.some((u) => u.includes("/dispatches")) && c.kv.ops.length === 0,
+    `${c.calls} ${c.kv.ops}`);
 }
 
 console.log(`\n${fail === 0 ? "PASS" : "FAIL"}  ${pass} 通過 / ${fail} 失敗`);

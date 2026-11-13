@@ -1162,11 +1162,30 @@ export async function dispatchIching(env, tp = taipeiParts(), fetchFn = fetch, s
 // 跨 repo：mktbal/diag 在 postmkt repo——既有 GH_DISPATCH_TOKEN 已含 postmkt actions:write（見 wrangler.toml
 //   secret 註解與哨兵 postmkt dispatch），故跨 repo 補發沿用同一 token，無需額外授權。
 const POSTMKT_BASE = "https://raw.githubusercontent.com/shihpc/postmkt/main";
+// 月營收班的日期窗（台北日期的「日」，含頭含尾）；需與 BACKUP_CRONS 內 revenue 那條 cron（"13 23 10-15 * *"＝UTC 10–15 日 23:13＝台北 11–16 日 07:13）一致
+export const REV_DAY_WINDOW = { from: 11, to: 16 };
+// 台北日期是否落在日窗內（純函式；格式不合一律 false＝窗外，寧可不動作）
+export function inDayWindow(dateISO, win) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateISO || ""));
+  if (!m || !win) return false;
+  const d = Number(m[3]);
+  return d >= win.from && d <= win.to;
+}
+// 台北日期的「上一個月」（YYYY-MM；1 月 → 前一年 12 月）。格式不合回 null。
+export function prevMonthOf(dateISO) {
+  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(String(dateISO || ""));
+  if (!m) return null;
+  let y = Number(m[1]), mo = Number(m[2]);
+  if (mo < 1 || mo > 12) return null;
+  if (mo === 1) { y -= 1; mo = 12; } else mo -= 1;
+  return `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}`;
+}
 // 六條每日高價值班設定：
 //   mode "date"     → 產物 field（前 10 碼）=== 今日台北交易日；
 //   mode "genToday" → generated_at 的台北日 === 今日（判「今天有沒有跑過」；news 等用）；
 //   mode "usDate"   → 產物 date（美股交易日）≥ 最近預期美股交易日（lastExpectedUsTradingDate；
 //                     us 專用，2026-08-13 取代 genToday——舊判準被每輪重寫的 generated_at 污染）。
+//   mode "revMonth" → 產物 latest（YYYY-MM）≥ 台北今日的上一個月（revenue 專用，2026-11-13；見 prevMonthOf）。
 //   tw true  → 交易日守門用當日 frame series（假日無 → 不補發）；us 為 false（美股班，cron dow 已守門）。
 // 2026-07-22 翻轉：Worker 從「備援補發」升格「主排程」——CF cron 挪到「上游資料就緒的理想
 // 時點」先跑（GH cron 挪後變兜底備援、一條不刪＝CF 單點故障防線）。機制不變（新鮮度檢查→
@@ -1190,6 +1209,13 @@ export function backupPipelines(env) {
       dep: { url: `${POSTMKT_BASE}/data/postmkt.json`,      field: "date" } },
     { name: "mktbal",     repo: "postmkt",             wf: "mktbal.yml",     url: `${POSTMKT_BASE}/data/market_balance_history.json`,    field: "latest_date", mode: "date", tw: true,
       dep: { url: `${POSTMKT_BASE}/data/diag/diag.json`,    field: "date" } },
+    // revenue（2026-11-13，規格 docs/revenue-trigger.md）：postmkt 月營收 Beat／Miss。Worker 主觸發、GH cron（台北 11–16 日 07:30）兜底。
+    //   mode "revMonth"：data/revenue/index.json 的 latest（YYYY-MM）≥ 台北今日的上一個月＝新鮮。
+    //   dayWindow：只在台北日期的「日」落在 11–16 時動作（申報期限每月 10 日、遇假日順延；同 GH cron 窗），窗外 out-of-window。
+    //   anyDay：不看交易日／週末／國定假日（月營收是每月申報的公開資料，週末照抓）——只有本班帶，讓 tw:false 分支的週末守門不套用；
+    //   國定假日守門在 scheduled handler 只套 tw:true，本班 tw:false 自然不受影響。
+    { name: "revenue",    repo: "postmkt",             wf: "revenue.yml",    url: `${POSTMKT_BASE}/data/revenue/index.json`,             field: "latest", mode: "revMonth", tw: false,
+      anyDay: true, dayWindow: REV_DAY_WINDOW },
   ];
 }
 // event.cron → 單體班 pipeline 名（cron 字串需與 wrangler.toml crons[] 完全一致）。
@@ -1211,6 +1237,10 @@ export const BACKUP_CRONS = {
   "55 12 * * 2-6": "baseline",     // 台北 20:55（首發 20:05＋50 分——baseline 腳本自帶 10 分×4 重試，
                                    //   等它跑完才判失敗，否則誤判重發；GH 兜底 21:15）
   "35 21 * * *":   "us",           // 台北 05:35（首發 05:05＋30 分；GH 兜底 06:10）；weekend 同樣由 dow 守門
+  // 月營收主觸發（2026-11-13）：UTC 每月 10–15 日 23:13＝台北 11–16 日 07:13（GH 兜底 07:30）。dow *：不看週末／假日。
+  // 分鐘 13 避開既有同分撞點（逐分鐘展開比對見 CLAUDE.md）；仍以 event.cron 精確攔截——落到 scheduledRole 的 07:13 會 fallthrough 成 frame。
+  // 不加 recheck cron（窗內每天檢查一次即可）。需與 wrangler.toml crons 內該條完全一致。
+  "13 23 10-15 * *": "revenue",
 };
 // 非單體班的排程角色（cron 字串 → 角色；晚場協調班／am summary 輪詢窗）
 export const ICHING_CRON = "30 14,15 * * 2-6";   // 股市易經每日班；需與 wrangler.toml crons 內該條完全一致（UTC 14:30／15:30＝台北 22:30／23:30）
@@ -1312,6 +1342,13 @@ export function productFresh(obj, pipe, today) {
     const d = String(obj[pipe.field] || "").slice(0, 10);
     return !!d && d >= lastExpectedUsTradingDate(today);
   }
+  if (pipe.mode === "revMonth") {
+    // revenue（2026-11-13）：latest（YYYY-MM）≥ 台北今日的上一個月才算新鮮；缺值／非字串／格式不合一律不新鮮（→ 補發）
+    const v = obj[pipe.field];
+    if (typeof v !== "string" || !/^\d{4}-\d{2}$/.test(v)) return false;
+    const pm = prevMonthOf(today);
+    return !!pm && v >= pm;
+  }
   return String(obj[pipe.field] || "").slice(0, 10) === today;
 }
 // 產物抓取：cache-buster（?_=）繞開 GitHub raw CDN ~5 分快取，要看的是「當下最新狀態」
@@ -1325,11 +1362,13 @@ async function fetchProduct(url, fetchFn = fetch) {
 export async function runBackup(env, tp, pipe, fetchFn = fetch, opts = {}) {
   if (!env.GH_DISPATCH_TOKEN) return { name: pipe.name, skipped: "no-token" };   // 靜默（同哨兵/news/morning）
   const today = tp.date;
+  // 日期窗（目前只有 revenue 帶 dayWindow）：窗外不抓產物、不讀寫 KV、不 dispatch
+  if (pipe.dayWindow && !inDayWindow(today, pipe.dayWindow)) return { name: pipe.name, skipped: "out-of-window" };
   if (pipe.tw) {
     // TW 班：當日 frame series 存在＝盤中有資料＝交易日（假日/週末無 → 不補發）
     const series = env.FLOW_KV ? await env.FLOW_KV.get(`series:${today}`, "json") : null;
     if (!series || !series.length) return { name: pipe.name, skipped: "non-trading-day" };
-  } else if (tp.dow != null && (tp.dow < 1 || tp.dow > 5)) {
+  } else if (!pipe.anyDay && tp.dow != null && (tp.dow < 1 || tp.dow > 5)) {
     // us（美股班）：cron 用 dow *（跨台北日界；CF dow 為 Quartz 1-7＝日~六），週末守門改在此用台北 dow——21:30 UTC 只在
     // 台北一~五晨落平日；台北六/日晨（UTC 五/六）不補發，避免週末對無新資料的 us.yml 空轉補發
     return { name: pipe.name, skipped: "non-trading-day" };

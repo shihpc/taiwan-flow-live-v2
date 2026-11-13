@@ -152,6 +152,28 @@
     **已知限制**：①同 am，週六兩班 dispatch 失敗不告警（`alertJob` 週末 skip）；試算缺班只影響畫面上的試算卦，不影響正式卦 ②`taiwan-stock-iching` 的 daily／checks／collect-events
     共用 concurrency 群組 `iching-commit`（`cancel-in-progress: false`），08:15 班還在跑、08:45 班排隊時若有其他 run 排入，08:45 可能在開始前被取消（依 GitHub 文件推論、未實測；
     該 repo §22 已記）——不另做補叫，08:15 班已有一份試算；不查國定假日（休市日試算本來就是裁定 #77 的用途）。`/status` iching dueHour 23.75 不動（試算不寫 `latest.json`）。
+- `backup` 單體班 **revenue＝postmkt 月營收主觸發（2026-11-13，規格與驗收條件 `docs/revenue-trigger.md`）**：cron `"13 23 10-15 * *"`
+  ＝UTC 每月 10–15 日 23:13＝**台北每月 11–16 日 07:13**（`wrangler.toml` 第 23 條，**crons 22→23 條**；`BACKUP_CRONS` 值 `"revenue"`，
+  由 `dispatchRoleForCron` 精確攔截——漏攔時 07:13 會落到 `scheduledRole` 的 fallthrough＝frame，`test/routing.mjs` 釘住反證）。
+  `export function backupPipelines` 第 8 條：`postmkt`／`revenue.yml`、產物 `data/revenue/index.json` 的 `latest`、`mode:"revMonth"`
+  （`export function productFresh`：`latest` 為 `^\d{4}-\d{2}$` 字串且 ≥ 台北今日的上一個月＝新鮮；上一個月由純函式
+  `export function prevMonthOf` 算，1 月→前一年 12 月；缺值／非字串／格式不合一律不新鮮→補發）、`tw:false`、**`anyDay:true`**、
+  **`dayWindow: REV_DAY_WINDOW`（`{from:11,to:16}`）**。`export async function runBackup` 兩處新增：①token 守門之後、任何 KV／fetch 之前，
+  `pipe.dayWindow` 存在且台北日不在窗內（`export function inDayWindow`）→ 回 `{skipped:"out-of-window"}`，零 fetch／零 KV／零 dispatch；
+  ②`tw:false` 分支的台北週末守門改為 `!pipe.anyDay && …`——**只有 revenue 帶 `anyDay`／`dayWindow`**，us 班行為逐字不變。
+  國定假日守門在 `scheduled` handler 只套 `bpipe.tw` 為真的班，revenue 為 `tw:false` 自然照跑、不讀行事曆。其餘沿用既有機制：
+  `bkfired:<date>:revenue` 冪等、`ghDispatchWithRetry`、dispatch 失敗告警 tag `bk-err-revenue`、jobstat（`/jobs` 可見 fresh／fired#1）、
+  `/backup?name=revenue`（dry 預設 1）。**不加 recheck cron**（窗內每天一次、6 天至多 6 次 dispatch；同日 postmkt GH cron 07:30 仍會再跑一次，
+  postmkt builder 內容相同不寫檔、workflow 有 concurrency group 序列化）。
+  **同分撞點：無**（2026-11-13，一次性腳本不進 repo：把 toml 23 條逐分鐘展開 UTC 2026-11-01～2027-10-31 共 525,600 分鐘，dow 依 Quartz 慣例
+  1＝週日～7＝週六，新 cron 觸發 72 次＝12 個月×6 天，與既有 22 條同分 0 次；UTC 23 時的既有 cron 分鐘只有 `7,47 0-14,22-23`＝:07／:47、
+  `*/5 23 * * *`＝5 的倍數、`10 23 * * 2-6`＝:10。腳本自我檢驗：同法重算 `10 23 * * 2-6`×`*/5 23 * * *` 一週撞點＝5，與既有記載相符）。
+  另以腳本比對改動前後（`git show 3eea6d0:worker/src/index.js`）對既有 22 條 cron 的 `dispatchRoleForCron`／`backupPipelineForCron`，
+  及 `scheduledRole` 在 2026-11、2027-01 兩整月逐分鐘（1,964,160 次）的輸出：差異 0；既有 7 條 `backupPipelines` 設定逐字相同。
+  Cloudflare 官方文件 cron 表的 Days of Month 欄列「1-31｜`* , - / L W`」（支援 `-` 範圍），dow 欄「1-7」（1＝Sunday）。
+  測試 `node test/backup.mjs` 20–25 段（含 `scheduled` 對 2026-02-16 春節休市日照 dispatch、同日 daysummary 被休市守門擋的對照）。
+  **刻意未納入 `test/holidays2.mjs` 的角色表**：該表對「本批改動前」基準 `94c5773` 對跑，舊版不認得此 cron（會落 frame），對跑必不同；
+  休市日行為改在 `test/backup.mjs` 25 段以同一入口（`export default` 的 `scheduled`）斷言。已知限制見「已知限制／坑」第 8 條。
 - `evening` 晚場協調班：台北 21:00–23:55 每 5 分，串 pm summary → diag → mktbal → aetf2
   - **選股二追蹤名單 LINE 通知（2026-10-19 使用者裁定，`export async function pushPick2Track`）**：`runEvening` 的**最後一步**
     （排在 `pushDailyCards` 之後、獨立 try/catch，既有步驟順序與行為不變），所以沿用 `runEvening` 的守門（`GH_DISPATCH_TOKEN`、
@@ -213,6 +235,7 @@
 | `sentinel`（17:00–22:55 每 5 分，`runSentinel`） | 不探測、不 dispatch、不寫 `sentinel:<date>:*`、不告警 | **改**（比照週末：`scheduledRole` 週末本來就不回 sentinel） |
 | 單體班 TW 四條＋recheck（daysummary／intraday／aetf／baseline，`runBackup`） | 不讀 KV、不抓產物、不 dispatch、不告警 | **改**（多一道；原本 `series:<date>` 守門在 frame 不寫後本來也會擋，現在連那次 KV get 都省） |
 | 單體班 us＋recheck（`runBackup` us） | **照跑** | **不改**：美股日曆，台股休市與它無關 |
+| 單體班 revenue（`runBackup` revenue，2026-11-13 新增，台北每月 11–16 日 07:13） | **照跑**（週末亦照跑；窗外日 `out-of-window`） | **新增時即定**：月營收是每月申報的公開資料、不依台股交易日；`tw:false` 不進休市守門、`anyDay` 不進週末守門 |
 | `evening`（21:00–23:55，`runEvening`：pm summary→diag→mktbal→aetf2→圖卡渲染→`pushDailyCards`） | 整條不跑 | **改**（原 series 守門本來也會擋；`pushDailyCards` 另有 baseline.date 閘門，同樣不必動） |
 | `health` eve（23:50，`runHealthCheck`） | 帶 `opts.marketClosed`：只留 `HEALTH_NON_TW`（us／lastweek／meta／**news**／morning）；eve 實際剩 **news**（＋週一的 lastweek／meta）；**濾完一項不剩才零副作用 return** | **改**。**news 假日照檢（使用者裁決 2026-09-29）**：news 由 Worker 每日 :07 dispatch、不看休市，假日沒落地是真故障。低頻班是週頻／月頻 GH cron、不看台股休市，丟掉會讓週一假日那週漏檢；台股日產物（flows／postmkt／summary-pm…）不告警。休市日不讀 `series` |
 | `health` morn（09:30） | 同上，剩 **morning＋us**（summary-am 不檢） | **改**；morning 因 06:47 照跑而照檢（下列）；summary-am 不檢——summary.yml 進場查到休市會自己 skip，當日檔本來就不會有。假日隔天（09-29）不需特別處理——eve／morn 每一項都是「今日」產物，沒有一項以「前一交易日」為基準 |
@@ -1127,3 +1150,9 @@ npx wrangler tail                   # 線上即時觀測 scheduled 事件成敗
    該 repo 的 `CLAUDE.md` 同時期就寫了「與本站 Worker 健檢班互為盲區補位」，只有本檔沒跟上。
    （**它補的是「Worker 掛掉時沒人告警」這個盲區**，不等於本節 `runSentinel` 的 dispatch 失敗
    告警可以拿掉——後者是分鐘級、前者是每日兩班，粒度不同。）
+8. **月營收 revenue 主觸發（2026-11-13，規格 `docs/revenue-trigger.md` §3）的已知限制**：
+   ①新鮮度只看 `latest` 是否已到上個月——上個月一旦產出，窗內之後幾天 Worker 都判新鮮、不 dispatch；**晚報公司與數字更正的重算只靠
+   postmkt GH cron**（台北 11–16 日 07:30，延遲數小時無妨，只怕整次被跳過）。
+   ②首日（11 日）若多數公司尚未申報（期限順延的月份），postmkt builder 因「可分析家數未達五成」不寫檔→產物仍舊→隔天 Worker 再發一次；預期行為、不告警。
+   ③`alertJob` 本體對台北週末一律 skip，**週末那天 dispatch 失敗不會告警**（同 iching 週六班）。
+   ④窗內 6 天每天都 dispatch 失敗或 workflow 每次都沒產出時，目前**沒有「整個月沒產出」的專門告警**（`runHealthCheck` 未納入本班，另案）。

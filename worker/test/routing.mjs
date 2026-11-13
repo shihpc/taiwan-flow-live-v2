@@ -20,13 +20,14 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
 
 // ---- wrangler.toml：條數、無重複 ----
 {
-  chk("crons 共 22 條", CRONS.length === 22, String(CRONS.length));   // 2026-10-23 拆 tick 量測班：22→21；2026-11-08 #77 T4 試算卦班：21→22
+  chk("crons 共 23 條", CRONS.length === 23, String(CRONS.length));   // 2026-10-23 拆 tick 量測班：22→21；2026-11-08 #77 T4 試算卦班：21→22；2026-11-13 月營收主觸發：22→23
   chk("crons 無重複字串", new Set(CRONS).size === CRONS.length);
   chk("已拆除的 tick 量測班 cron 不在 toml 內", !CRONS.includes("*/5 1-11 * * 2-6"));
   chk("FRAME_CRON 是 toml 第一條", CRONS[0] === FRAME_CRON, CRONS[0]);
   chk("ICHING_CRON 在 toml 內且僅一次", CRONS.filter((c) => c === ICHING_CRON).length === 1);
   chk("ICHING_AM_CRON 在 toml 內且僅一次", CRONS.filter((c) => c === ICHING_AM_CRON).length === 1);
   chk("ICHING_TRIAL_CRON 在 toml 內且僅一次", CRONS.filter((c) => c === ICHING_TRIAL_CRON).length === 1);
+  chk("月營收 cron 在 toml 內且僅一次", CRONS.filter((c) => c === "13 23 10-15 * *").length === 1);
 }
 
 // ---- toml 每一條的路由歸屬（null＝不走 dispatchRoleForCron、落 scheduledRole 由台北時刻分流）----
@@ -40,14 +41,20 @@ const tpe = (iso) => new Date(new Date(`${iso}Z`).getTime() - 8 * 3600e3);
     "*/5 23 * * *": "summary-am", "*/10 0 * * *": "summary-am",
     "50 15 * * 2-6": "health", "30 1 * * 2-6": "health",
     [ICHING_CRON]: "iching", [ICHING_AM_CRON]: "iching", [ICHING_TRIAL_CRON]: "iching",
+    "13 23 10-15 * *": "backup",   // 2026-11-13 月營收主觸發（name＝revenue，見下）
   };
-  chk("路由表恰 22 條且與 toml 集合相同",
-    Object.keys(EXPECT).length === 22 && CRONS.every((c) => c in EXPECT),
+  chk("路由表恰 23 條且與 toml 集合相同",
+    Object.keys(EXPECT).length === 23 && CRONS.every((c) => c in EXPECT),
     CRONS.filter((c) => !(c in EXPECT)).join(" | "));
   for (const [cron, kind] of Object.entries(EXPECT)) {
     const got = dispatchRoleForCron(cron);
     chk(`cron 歸屬：${cron}`, kind === null ? got === null : (got && got.kind === kind), JSON.stringify(got));
   }
+  // 月營收：精確攔截成 revenue 備援班；若漏攔，台北 07:13 會落到 scheduledRole 的 fallthrough＝frame
+  const rv = dispatchRoleForCron("13 23 10-15 * *");
+  chk("月營收 cron → {kind:backup, name:revenue}", rv && rv.kind === "backup" && rv.name === "revenue", JSON.stringify(rv));
+  chk("（反證）月營收 07:13 未攔截時 scheduledRole 會判成 frame",
+    scheduledRole(taipeiParts(tpe("2026-11-12T07:13:00")), "13 23 10-15 * *") === "frame");
   // 已拆除的 tick cron 不再被攔截（若有人誤把它加回 toml，會落到 scheduledRole＝frame——這正是當初必須攔的理由）
   chk("dispatchRoleForCron 不再認得 tick cron", dispatchRoleForCron("*/5 1-11 * * 2-6") === null);
   chk("（反證）未攔截的 cron 在盤中會被 scheduledRole 判成 frame",
