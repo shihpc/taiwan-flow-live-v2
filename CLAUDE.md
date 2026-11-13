@@ -169,7 +169,7 @@
   1＝週日～7＝週六，新 cron 觸發 72 次＝12 個月×6 天，與既有 22 條同分 0 次；UTC 23 時的既有 cron 分鐘只有 `7,47 0-14,22-23`＝:07／:47、
   `*/5 23 * * *`＝5 的倍數、`10 23 * * 2-6`＝:10。腳本自我檢驗：同法重算 `10 23 * * 2-6`×`*/5 23 * * *` 一週撞點＝5，與既有記載相符）。
   另以腳本比對改動前後（`git show 3eea6d0:worker/src/index.js`）對既有 22 條 cron 的 `dispatchRoleForCron`／`backupPipelineForCron`，
-  及 `scheduledRole` 在 2026-11、2027-01 兩整月逐分鐘（1,964,160 次）的輸出：差異 0；既有 7 條 `backupPipelines` 設定逐字相同。
+  及 `scheduledRole` 在 2026-11、2027-01 兩整月逐分鐘（61 天 × 1,440 分 × 22 條＝1,932,480 次；驗收者獨立重現）的輸出：差異 0；既有 7 條 `backupPipelines` 設定逐字相同。
   Cloudflare 官方文件 cron 表的 Days of Month 欄列「1-31｜`* , - / L W`」（支援 `-` 範圍），dow 欄「1-7」（1＝Sunday）。
   測試 `node test/backup.mjs` 20–25 段（含 `scheduled` 對 2026-02-16 春節休市日照 dispatch、同日 daysummary 被休市守門擋的對照）。
   **刻意未納入 `test/holidays2.mjs` 的角色表**：該表對「本批改動前」基準 `94c5773` 對跑，舊版不認得此 cron（會落 frame），對跑必不同；
