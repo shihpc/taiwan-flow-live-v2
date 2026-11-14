@@ -69,4 +69,4 @@ postmkt `.github/workflows/revenue.yml`（月營收 Beat／Miss，規格 `postmk
   含 `13 23 10-15 * *`＝Cloudflare 接受日期欄範圍寫法。線上 `GET /backup?name=revenue`（使用者 2026-11-13 台北 15:32 以瀏覽器開啟，
   雲端 session 連不到 workers.dev）回 `{"dry":true,"name":"revenue","fresh":true,"productDate":"2026-10"}`。窗外日的 `out-of-window` 未線上實測（要等 11/17 起），
   以測試為依據。
-- 6：⏳ 待台北 2026-11-14 07:13 首次觸發後看 `/jobs`。
+- 6：✅ 台北 2026-11-14（六）07:13 首次觸發，`/jobs`（使用者 09:03 台北開啟）記錄 `{"t":"07:13","n":"revenue","r":"fresh","x":"2026-10"}`——準點、週六照跑、判新鮮未 dispatch，與預期相符。**本案結案。**
