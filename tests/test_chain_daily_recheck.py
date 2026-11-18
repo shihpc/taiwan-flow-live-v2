@@ -375,3 +375,81 @@ def test_real_series_untouched_when_refetch_fails(tmp_path, monkeypatch, mode, c
         text = out.read_text(encoding="utf-8").replace(got["generated_at"], src["generated_at"])
         assert text == REAL.read_text(encoding="utf-8")
     assert capsys.readouterr().err.count("::warning::") == 3
+
+
+# ---------------------------------------------------------------- 重抓原料形狀異常（2026-11-18 驗收後補）
+
+def _malform(env, d, how):
+    if how == "str":                                     # 字串型數值
+        for c in CODES[:10]:
+            env.raw[d][c] = [str(env.raw[d][c][0]), str(env.raw[d][c][1]), str(env.raw[d][c][2])]
+    elif how == "str_close":
+        env.raw[d][CODES[3]][1] = "abc"
+    elif how == "none":                                  # 整列是 None
+        env.raw[d][CODES[0]] = None
+    elif how == "short":                                 # 缺欄且型別不對
+        env.raw[d][CODES[0]] = "x"
+    elif how == "taiex":
+        env.raw[d][bc.TAIEX] = ["0", "abc", "z"]
+
+
+@pytest.mark.parametrize("how", ["str", "str_close", "none", "short", "taiex"])
+def test_malformed_refetch_keeps_existing(env, how, capsys):
+    env.drop_cache()
+    before_text = env.out.read_text(encoding="utf-8")
+    d = DATES[-2]
+    _malform(env, d, how)
+    capsys.readouterr()
+    assert env.build() == 0
+    err = capsys.readouterr().err
+    assert env.calls == DATES[-3:]                       # 壞的那天不擋後面的日子
+    after = env.load()
+    assert env.out.read_text(encoding="utf-8").replace(
+        after["generated_at"], json.loads(before_text)["generated_at"]) == before_text
+    assert f"::warning::{d} 重抓資料無法計算（" in err and "Error）" in err
+    assert not (env.tmp / "cache" / f"chainday_{d}.json.gz").exists()    # 壞原料不落 cache
+
+
+def test_malformed_new_day_behaviour_unchanged(env):
+    """同一份壞原料出現在「新的一天」：既有設計是讓例外往外拋（baffaa5 與之前皆然），本批不改。"""
+    env.drop_cache()
+    assert bc.build(START, DATES[-2], env.out, True, False) == 0     # 序列還沒有最後一天
+    env.drop_cache()
+    _malform(env, DATES[-1], "str")
+    with pytest.raises(TypeError):
+        env.build()
+
+
+def test_null_sp0_stays_null_after_recheck(env):
+    """CI 產的日子 sp0 是 null；重抓（即使前一日原始價就在記憶體、內容也變了）不得把它填成數字。"""
+    j = env.load()
+    for k in ("sp0_up", "sp0_n"):
+        for i in range(NDAYS - 3, NDAYS):
+            j["quality"][k][i] = None
+    env.out.write_text(json.dumps(j, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    env.raw[DATES[-1]][CODES[1]][0] *= 2                 # cache 保留：前一日原始價拿得到
+    assert env.build() == 0
+    after = env.load()
+    assert after["market"]["amt"][-1] != j["market"]["amt"][-1]
+    for k in ("sp0_up", "sp0_n"):
+        assert after["quality"][k][-3:] == [None, None, None]
+        assert after["quality"][k][:-3] == j["quality"][k][:-3]
+
+
+def test_real_series_untouched_when_every_refetch_raises_typeerror(tmp_path, monkeypatch, capsys):
+    if not REAL.exists():
+        pytest.skip("無 data/chain_daily/series.json")
+    cj = json.loads((ROOT / "data" / "classify.json").read_text(encoding="utf-8"))
+    src = json.loads(REAL.read_text(encoding="utf-8"))
+    if cj.get("generated_at") != src.get("classify_at"):
+        pytest.skip("classify 已換版")
+    out = tmp_path / "series.json"
+    shutil.copy(REAL, out)
+    monkeypatch.setattr(bc, "CACHE", tmp_path / "cache")
+    monkeypatch.setattr(bc, "SLEEP", 0)
+    monkeypatch.setattr(bc, "fetch_day", lambda ds: {"2330": ["1", "2", "3"], bc.TAIEX: [0, 1.0, 0]})
+    assert bc.build(bc.START_DEFAULT, src["dates"][-1], out, False, False) == 0
+    got = json.loads(out.read_text(encoding="utf-8"))
+    assert out.read_text(encoding="utf-8").replace(got["generated_at"], src["generated_at"]) == \
+        REAL.read_text(encoding="utf-8")
+    assert capsys.readouterr().err.count("（TypeError），保留既有值") == 3

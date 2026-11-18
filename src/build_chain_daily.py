@@ -701,32 +701,45 @@ def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
                 kept += 1
                 prev_seen = None
                 continue
-            agg = aggregate_day(prices, cmap) if prices else None
-            if not agg or not agg["market"]["amt"]:
-                print(f"::warning::{ds} 重抓回空（或市場總額為 0），保留既有值",
+            # 聚合／比對／sp0 整段都在保護內：重抓的本意是「失敗就保留既有值」，原料形狀異常
+            # （字串型數值、缺欄…）造成的任何例外都不得讓整班失敗。訊息只帶例外型別，不帶
+            # 例外內容（避免把含 token 的 URL 之類印出來）。全部算完才寫 cache 與 days[ds]。
+            try:
+                agg = aggregate_day(prices, cmap) if prices else None
+                if not agg or not agg["market"]["amt"]:
+                    print(f"::warning::{ds} 重抓回空（或市場總額為 0），保留既有值",
+                          file=sys.stderr, flush=True)
+                    kept += 1
+                    prev_seen = None
+                    continue
+                why = None if recheck_force else recheck_reject_reason(old, agg)
+                if why:
+                    print(f"::warning::{ds} 重抓資料明顯不如既有值（{why}），不覆寫",
+                          file=sys.stderr, flush=True)
+                    kept += 1
+                    prev_seen = None
+                    continue
+                tx_ = agg["market"]["taiex"]
+                if tx_ is not None and (isinstance(tx_, bool) or not isinstance(tx_, (int, float))):
+                    raise TypeError("指數收盤不是數值")   # 否則會在最後的 columnar() 才炸、整班失敗
+                diff = day_changed(old, agg, chain_names)
+                # sp0 診斷欄：既有值是 None（CI 無 cache 的日子）就維持 None——重抓不改變
+                # 診斷欄的涵蓋範圍，資料沒變時輸出才逐位不變；既有有值則用新原始價重算，
+                # 拿不到前一日原始價時，內容有變才多抓一次前一日，否則沿用舊值。
+                oq = old.get("qual") or {}
+                q = {"sp0_up": oq.get("sp0_up"), "sp0_n": oq.get("sp0_n")}
+                if oq.get("sp0_n") is not None:
+                    pp = prev_prices(ds, allow_fetch=diff)
+                    if pp:
+                        hit, chk = spread_zero_up(prices, pp, cmap)
+                        q = {"sp0_up": hit, "sp0_n": chk}
+                cache_write(ds, prices, classify_at)
+            except Exception as e:                  # noqa: BLE001
+                print(f"::warning::{ds} 重抓資料無法計算（{type(e).__name__}），保留既有值",
                       file=sys.stderr, flush=True)
                 kept += 1
                 prev_seen = None
                 continue
-            why = None if recheck_force else recheck_reject_reason(old, agg)
-            if why:
-                print(f"::warning::{ds} 重抓資料明顯不如既有值（{why}），不覆寫",
-                      file=sys.stderr, flush=True)
-                kept += 1
-                prev_seen = None
-                continue
-            cache_write(ds, prices, classify_at)
-            diff = day_changed(old, agg, chain_names)
-            # sp0 診斷欄：既有值是 None（CI 無 cache 的日子）就維持 None——重抓不改變
-            # 診斷欄的涵蓋範圍，資料沒變時輸出才逐位不變；既有有值則用新原始價重算，
-            # 拿不到前一日原始價時，內容有變才多抓一次前一日，否則沿用舊值。
-            oq = old.get("qual") or {}
-            q = {"sp0_up": oq.get("sp0_up"), "sp0_n": oq.get("sp0_n")}
-            if oq.get("sp0_n") is not None:
-                pp = prev_prices(ds, allow_fetch=diff)
-                if pp:
-                    hit, chk = spread_zero_up(prices, pp, cmap)
-                    q = {"sp0_up": hit, "sp0_n": chk}
             agg["qual"] = q
             days[ds] = agg
             prev_seen = (ds, prices)
