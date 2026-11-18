@@ -15,7 +15,7 @@
 #   鍵名與形狀不變；這是跨站語意變更（消費者清單見 CLAUDE.md「us.json 的 date」節）。
 #
 # 用法：FINMIND_TOKEN=... python src/build_us.py
-#       python src/build_us.py --complete   # 只讀現有 data/us.json，印 yes/no（us.yml 齊全判斷用，免 token）
+#       python src/build_us.py --complete [路徑]   # 只讀現有 data/us.json，印 yes/no（us.yml 齊全判斷用，免 token）
 
 from __future__ import annotations
 import json
@@ -74,14 +74,30 @@ def rows_complete(doc: dict) -> bool:
     """us.yml 的「資料已齊」判斷（純函式）：
     ①有列且頂層 date 有值 ②**沒有任何列的 d 超前 date**（有＝新一日資料正在入庫，還沒過半）
     ③落後 date 的列 ≤ 1/3（容許少數長期停更的檔，沿用舊門檻）。
-    舊判斷只數「落後」；max 口徑下不會有超前列，眾數口徑下會有，漏數就會在混合日期時誤判已齊。"""
-    rows = all_rows((doc or {}).get("groups"))
-    date_ = (doc or {}).get("date") or ""
-    if not rows or not date_:
+    舊判斷只數「落後」；max 口徑下不會有超前列，眾數口徑下會有，漏數就會在混合日期時誤判已齊。
+    任何形狀異常（doc／groups／rows 不是預期型別、列的 d 不是字串…）一律回 False＝未齊：
+    這是排程檔（us.yml，bash -e）的判斷式，不得有拋例外的路徑；非字串的 d 視為不可信。"""
+    try:
+        rows = all_rows(doc.get("groups"))
+        date_ = doc.get("date")
+        if not rows or not isinstance(date_, str) or not date_:
+            return False
+        if not all(isinstance(r, dict) and isinstance(r.get("d"), str) and r["d"] for r in rows):
+            return False
+        ahead = sum(1 for r in rows if r["d"] > date_)
+        behind = sum(1 for r in rows if r["d"] < date_)
+        return ahead == 0 and behind * 3 <= len(rows)
+    except Exception:
         return False
-    ahead = sum(1 for r in rows if (r.get("d") or "") > date_)
-    behind = sum(1 for r in rows if (r.get("d") or "") < date_)
-    return ahead == 0 and behind * 3 <= len(rows)
+
+
+def complete_cli(path=None) -> str:
+    """`--complete [路徑]`：讀檔回 "yes"/"no"；檔案缺／壞 JSON／任何例外都回 "no"（rc 一律 0）。"""
+    try:
+        doc = json.loads(Path(path or OUT).read_text(encoding="utf-8"))
+        return "yes" if rows_complete(doc) else "no"
+    except Exception:
+        return "no"
 
 
 def us_rows(tic: str) -> list:
@@ -280,9 +296,8 @@ def main():
 
 if __name__ == "__main__":
     if "--complete" in sys.argv[1:]:
-        try:
-            print("yes" if rows_complete(json.loads(OUT.read_text(encoding="utf-8"))) else "no")
-        except (OSError, ValueError, AttributeError):
-            print("no")
+        # 選填路徑（測試用）；us.yml 不帶＝讀 data/us.json。只印 yes/no 一行、rc 0
+        _rest = [a for a in sys.argv[1:] if a != "--complete"]
+        print(complete_cli(_rest[0] if _rest else None))
     else:
         main()

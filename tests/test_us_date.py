@@ -211,11 +211,57 @@ def test_us_yml_uses_rows_complete():
     assert '[ "$new" != "$prev" ] && [ "$fresh" = "yes" ]' in y
 
 
-def test_cli_complete_reads_file_without_token(tmp_path, monkeypatch):
+def test_complete_bad_shapes_never_raise():
+    """形狀異常一律未齊、不拋例外（非字串 d 視為不可信）。"""
+    ok = _doc(24, 0)
+    assert rows_complete(ok) is True
+    bad_d = _doc(24, 0); bad_d["groups"][0]["rows"][3]["d"] = 20261117
+    none_d = _doc(24, 0); none_d["groups"][0]["rows"][3]["d"] = None
+    for bad in (bad_d, none_d, None, [], "x", {"date": 20261117, "groups": ok["groups"]},
+                {"date": NEW, "groups": "x"}, {"date": NEW, "groups": [{"g": "x", "rows": [1, 2]}]},
+                {"date": NEW, "groups": [None]}):
+        assert rows_complete(bad) is False
+
+
+def _cli(*args):
+    """以子行程實跑 `python src/build_us.py --complete …`；環境不含 FINMIND_TOKEN。"""
     env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": ":".join(p for p in sys.path if p)}
-    r = subprocess.run([sys.executable, str(ROOT / "src/build_us.py"), "--complete"],
+    assert "FINMIND_TOKEN" not in env
+    r = subprocess.run([sys.executable, str(ROOT / "src/build_us.py"), "--complete", *args],
                        capture_output=True, text=True, env=env, cwd=ROOT)
-    assert r.returncode == 0 and r.stdout.strip() in ("yes", "no"), r.stderr
+    return r.returncode, r.stdout, r.stderr
+
+
+def _write(tmp_path, doc_or_text):
+    p = tmp_path / "us.json"
+    p.write_text(doc_or_text if isinstance(doc_or_text, str) else json.dumps(doc_or_text), encoding="utf-8")
+    return str(p)
+
+
+def test_cli_complete_incident_shape_says_no(tmp_path):
+    doc = incident()
+    doc["date"] = pick_us_date(r["d"] for r in all_rows(doc["groups"]))     # 新口徑下的 date＝11-16
+    rc, out, err = _cli(_write(tmp_path, doc))
+    assert (rc, out) == (0, "no\n"), err
+
+
+def test_cli_complete_all_same_day_says_yes(tmp_path):
+    rc, out, err = _cli(_write(tmp_path, redate(incident() | {"date": OLD}, set())))
+    assert (rc, out) == (0, "yes\n"), err
+
+
+def test_cli_complete_missing_bad_json_int_d_say_no(tmp_path):
+    assert _cli(str(tmp_path / "nope.json"))[:2] == (0, "no\n")
+    assert _cli(_write(tmp_path, "{not json"))[:2] == (0, "no\n")
+    doc = redate(incident() | {"date": OLD}, set())
+    doc["groups"][0]["rows"][0]["d"] = 20261116
+    assert _cli(_write(tmp_path, doc))[:2] == (0, "no\n")
+
+
+def test_cli_complete_default_path_prints_one_line():
+    """不帶路徑＝讀 repo 的 data/us.json（us.yml 的用法）：只印 yes/no 一行、rc 0。"""
+    rc, out, err = _cli()
+    assert rc == 0 and out in ("yes\n", "no\n"), err
 
 
 # ---------- Worker 三處守門在新口徑下恢復作用（只讀 worker/src/index.js，不改它）----------
