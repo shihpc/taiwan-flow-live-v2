@@ -135,6 +135,7 @@ import argparse
 import gzip
 import io
 import json
+import math
 import sys
 import time
 from collections import defaultdict
@@ -521,6 +522,16 @@ def recheck_reject_reason(old: dict, new: dict) -> str | None:
     return None
 
 
+def agg_finite(agg: dict) -> bool:
+    """單日聚合裡會落檔的數值是否全為有限數（None 可以；NaN／inf 不行）。"""
+    def ok(v):
+        return v is None or (isinstance(v, (int, float)) and math.isfinite(v))
+    vals = list((agg.get("market") or {}).values()) + list((agg.get("cov") or {}).values())
+    for ch in (agg.get("chains") or {}).values():
+        vals += list(ch.values())
+    return all(ok(v) for v in vals)
+
+
 def day_changed(old: dict, new: dict, chain_names: list[str]) -> bool:
     """兩份單日聚合寫進 series.json 後是否不同（用與落檔相同的四捨五入比；不看 sp0 診斷欄）。"""
     def f(day):
@@ -681,7 +692,7 @@ def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
             pp_ = fetch_day(pd_)
             time.sleep(SLEEP)
         except Exception as e:                      # noqa: BLE001
-            print(f"::warning::{pd_} 前一日原始價抓取失敗（{ds} 的 sp0 診斷欄沿用舊值）：{e}",
+            print(f"::warning::{pd_} 前一日原始價抓取失敗（{ds} 的 sp0 診斷欄沿用舊值；{type(e).__name__}）",
                   file=sys.stderr, flush=True)
             return None
         return pp_ or None
@@ -697,7 +708,9 @@ def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
                 fetched += 1
                 time.sleep(SLEEP)
             except Exception as e:                  # noqa: BLE001
-                print(f"::warning::{ds} 重抓失敗，保留既有值：{e}", file=sys.stderr, flush=True)
+                # 只印例外型別：fin.api_get 的 HTTPError 訊息帶含 token 的完整 URL（鐵律 1）
+                print(f"::warning::{ds} 重抓失敗（{type(e).__name__}），保留既有值",
+                      file=sys.stderr, flush=True)
                 kept += 1
                 prev_seen = None
                 continue
@@ -722,6 +735,8 @@ def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
                 tx_ = agg["market"]["taiex"]
                 if tx_ is not None and (isinstance(tx_, bool) or not isinstance(tx_, (int, float))):
                     raise TypeError("指數收盤不是數值")   # 否則會在最後的 columnar() 才炸、整班失敗
+                if not agg_finite(agg):                  # NaN／inf 會寫出非法 JSON（NaN／Infinity）
+                    raise ValueError("聚合結果含非有限數")
                 diff = day_changed(old, agg, chain_names)
                 # sp0 診斷欄：既有值是 None（CI 無 cache 的日子）就維持 None——重抓不改變
                 # 診斷欄的涵蓋範圍，資料沒變時輸出才逐位不變；既有有值則用新原始價重算，
@@ -822,7 +837,7 @@ def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
                 fetched += 1
                 time.sleep(SLEEP)
             except Exception as e:                  # noqa: BLE001
-                print(f"::warning::{nxt} 原始價抓取失敗，sp0 診斷欄沿用舊值：{e}",
+                print(f"::warning::{nxt} 原始價抓取失敗（{type(e).__name__}），sp0 診斷欄沿用舊值",
                       file=sys.stderr, flush=True)
                 continue
         cur = cache_read(ds)[0]

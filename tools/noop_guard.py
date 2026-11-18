@@ -138,7 +138,7 @@ def main(argv=None) -> int:
         try:
             same = worktree_same(argv[1])
         except Exception as e:  # noqa: BLE001 — fail-open
-            print(f"::warning::noop_guard 自身失敗（{e!r}），視為有實質變動")
+            print(f"::warning::noop_guard 自身失敗（{type(e).__name__}），視為有實質變動")
             return EXIT_CHANGE
         print(f"noop_guard: {argv[1]} " + ("與 HEAD 只差頂層時間戳 → noop" if same else "內容有異 → 真變化"))
         return EXIT_NOOP if same else EXIT_CHANGE

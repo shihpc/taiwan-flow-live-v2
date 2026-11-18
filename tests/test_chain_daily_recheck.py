@@ -453,3 +453,115 @@ def test_real_series_untouched_when_every_refetch_raises_typeerror(tmp_path, mon
     assert out.read_text(encoding="utf-8").replace(got["generated_at"], src["generated_at"]) == \
         REAL.read_text(encoding="utf-8")
     assert capsys.readouterr().err.count("（TypeError），保留既有值") == 3
+
+
+# ---------------------------------------------------------------- 不印例外內容／擋 NaN‧inf（2026-11-18 重驗後補）
+
+FAKE = "FAKE_TOKEN_abc123"
+
+
+def _strict(text: str) -> dict:
+    def boom(x):
+        raise AssertionError(f"非法 JSON 常數 {x}")
+    return json.loads(text, parse_constant=boom)
+
+
+def test_warnings_never_print_exception_text(env, capsys, monkeypatch):
+    env.drop_cache()
+    before = env.body()
+
+    def fetch(ds):
+        env.calls.append(ds)
+        raise RuntimeError(f"401 Client Error for url: https://x/api/v4/data?dataset=T&token={FAKE}")
+    monkeypatch.setattr(bc, "fetch_day", fetch)
+    capsys.readouterr()
+    assert env.build() == 0
+    cap = capsys.readouterr()
+    assert FAKE not in cap.out + cap.err and "token=" not in cap.out + cap.err
+    for d in DATES[-3:]:
+        assert f"::warning::{d} 重抓失敗（RuntimeError），保留既有值" in cap.err
+    assert env.body() == before
+
+
+def test_sp0_prev_fetch_warning_has_no_exception_text(env, capsys, monkeypatch):
+    """既有 sp0 有值、當日內容有變、前一日不在 cache → 會現抓前一日；那次失敗的 warning 也不得帶例外內容。"""
+    d = DATES[-3]
+    (env.tmp / "cache" / f"chainday_{DATES[-4]}.json.gz").unlink()
+    env.raw[d][CODES[0]][0] *= 2
+    env.fail.add(DATES[-4])
+    orig = env.fetch
+
+    def fetch(ds):
+        if ds in env.fail:
+            env.calls.append(ds)
+            raise RuntimeError(f"boom token={FAKE}")
+        return orig(ds)
+    monkeypatch.setattr(bc, "fetch_day", fetch)
+    capsys.readouterr()
+    assert env.build() == 0
+    cap = capsys.readouterr()
+    assert DATES[-4] in env.calls and FAKE not in cap.out + cap.err
+    assert f"::warning::{DATES[-4]} 前一日原始價抓取失敗" in cap.err and "RuntimeError" in cap.err
+
+
+@pytest.mark.parametrize("how", ["taiex_nan", "taiex_inf", "amt_nan", "close_inf", "spread_nan"])
+def test_non_finite_refetch_keeps_existing(env, how, capsys):
+    env.drop_cache()
+    before_text = env.out.read_text(encoding="utf-8")
+    d = DATES[-2]
+    r = env.raw[d]
+    if how == "taiex_nan":
+        r[bc.TAIEX][1] = float("nan")
+    elif how == "taiex_inf":
+        r[bc.TAIEX][1] = float("inf")
+    elif how == "amt_nan":
+        r[CODES[4]][0] = float("nan")
+    elif how == "close_inf":
+        r[CODES[4]][1] = float("inf")
+    elif how == "spread_nan":
+        r[CODES[4]][2] = float("nan")
+    capsys.readouterr()
+    assert env.build() == 0
+    err = capsys.readouterr().err
+    text = env.out.read_text(encoding="utf-8")
+    after = _strict(text)                                # 沒有 NaN／Infinity
+    assert text.replace(after["generated_at"], json.loads(before_text)["generated_at"]) == before_text
+    assert f"::warning::{d} 重抓資料無法計算（" in err
+
+
+def test_agg_finite():
+    ok = {"market": {"amt": 1.0, "n": 3, "ret_ew": None, "taiex": 2.5}, "chains": {"a": {"amt": 0.0, "share": None}},
+          "cov": {"dup": 0.5}}
+    assert bc.agg_finite(ok)
+    for path in (("market", "amt"), ("market", "taiex"), ("cov", "dup")):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            x = copy.deepcopy(ok)
+            x[path[0]][path[1]] = bad
+            assert not bc.agg_finite(x)
+    x = copy.deepcopy(ok)
+    x["chains"]["a"]["share"] = float("nan")
+    assert not bc.agg_finite(x)
+
+
+def test_real_series_untouched_when_refetch_raises_with_token(tmp_path, monkeypatch, capsys):
+    if not REAL.exists():
+        pytest.skip("無 data/chain_daily/series.json")
+    cj = json.loads((ROOT / "data" / "classify.json").read_text(encoding="utf-8"))
+    src = json.loads(REAL.read_text(encoding="utf-8"))
+    if cj.get("generated_at") != src.get("classify_at"):
+        pytest.skip("classify 已換版")
+    out = tmp_path / "series.json"
+    shutil.copy(REAL, out)
+    monkeypatch.setattr(bc, "CACHE", tmp_path / "cache")
+    monkeypatch.setattr(bc, "SLEEP", 0)
+
+    def fetch(ds):
+        raise RuntimeError(f"403 for url: https://api/x?token={FAKE}")
+    monkeypatch.setattr(bc, "fetch_day", fetch)
+    capsys.readouterr()
+    assert bc.build(bc.START_DEFAULT, src["dates"][-1], out, False, False) == 0
+    cap = capsys.readouterr()
+    got = json.loads(out.read_text(encoding="utf-8"))
+    assert out.read_text(encoding="utf-8").replace(got["generated_at"], src["generated_at"]) == \
+        REAL.read_text(encoding="utf-8")
+    assert FAKE not in cap.out + cap.err and cap.err.count("重抓失敗（RuntimeError）") == 3
