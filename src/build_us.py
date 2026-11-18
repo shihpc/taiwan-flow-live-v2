@@ -6,7 +6,16 @@
 #   ADR 溢價% = (ADR收盤×USDTWD) / (台股收盤×換股比) - 1
 # 排程：美股收盤(台北凌晨4/5點)後、台股開盤前 05:40 台北跑（us.yml）
 #
+#
+# 頂層 date 的語意（2026-11-18 起）＝各列資料日（列的 d）的**眾數，平手取較舊者**（pick_us_date）。
+#   舊口徑是 max：FinMind 美股日線逐檔滾動入庫，2026-11-18 清晨 24 列只有 AAPL 先到 11-17、
+#   其餘 23 列（含三大指數、費半、TSM）仍是 11-16，檔案卻被標成 date=2026-11-17、brief 寫
+#   「11/17美股大跌，費半-5.3%…」（數字其實是 11-16 的），下游守門（Worker runUsCatchup／
+#   productFresh usDate／晨卡 usFresh、postmkt 早場彙總）全被騙成「已是最新」。
+#   鍵名與形狀不變；這是跨站語意變更（消費者清單見 CLAUDE.md「us.json 的 date」節）。
+#
 # 用法：FINMIND_TOKEN=... python src/build_us.py
+#       python src/build_us.py --complete   # 只讀現有 data/us.json，印 yes/no（us.yml 齊全判斷用，免 token）
 
 from __future__ import annotations
 import json
@@ -37,6 +46,42 @@ def fv(v):
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def pick_us_date(dates) -> str | None:
+    """頂層 date＝各列資料日的眾數，**平手取較舊者**；無有效日期回 None。
+
+    與 build_aetf_diff.pick_primary（平手取大）刻意相反：us.json 的 date 是下游判斷
+    「隔夜美股到了沒」的唯一依據（Worker 補跑班與晨卡守門都比 date ≥ 預期交易日），
+    寧可晚推進、讓補跑與守門繼續等，也不要讓少數先入庫的列把整份檔標成新的一天。
+    過半數的列到新日才推進。"""
+    cnt: dict = {}
+    for d in dates:
+        if d:
+            d = str(d)[:10]
+            cnt[d] = cnt.get(d, 0) + 1
+    if not cnt:
+        return None
+    top = max(cnt.values())
+    return min(d for d, n in cnt.items() if n == top)
+
+
+def all_rows(groups) -> list:
+    return [r for g in (groups or []) for r in (g.get("rows") or [])]
+
+
+def rows_complete(doc: dict) -> bool:
+    """us.yml 的「資料已齊」判斷（純函式）：
+    ①有列且頂層 date 有值 ②**沒有任何列的 d 超前 date**（有＝新一日資料正在入庫，還沒過半）
+    ③落後 date 的列 ≤ 1/3（容許少數長期停更的檔，沿用舊門檻）。
+    舊判斷只數「落後」；max 口徑下不會有超前列，眾數口徑下會有，漏數就會在混合日期時誤判已齊。"""
+    rows = all_rows((doc or {}).get("groups"))
+    date_ = (doc or {}).get("date") or ""
+    if not rows or not date_:
+        return False
+    ahead = sum(1 for r in rows if (r.get("d") or "") > date_)
+    behind = sum(1 for r in rows if (r.get("d") or "") < date_)
+    return ahead == 0 and behind * 3 <= len(rows)
 
 
 def us_rows(tic: str) -> list:
@@ -131,8 +176,16 @@ def session_brief(us_date: str) -> str:
 
 
 def brief(groups, us_date: str | None = None) -> str:
-    """70 字內規則式盤勢分析：日期→大盤定調→費半→台積ADR→開盤含義→極端個股（空間夠才放）。"""
-    g = {x["g"]: x["rows"] for x in groups}
+    """70 字內規則式盤勢分析：日期→大盤定調→費半→台積ADR→開盤含義→極端個股（空間夠才放）。
+
+    不混日（2026-11-18）：給了 us_date 時，只引用資料日 d == us_date 的列——三大指數定調、
+    費半、TSM ADR、極端個股逐項過濾，不得把別日的數字掛在 us_date 這個日期前綴下。
+    某項被濾掉就略過該項（電子開盤含義需費半與 TSM 同時有效）；全部被濾掉回空字串
+    （不輸出只剩句號的殘句；Worker 美股卡對空 brief 本來就只畫表格）。"""
+    def same_day(r):
+        return bool(r) and (us_date is None or r.get("d") == us_date)
+
+    g = {x["g"]: [r for r in x["rows"] if same_day(r)] for x in groups}
     idx = {r["s"]: r for r in g.get("指數", [])}
     sp, nq, dj, sox = idx.get("^GSPC"), idx.get("^IXIC"), idx.get("^DJI"), idx.get("^SOX")
     adr = {r["s"]: r for r in g.get("台股ADR", [])}
@@ -175,12 +228,11 @@ def brief(groups, us_date: str | None = None) -> str:
         if len(cand) + 1 > 70:
             break
         out = cand
-    return out + "。"
+    return (out + "。") if out else ""
 
 
 def main():
     fx = usdtwd()
-    us_date = None
     groups = []
     for gname, items in GROUPS:
         rows = []
@@ -193,7 +245,6 @@ def main():
                 m = None
             if not m:
                 continue
-            us_date = max(us_date or m["date"], m["date"])
             row = {"s": tic, "n": name, "c": m["c"], "chg": m["chg"], "vr": m["vr"], "amp": m["amp"], "d": m["date"]}
             if len(it) == 4 and fx:  # ADR：算溢價
                 twc = tw_close(it[2])
@@ -203,6 +254,8 @@ def main():
             rows.append(row)
             print(f"{tic} {m['date']} {m['chg']:+.2f}%", flush=True)
         groups.append({"g": gname, "rows": rows})
+    # 頂層 date＝各列資料日的眾數（平手取舊）；brief／session 都用這同一個值，不混日
+    us_date = pick_us_date(r["d"] for r in all_rows(groups))
     from datetime import datetime, timezone
     TPE = timezone(timedelta(hours=8))
     out = {"date": us_date, "fx": round(fx, 3) if fx else None,
@@ -226,4 +279,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--complete" in sys.argv[1:]:
+        try:
+            print("yes" if rows_complete(json.loads(OUT.read_text(encoding="utf-8"))) else "no")
+        except (OSError, ValueError, AttributeError):
+            print("no")
+    else:
+        main()

@@ -34,7 +34,9 @@ jobs:
       - run: pip install requests
       # FinMind 美股日線收盤後逐檔滾動入庫（07-07 實測：06:46 全無、07:36 指數/權值先到、~08:25 全齊）。
       # 策略：每 10 分鐘重跑、內容有變（排除 generated_at）才提交＋部署（分批上站，指數/ADR 先到先見），
-      # 直到日期推進且舊檔 ≤1/3 才算齊；美國休市日（日期不會推進）重試耗盡後結束。
+      # 直到日期推進、無超前列且落後列 ≤1/3 才算齊；美國休市日（日期不會推進）重試耗盡後結束。
+      # 頂層 date＝各列資料日眾數（平手取舊，2026-11-18）：少數列先到新日時 date 不推進，
+      # 內容有變仍照常分批 commit（各列自帶 d），迴圈繼續輪詢。
       - name: build us.json（等 FinMind 入庫，分批上站）
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
@@ -105,7 +107,10 @@ jobs:
           for i in $(seq 1 "$ROUNDS"); do
             python src/build_us.py
             new=$(python -c "import json;print(json.load(open('data/us.json')).get('date') or '')")
-            fresh=$(python -c "import json;d=json.load(open('data/us.json'));rows=[r for g in d['groups'] for r in g['rows']];stale=sum(1 for r in rows if r.get('d') and r['d']<(d.get('date') or ''));print('yes' if rows and stale*3<=len(rows) else 'no')")
+            # 齊全判斷（2026-11-18 改）：date 現為各列資料日的眾數（平手取舊），故除了「落後列 ≤1/3」
+            # 還要「沒有任何列超前 date」——有超前列＝新一日正在入庫、尚未過半，不得宣告已齊。
+            # 判斷邏輯在 build_us.rows_complete（tests/test_us_date.py 守門），此處只讀檔、免 token。
+            fresh=$(python src/build_us.py --complete)
             push_now
             if [ "$new" != "$prev" ] && [ "$fresh" = "yes" ]; then echo "資料已齊：$prev → $new"; break; fi
             if [ $i -lt "$ROUNDS" ]; then echo "US 資料未齊（date=$new fresh=$fresh），10 分鐘後重試 $i/$ROUNDS"; sleep 600; fi

@@ -203,7 +203,8 @@
   台北二~六＝昨日、日/一＝上週五、美國假日不處理），未達即 dispatch `us.yml`
   inputs.rounds=2；KV 20 分時段桶 dedup、週日/週一晨不跑、08:05 後不觸發。
   動機：FinMind 美股常態 07:30–08:30 才入庫，05:05 主班 12 輪×10 分在 06:59 耗盡
-  搆不到入庫窗。us 的 recheck／晨間健檢判準同步由 genToday 改資料日（mode `usDate`））
+  搆不到入庫窗。us 的 recheck／晨間健檢判準同步由 genToday 改資料日（mode `usDate`））。
+  **這三道守門（補跑班／`productFresh` usDate／晨卡 `usFresh`）比的都是 us.json 頂層 `date`；該欄語意 2026-11-18 由 max 改眾數，見下方「us.json 的 `date`」節**
 
 ## 休市日（國定假日）各排程角色（2026-09-29 批次二，規格 `docs/holiday-calendar.md` §5a）
 
@@ -438,7 +439,7 @@ KV 中殘留的 `tick:<YYYYMMDD>:<HHMM>` 樣本 TTL 7 天，自然過期、不�
 - **新鮮度守門**在 `export async function buildCardsData`（slot=am）：晨報卡＝
   brief.date 為台北今日；morning2/3＝morning.json 的 generated_at 台北日為今日
   （**不是**晚間的 baseline gate——早上 baseline 必為昨日）；美股速覽卡 news-morning-4
-  （2026-08-13 起 per-card gate）＝us.json 的 date 達最近預期美股交易日，不再被
+  （2026-08-13 起 per-card gate）＝us.json 的 date 達最近預期美股交易日（`date` 自 2026-11-18 起為各列資料日的眾數、平手取舊，見「us.json 的 `date`」節），不再被
   morning generated_at 連坐（美國國定假日該卡當天缺席，屬可接受行為）。
   全不新鮮 → 空卡＋date=null → Python 拒渲染。
 - **晨報卡的分句／截斷層**（2026-08-29 後補，起因：當日 `quote` 實際 673 字糊成一整塊）：
@@ -626,6 +627,33 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 **群益投信補位恢復＋補位輸入擴大到 errors（2026-11-07，使用者裁定；尚未上線觀測）**：`src/aetf_fallback.py` 的 `FETCHERS` 由 5 檔增為 **6 檔**＝統一 00403A／00981A、野村 00980A／00985A／00999A、**群益 00415A**（群益台灣核心50，2026-10-20 掛牌；FinMind `TaiwanStockActiveETFHolding` 自 10-15 起對它一直「近 14 日無資料」）。群益抓取 `grab_capital`／純函式 `parse_capital` 恢復自遷移前舊碼（`git show cdb00eb^:src/build_aetf.py`；2026-07-20 隨整批投信 PCF 爬蟲改走 FinMind 而移除，非群益端點本身的問題）：`POST https://www.capitalfund.com.tw/CFWeb/api/etf/buyback`、body `{"fundId":"504","date":null}`，取 `data.stocks[].stocNo/stocName/share/weight`；**身分驗證**：回應 `fundName`（依序找 `data.fundName`／頂層／`data.pcf.fundName`，位置未驗證）必須含關鍵字「核心50」，缺或不符就 raise＝走「抓取失敗」略過——fundId 是群益全產品共用流水號（`docs/aetf-expansion-research.md`：399＝00982A、500＝00992A、501＝群益標普500、502＝00997A），推錯時不會把別檔持股靜默寫成 00415A；成功時 log 印實際 `fundName`。日期 `data.pcf.date1` 依舊 `build_aetf_diff.py` 的 `TPLUS1_ETFS` 註解屬 **T+1 標記**、`pcf_offset=-1` 回推一個交易日（同野村）。**未驗證三件事**（沙箱 proxy 對 capitalfund.com.tw 回 403，回應樣本是依舊碼欄位名合成）：①fundId 504 是推論：依官網產品頁網址 `/etf/product/detail/504`，推定 buyback 的 fundId 與產品頁編號相同，repo 內無對應證據（推錯時由上述 fundName 比對擋下） ②端點與欄位名在 2026-07 之後是否改版 ③`date1` 的 T+1 語意是否仍成立。**上線後確認**：aetf 班 log 的 `[fallback] 群益 fundId=504 fundName='…' date1=…`（名稱應為群益台灣核心50）、`[fallback] 00415A 群益: N檔 基準日 YYYY/MM/DD` 與 `00415A 補位：None → <date>（群益）`；`data/aetf/latest.json` 的 `etfs["00415A"]` 應有 `source:"issuer:群益"`、`fallback_used["00415A"]`，且 `src_date` 與同班其他檔相同（若比多數晚一天＝T+1 判斷錯）；log 若是 `抓取失敗`（訊息含「不含期望關鍵字」＝fundId 推錯、「缺 fundName」＝欄位位置不符）或 `日期無法折算` 就是上面三點之一不成立。
 **補位輸入改為本班 `etfs` ∪ `errors`**（原為 `etfs`＋`dropped`）：00415A 從未在 `etfs` 出現、也不在 `prev`，舊路徑連補位機會都沒有。`fetch_fallback` 本來就只處理 `FETCHERS` 有登記的代號，其餘照舊略過。只在 `errors`、沒有任何舊快照的檔補位成功時才寫入 `etfs`：`name` 取 `list_active_etfs()` 的名稱（空則用代號）、`units=null`、`twse_aum_yi` **照一般路徑現抓 `grab_twse_aum`**（是當下的集保規模、不是過期值；失敗回 `null`）——與「由 dropped 救回者清成 `null`」不同；補位拿不到維持只在 `errors`。**`errors` 不會因補位成功而移除**（與既有 dropped 救回行為一致），所以 Worker `fxCardAetf2` 的 `foot`「另 M 檔當日無揭露資料」仍會把 00415A 算進 M、同時它也出現在列表中——已知、未改。`build_aetf_diff.py` 對只有一天快照的檔本來就跳過（`len(dates) < 2`），00415A 第二個補位日起才進 diff。測試 `tests/test_aetf_capital.py`（解析、fundName 不符／缺漏 raise、T+1 折算、空回應、形狀／日期異常、只在 errors 的檔交給補位並成功才寫入、補位整段拋錯不影響主幹）；`tests/test_aetf_fallback.py` 的 `FETCHERS` 斷言同步改 6 檔，並補 `test_script_main` 讓 pytest 也跑到那組檢查；`tests/test_aetf_stale_carry.py::test_dropped_still_offered_to_fallback` 的 `grab_twse_aum` stub 改回非 None（11），才真的守住「dropped 救回仍清 null」（拿掉 `and code not in dropped` 實測會紅）。
 **00416A（主動台新臺灣中小，台新投信，2026-11-03 掛牌；依網路搜尋的新聞／第三方站，未查官方公告）未補**：舊碼沒有台新投信端點（同家 00987A 由 FinMind 正常涵蓋），沙箱也連不到台新官網無法查格式，不憑空編端點。另 2026-11-06 `errors` 裡還有 **00418A**（本批未查）。
+
+**us.json 的 `date`＝各列資料日的眾數、平手取較舊者（2026-11-18 起；跨站語意變更，鍵名與形狀不變）**：
+- **事故（2026-11-18 清晨）**：`src/build_us.py` 的頂層 `date` 原取各列資料日（列的 `d`）的 **max**。FinMind 美股日線逐檔滾動入庫，
+  台北 06:37／06:48／06:58 三版（commit `5855c61`／`ed64c73`／`0e81002`）24 列只有 AAPL 先到 11-17，其餘 23 列（三大指數、
+  `^SOX` -5.28、TSM -6.34）仍是 11-16，檔案卻標 `date=2026-11-17`、`brief` 寫「11/17美股大跌，費半-5.3%重挫，台積ADR-6.3%…」
+  （數字全是 11-16 的）。下游凡是比 `date` 的守門全數放行：Worker `runUsCatchup`（不補跑）、`productFresh` usDate（recheck／晨間健檢判新鮮）、
+  晨卡 `usFresh`（news-morning-4 照推 LINE）、postmkt 早場彙總（`20261118-am`）、taiwan-stock-news「昨日市場」美股表。
+- **修法**：`pick_us_date()`（grep `def pick_us_date`）取眾數、**平手取舊**——與 `build_aetf_diff.pick_primary`（平手取大）**刻意相反**：
+  `date` 是下游判斷「隔夜美股到了沒」的唯一依據，寧可晚推進、讓補跑與守門繼續等。**過半數的列到新日才推進**。
+  `brief()` 的日期前綴用同一個值，且**只引用 `d == date` 的列**（三大指數定調、費半、TSM ADR、極端個股逐項過濾；電子開盤含義需費半與 TSM
+  同時有效；全部被濾掉回**空字串**，不再輸出只剩「。」的殘句——Worker `fxCardMorning4` 對空 brief 只畫表格）。`session`（分鐘 K）本來就只查
+  `date` 那一天、不混日。各列照舊自帶 `d`，少數超前／落後的列仍在 `groups` 裡（分批上站不變），消費者要逐列判日就看 `d`。
+- **brief 不混日也修掉一個既有問題**：就算沒有超前列，落後列的數字以前也會被寫進 brief——`c991d9f`（11-17 07:40 那版，16 列 11-16、8 列仍 11-13）
+  的 brief 是「…超微-8.8%領跌」，那個 -8.8% 是 AMD **11-13** 的數字；新口徑下該版改引 SanDisk -8.6%（11-16）。
+- **`us.yml` 齊全判斷同步改**：`fresh` 由內嵌算式改呼叫 `python src/build_us.py --complete`（`rows_complete()`，只讀檔、免 token）＝
+  有列＋**沒有任何列超前 `date`**＋落後列 ≤1/3（舊門檻）。舊算式只數落後列——max 口徑下不會有超前列，眾數口徑下會有，漏數就會在
+  「1 列新、23 列舊」時回 yes。迴圈的結束條件（`date` 與開跑時不同且 fresh）、輪數、每輪內容有變才 commit／push 重試／rebase 自我恢復、
+  notify-failure 一行未動。行為差異：混合日期期間 `date` 不推進 → 不會提早宣告「資料已齊」→ 繼續輪詢到過半且齊、或輪數耗盡。
+- **Worker 一行未改**：三道守門本來就比頂層 `date`，`date` 不再被少數列推進後自然恢復作用——`date=2026-11-16`、台北 2026-11-18（週三）07:10 時
+  `lastExpectedUsTradingDate`＝11-17 → `runUsCatchup` 會 dispatch、usDate 判不新鮮、news-morning-4 不進 payload
+  （`tests/test_us_date.py::test_worker_guards_block_when_date_is_majority_day` 以 node 直接載入 `worker/src/index.js` 斷言；測試放 `tests/`、不在 `worker/**`，不觸發部署）。
+- **消費者（改這欄的取法＝跨站變更）**：本 repo Worker 三處（上列）＋晨卡 `fxCardMorning4` 的 brief；taiwan-stock-news「昨日市場」美股表；
+  postmkt 早場彙總閘門與 `gather_news`（該 repo 另案同步把閘門改成比 `date`，並更新 `docs/date-semantics.md`）。
+- **代價與已知限制**：①平手與「未過半」時 `date` 停在舊日，晨卡 news-morning-4 當天可能缺席、補跑班會多 dispatch 幾次（rounds=2，20 分桶去重）——
+  寧缺勿錯；②過半但未齊（例 13 新 11 舊）時 `date` 已推進、守門放行，表格裡仍有落後列（各列 `d` 可辨），brief 只講新日的列；
+  ③歷史回放（淺 clone 可見的 25 版 `data/us.json`）：新舊口徑不同的有 4 版＝事故三版＋`fdad139`（11-13 07:41，12:12 平手 → 新口徑取 11-11）。
+  測試 `tests/test_us_date.py`（fixture `tests/fixtures/us_incident_20261118.json`＝`0e81002` 的 us.json 原樣）。
 
 **日期／時戳欄位語意一律查 `postmkt/docs/date-semantics.md`**（跨五站的唯一對照表）。
 其中 Worker `/live` 的 **`ts` ＝指數列時戳**（2026-09-08 C 案落地後的新語意，取代舊的

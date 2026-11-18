@@ -1398,7 +1398,13 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
     新增 us 晨間補跑班 `runUsCatchup`（掛 summary-am crons，台北 07:00-08:05，dispatch
     rounds=2、KV 20 分桶 dedup）——FinMind 美股常態 07:30-08:30 才入庫，05:05 主班 12 輪
     ×10 分在 06:59 耗盡搆不到入庫窗；AM 美股速覽卡改 per-card gate（us date 達預期才進
-    payload）。測試 test/uscatchup.mjs）②冪等 KV `bkfired:<date>:<name>`（成功 dispatch 才寫、每日至多補一次；
+    payload）。測試 test/uscatchup.mjs。
+    **2026-11-18 us.json `date` 口徑由 max 改眾數（平手取舊）**：當日清晨三版（`5855c61`／`ed64c73`／`0e81002`）24 列只有 AAPL 先到
+    11-17、其餘 23 列仍 11-16，max 把檔案標成 `date=2026-11-17`、brief 寫「11/17美股大跌，費半-5.3%…」，上述 usDate 判準、
+    `runUsCatchup` 與晨卡 gate 全被騙成新鮮（postmkt 早場彙總與 news 站美股表同受影響）。根因＝FinMind 逐檔滾動入庫時少數列先到就把
+    max 推進。修法＝`build_us.pick_us_date`（眾數、平手取舊，過半才推進）＋`brief()` 只引用 `d == date` 的列（全濾掉回空字串）＋
+    us.yml 齊全判斷改 `python src/build_us.py --complete`（`rows_complete`：無超前列且落後列 ≤1/3）。Worker 未改；鍵名與形狀不變，
+    屬跨站語意變更。細節與消費者清單見 CLAUDE.md「us.json 的 `date`」節；測試 `tests/test_us_date.py`）②冪等 KV `bkfired:<date>:<name>`（成功 dispatch 才寫、每日至多補一次；
     失敗不寫保留重試）③交易日守門（TW 班看當日 `series:<date>` frame 是否存在，假日/週末無→不補；us 靠 runBackup 內台北 dow 守週末——us 班跨台北日界，dow 無法直接表達，cron 改用 dow *；
     CF cron dow 為 Quartz 慣例 1-7＝日~六，平日應寫 2-6，見上方「CF cron dow 慣例錯誤」段）
     ④`GH_DISPATCH_TOKEN` 未設整段靜默。程式：`worker/src/index.js` `backupPipelines`/`BACKUP_CRONS`/
