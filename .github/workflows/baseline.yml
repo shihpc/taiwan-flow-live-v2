@@ -39,11 +39,14 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python src/build_baseline.py
-      # 鏈層日頻序列增量更新（缺哪天抓哪天；backtest/cache 被 .gitignore 擋住，
-      # CI 上每次約 1~2 個 API 請求）。三種「當天沒新資料」情境共用同一條路：
-      # 非交易日、FinMind 當日尚未入庫、單日抓取失敗（builder 印警告後 exit 0）
-      # → dates 最新一天不變 → 還原 generated_at-only 變更，不製造無意義 commit，
-      # 缺的日期下次執行自動回補（FRESH_GUARD 5 日內不會被誤標休市）。
+      # 鏈層日頻序列增量更新（缺哪天抓哪天；backtest/cache 被 .gitignore 擋住）。
+      # 2026-11-18 起每班另重抓重算序列最近 3 個交易日（build_chain_daily.py 的 RECHECK_DAYS，
+      # 規格 docs/chain-daily-recheck.md §1）：CI 上每次 3 個 API 請求＋缺日各 1 個。
+      # 「要不要 commit」改為比**內容**（原本只比 dates 最新一天，近日重抓到不同數值時會被
+      # 當成沒變而還原）：與 HEAD 只差頂層 generated_at → 還原，不製造無意義 commit；
+      # 有新交易日、或近 3 日重抓得到不同數值 → 留給下一步 commit。
+      # 非交易日、FinMind 當日尚未入庫、單日抓取失敗（builder 印警告後 exit 0）都落在
+      # 「內容沒變」那條路，缺的日期下次執行自動回補（FRESH_GUARD 5 日內不會被誤標休市）。
       # ★ 本步失敗「絕不」擋下面 baseline.json 的 commit：失敗只記 outputs.ok，
       #   還原 data/chain_daily/ 杜絕半寫入被 commit，紅燈延到 commit 之後才發
       #   （見最後一步；同 intraday.yml 的 rrg base 模式）。
@@ -52,11 +55,10 @@ jobs:
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: |
-          before=$(python -c "import json;d=json.load(open('data/chain_daily/series.json'))['dates'];print(d[-1] if d else '')" 2>/dev/null || echo "")
           if python src/build_chain_daily.py; then
-            after=$(python -c "import json;d=json.load(open('data/chain_daily/series.json'))['dates'];print(d[-1] if d else '')" 2>/dev/null || echo "")
-            if [ "$after" = "$before" ]; then
-              echo "chain_daily 無新交易日（最新仍為 ${after:-無}）→ 還原，不 commit"
+            same=0; python tools/noop_guard.py --worktree data/chain_daily/series.json || same=$?
+            if [ "$same" = "3" ]; then
+              echo "chain_daily 內容無變化（只有 generated_at）→ 還原，不 commit"
               git checkout -- data/chain_daily/ 2>/dev/null || true
             fi
             echo "ok=1" >> "$GITHUB_OUTPUT"

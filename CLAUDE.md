@@ -64,16 +64,19 @@
   `worker/` Cloudflare Worker（`src/index.js` 單檔＋`wrangler.toml`＋`test/` **31 支** `.mjs`（2026-10-23 `ls worker/test/*.mjs | wc -l` 實查：拆 tick 量測班刪 `tickdiag.mjs`、
   其中與 tick 無關的 cron／靜態守門搬到新增的 `routing.mjs`，另加管理端點認證的 `adminkey.mjs`；前一版 30 支含 10-19 的 `pick2track.mjs`）；
   `data/` 產出 JSON（姊妹站上游）；`backtest/`；`.github/workflows/`
-  （**15 支**＝帶 cron 11 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
+  （**17 支**（2026-11-18 以 `yaml.safe_load` 逐支實查；原寫 15 支漏計 2026-09-30 加的 `measure-live-swr.yml`，本次再加 `reconcile.yml`）
+  ＝帶 cron 12 支：9 支排程 builder（aetf／baseline／cards／daysummary／intraday／
   lastweek／meta／morning／us，多為 Worker 主觸發的兜底備援）＋`backtest-regen.yml`
   （每月 1 日重生比對班）＋`holidays.yml`（2026-09-28，每週日台北 10:17 抓 TWSE 休市行事曆 →
-  `data/twse_holidays.json`，家族共用，規格 `docs/holiday-calendar.md`；**無 Worker 主觸發、只有 GH cron**）；無 cron 4 支：`backtest.yml`（離線煙霧＋規格守門）、
+  `data/twse_holidays.json`，家族共用，規格 `docs/holiday-calendar.md`；**無 Worker 主觸發、只有 GH cron**）
+  ＋`reconcile.yml`（2026-11-18，台北週二~六 07:37 延後對帳，只讀、免 token、不 commit；見「chain_daily 近日重抓＋延後對帳」節；**無 Worker 主觸發、只有 GH cron**）；
+  無 cron 5 支：`backtest.yml`（離線煙霧＋規格守門）、
   `canon.yml`（守 CLAUDE.md 頂端 CANON 區塊）、`pages.yml`（部署）、
-  `worker-deploy.yml`（動到 `worker/**` 即跑全部測試後 `wrangler deploy`））。
-  **15 支全裝 notify-failure（2026-09-06 覆驗 14 支；2026-09-28 新增的 `holidays.yml` 同樣掛 `pipeline: v2-holidays`）**：`.github/actions/notify-failure/action.yml`
+  `worker-deploy.yml`（動到 `worker/**` 即跑全部測試後 `wrangler deploy`）、`measure-live-swr.yml`（只有 `workflow_dispatch` 的手動量測））。
+  **16 支裝 notify-failure，唯一例外是 `measure-live-swr.yml`（刻意不掛：量測失敗不是生產故障）（2026-09-06 覆驗 14 支；2026-09-28 新增的 `holidays.yml` 掛 `pipeline: v2-holidays`；2026-11-18 新增的 `reconcile.yml` 掛 `pipeline: v2-reconcile`）**：`.github/actions/notify-failure/action.yml`
   與 `claude-harness/templates/notify-failure/action.yml` 逐字相同（`diff` 空），每支 workflow
   每個 job 的末步都是 `uses: ./.github/actions/notify-failure`＋`if: failure() || cancelled()`
-  ＋`with: pipeline: v2-<name>`，workflow 頂層 `permissions` 皆含 `issues: write`
+  ＋`with: pipeline: v2-<name>`，這 16 支的 workflow 頂層 `permissions` 皆含 `issues: write`
   （以 `yaml.safe_load` 逐支掃過確認，非目測）。同日同管線只開一張 issue、重複失敗改留言。
 - **`backtest.yml` 有一個隱含依賴**：它的「規格引用的報告節仍存在且有結論行」步驟會解析
   `docs/line-cards-spec.md` §3.1 表格，**要求恰 6 列 5 欄、末欄為 `backtest/report_sorting.md`
@@ -667,6 +670,64 @@ brief 不同，這個 dueHour **只有本檔一份實作**、沒有「改一處�
 `pickFrames`／`computeFlow` 的 `nowTs`／`series:<date>` 使用，**刻意不進 `/live` 對外 JSON**
 （`buildLive` 回傳前 delete）。改 `ts` 或 `snap_ts` 任一者＝改 `/live` 語意，屬跨站變更，
 先讀 `PROJECT_SUMMARY.md`「/live 資料時間改取 max(date)」段。
+
+## chain_daily 近日重抓＋延後對帳（2026-11-18，規格與驗收條件 `docs/chain-daily-recheck.md`）
+
+**起因**：`src/build_chain_daily.py` 對全市場單日 `TaiwanStockPrice`「非空即採用」，已在 `data/chain_daily/series.json` 的日期原本永不重抓；
+`baseline.yml` 又只在「dates 最新一天有變」時才 commit。首班若抓到未更新完的資料（taiwan-flows 2026-06-26 事故同一資料集），錯值會永久留在序列
+（消費者：postmkt 輪動雷達 12 日窗、市場總覽來源 E）。歷史檢查未觀察到錯值，本批是預防性修正，**沒有重建既有資料**。
+
+**第 1 項｜每班重抓最近 3 個交易日**（`src/build_chain_daily.py`，grep `RECHECK_DAYS = 3`／`def recheck_targets`／`def recheck_reject_reason`／`def day_changed`）：
+- 一般（增量）模式把序列最近 `RECHECK_DAYS`（3）個交易日**永遠打 API 重抓**（不讀 cache）、重算、覆寫；更早的日期不動。`--rebuild`／`--offline` 不適用。
+- **任何不如意都保留既有值、印 `::warning::`、整班照常 exit 0**：抓取失敗／回空／聚合後市場總額 0；或重抓資料「明顯較差」——
+  成員檔數 `n` < 既有 × `RECHECK_MIN_N_RATIO`（0.98）、市場總額 < 既有 × `RECHECK_MIN_AMT_RATIO`（0.90）、既有有指數收盤而重抓沒有。
+  序列裡可比的完整性指標只有 `market.n` 與 `market.amt`，**沒有新增任何欄位**。**限制**：列數正常但數值是舊值（06-26 型）這道防護看不出來，
+  靠第 2 項的對帳；門檻 0.98／0.90 是依「classify 月更的成員增減遠小於 2%」「更正通常讓金額持平或增加」訂的，**沒有實測樣本**（歷史上沒發生過）。
+- **跨日衍生欄**：序列只有 `market.taiex_ret` 跨日（`columnar()` 每次用整條收盤序列現算，自動一致）與 `quality.sp0_up／sp0_n`（要前一日原始價）。
+  `sp0` 規則：既有值是 `null` 的日子維持 `null`（CI 沒有 `backtest/cache`，2026-08-11 之後的日子全是 `null`；這樣資料沒變時輸出才逐位不變），
+  既有有值才用新原始價重算（拿不到前一日原始價、而當日內容有變時多抓一次前一日）；`--recheck-dates` 指定較舊日期且內容有變時，緊接其後那天的 `sp0` 也跟著重算。
+  其餘欄位全是單日自足。**副作用**：重抓日之後才新抓的日子，因為前一日原始價剛好在記憶體裡，`sp0` 會開始有值（原本 CI 上一律 `null`）；形狀不變。
+- **冪等**：輸入沒變時 `series.json` 除頂層 `generated_at` 外逐位不變。classify 換版後第一班，最近 3 日會以新 classify 重算（那是輸入變了）。
+- 新參數：`--recheck-days N`（0＝不重抓）、`--recheck-dates 2026-11-17,2026-11-18`（只重抓指定日、取代自動的最近 N 日；手動修復單日錯值用）、
+  `--recheck-force`（繞過「明顯較差」防護；失敗／回空仍保留）。既有 `--rebuild`／`--refetch-stale`／`--offline` 行為不變。
+- **FinMind 請求量**：每班 +3 個全市場單日 `TaiwanStockPrice` 請求（另加缺日各 1 個；`sp0` 補抓只在既有有值且內容有變時 +1）。
+  同班的 `build_baseline.py` 本來就打 21 個同型請求＋3 個法人請求，每日 2~3 班 → 每日約多 6~9 個請求；節流沿用既有 `SLEEP`（0.5 秒）。
+  「在額度內」是依請求量級的推論，**未查 FinMind Sponsor 的實際額度數字**。
+- **`baseline.yml` 只動「build chain daily」這一步**：原本 `before`／`after` 比 dates 最新一天，改成
+  `python tools/noop_guard.py --worktree data/chain_daily/series.json`（grep `def worktree_same`；與 HEAD 只差頂層 `generated_at` → exit 3 → 還原不 commit；
+  內容有變 → 留給 commit 步驟）。commit／push 重試、Pages dispatch（有 commit 就 dispatch，判斷不必改）、紅燈延後、notify-failure 一行未動。
+- 測試 `tests/test_chain_daily_recheck.py`（合成原料重放＋真實 `series.json` 的失敗／回空逐位不變）、`tests/test_baseline_yml_chain_step.py`
+  （把 yml 該步驟的 run 區塊抽出在臨時 git repo 實跑）。**真實 FinMind 原料不在 git 裡**，「拿當時的原料重放」做不到，改用合成原料。
+
+**第 2 項｜延後對帳**（`tools/reconcile_daily.py`＋`.github/workflows/reconcile.yml`，`pipeline: v2-reconcile`）：
+- 對照來源＝taiwan-flows raw main 的 `data/daily/<YYYYMMDD>.json`（該站 23:40 台北有延後驗證班）。重算**一律呼叫產物本身的函式**：
+  `build_chain_daily.aggregate_day`／`keep_codes`、`build_baseline.stock_rows`（2026-11-18 由 `main()` 原樣抽出；以同一組輸入對跑抽出前後的 `main()`，
+  產出 99,116 bytes 逐位相同）。腳本只做「把對照檔轉成輸入形狀」（grep `def flows_prices`）與比對（`def recon_chain_day`／`def recon_baseline`）。
+- **對照量與門檻**（常數在腳本頂端；依 2026-10-05～11-18 共 30 個交易日實測）：
+  | 對象 | 量 | 門檻 | 30 日實測最大 |
+  |---|---|---|---|
+  | chain_daily（最近 `RECON_DAYS`＝3 個交易日） | 市場總額相對差 | `MARKET_AMT_TOL` 1% | 0.32% |
+  | | 市場等權報酬絕對差 | `MARKET_RET_TOL` 0.003 | 0.00102 |
+  | | 單鏈日成交額相對差（兩邊任一 ≥1 億才比） | `CHAIN_AMT_TOL` 2% | 0.80%（金融） |
+  | baseline（`date` 在對帳日期內才比） | 已比對個股 a5 加總相對差 | `BASE_TOT_TOL` 1% | <0.001% |
+  | | a5／a20 不符檔數、創高破底旗標不符檔數（佔已比對檔數） | `BASE_BAD_MAX` 1%（約 21 檔） | a5 1 檔、a20 6 檔、旗標 4 檔 |
+  已知口徑差：對照檔少約 64~70 檔 twse 個股（特別股等），市場總額系統性偏高 0.17%~0.32%、只有「金融」鏈天天偏高（0.17%~0.80%）；
+  baseline 約 111~118 檔對照檔沒有、不比；`y1`／`y2`／`it`／`fi`／`its`／`ints`／`subs_y` 對照檔還原不了、**不對帳**。
+- **06-26 型事故抓不抓得到（模擬，不是實際事故資料）**：每日把收盤價最高的 922 檔 twse 個股換成前一交易日的列，29 個交易日——
+  金額也是舊值：市場總額偏 3.9%~47.7%（29/29 天超過 1%）、每天 ≥42 項不符；**只有價格是舊值、金額正確**：只能靠市場等權報酬，26/29 天抓到
+  （漏的 3 天是相鄰兩日漲跌接近）；baseline 那一天另有創高破底旗標 245 檔不符（門檻約 21 檔）會抓到。**序列不存逐檔收盤，無法逐檔比價，這是已知漏洞。**
+- **無法對帳（只印 `::warning::`、綠燈）**：對照檔 404／壞檔／檔內日期不符；taiwan-flows `status.json` 的 `healthcheck.date` 還沒到那一天、或就是那一天但
+  `severity` 不是 `ok`／`warn`（`pending`＝尚未延後驗證，grep `def flows_verified`）；`series.classify_at` ≠ 現行 `classify.generated_at`（classify 剛換版，
+  等下一班 baseline 重算）；baseline 的 21 天對照檔缺任何一天。休市日（週末＋`src/twse_holidays.py`）標「略過」。
+  **限制**：`status.json` 只描述最新一天，較早的日子只能假設當時驗過。
+- **排程**：`37 23 * * 1-5`（UTC）＝台北週二~六 07:37，在 taiwan-flows 驗證班後約 8 小時、baseline 晚班後約 10 小時。
+  目標日＝台北現在回推 12 小時的日曆日（`def target_day`；延遲 4 小時 23 分內都還是前一日）；目標日休市 → 整班不對帳；
+  否則對「序列中 ≤ 目標日的最近 3 個交易日」（`def pick_dates`），所以對照檔晚到或本班延遲跨日時，前一日仍會被隔天那班補對。
+  `workflow_dispatch` 可帶 `dates`。**只讀、不 commit、無 secret**，`permissions` 僅 `contents: read`＋`issues: write`。
+- 不符 → exit 1 → 紅燈 → notify-failure 開 issue；**issue 本文只有 run 連結**（共用 action 的既有行為，未改），不符的日期／鏈名／兩邊數值／相對差在該 run 的
+  log（`::error::`）與 job summary。修復：`python src/build_chain_daily.py --recheck-dates <日期>`（需 `FINMIND_TOKEN`；目前沒有 workflow 輸入可帶這個參數，要在有 token 的環境手動跑）。
+- 測試 `tests/test_reconcile_daily.py`（30 項；末支在同層有 taiwan-flows checkout 時對真實資料跑並竄改一日一鏈）。
+- **上線後待驗**：baseline 班 log 出現「近日重抓 3 天…」、series.json 有無因此產生差異；`reconcile.yml` 第一次排程結果；`claude-harness/docs/schedule-map.md` 待另案同步。
 
 ## 盤中 RRG 盤外定格（`data/rrg_frozen.json`，2026-09-11）
 

@@ -186,6 +186,35 @@ def build_subs_y(s1, s2, stats):
     return out
 
 
+def stock_rows(pd, keep, it, fi, its, net0, y1, y2):
+    """逐檔列 stocks＝{code: [a5, it, fi, y1, y2, ints, nl, its, nh, a20]} 與 tot5（純計算）。
+
+    pd＝每日 {c:(amt,close,high,low)} 新→舊（至少 NDAYS 天）；其餘為各旗標的 {code: 值}。
+    2026-11-18 由 main() 原樣抽出（迴圈本體一字未動），供 tools/reconcile_daily.py 以
+    taiwan-flows 的逐日檔重算 a5／a20／nh／nl 對帳——對帳不得另寫一份口徑
+    （docs/chain-daily-recheck.md §2.6）。回 (stocks, tot5)，tot5 為未取整的 float。"""
+    stocks = {}
+    tot5 = 0.0
+    for c in keep:
+        arr = [pd[k].get(c) for k in range(5)]
+        amts = [a[0] for a in arr if a]
+        if not amts:
+            continue
+        a5 = sum(amts) / 5
+        # 法人強度%（最近一日）與 破20日新低/突破20日新高（對稱）
+        cur = pd[0].get(c)
+        ints = 0.0
+        nh = nl = 0
+        if cur and cur[0] and cur[1] is not None:
+            ints = round(net0.get(c, 0) * cur[1] / cur[0] * 1000) / 10
+            prevs = [v[1] for v in (pd[k].get(c) for k in range(1, NDAYS)) if v and v[1] is not None]
+            nh, nl = nh_nl(cur[1], prevs)
+        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0), ints, nl, its.get(c, 0),
+                     nh, a20_of(pd, c)]
+        tot5 += a5
+    return stocks, tot5
+
+
 def fresh_wait_skip(today_iso: str, cal) -> str | None:
     """今天要不要**跳過** freshness 空等（回原因字串＝跳過；None＝要等）。
 
@@ -295,25 +324,7 @@ def main():
     s1, sub_stats = sub_signal(pd, 0, members)   # 當日 stats 供 subs_y 的 C/R
     s2, _ = sub_signal(pd, 1, members)           # y2 只需旗標，不需昨日 C/R
 
-    stocks = {}
-    tot5 = 0.0
-    for c in keep:
-        arr = [pd[k].get(c) for k in range(5)]
-        amts = [a[0] for a in arr if a]
-        if not amts:
-            continue
-        a5 = sum(amts) / 5
-        # 法人強度%（最近一日）與 破20日新低/突破20日新高（對稱）
-        cur = pd[0].get(c)
-        ints = 0.0
-        nh = nl = 0
-        if cur and cur[0] and cur[1] is not None:
-            ints = round(net0.get(c, 0) * cur[1] / cur[0] * 1000) / 10
-            prevs = [v[1] for v in (pd[k].get(c) for k in range(1, NDAYS)) if v and v[1] is not None]
-            nh, nl = nh_nl(cur[1], prevs)
-        stocks[c] = [round(a5), it.get(c, 0), fi.get(c, 0), y1.get(c, 0), y2.get(c, 0), ints, nl, its.get(c, 0),
-                     nh, a20_of(pd, c)]
-        tot5 += a5
+    stocks, tot5 = stock_rows(pd, keep, it, fi, its, net0, y1, y2)
     subs_y = build_subs_y(s1, s2, sub_stats)
 
     out = {"date": days[0], "days": days, "tot5": round(tot5), "stocks": stocks, "subs_y": subs_y}

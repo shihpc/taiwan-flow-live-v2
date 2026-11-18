@@ -22,6 +22,16 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
 
 ## 快速接手
 
+- **chain_daily 近日重抓＋延後對帳（2026-11-18，規格 `docs/chain-daily-recheck.md`）**：①`src/build_chain_daily.py` 每班重抓重算序列最近
+  3 個交易日（`RECHECK_DAYS`；失敗／回空／資料明顯較差一律保留既有值並印 warning、不讓整班失敗），另加 `--recheck-dates`（手動修單日）、
+  `--recheck-days`、`--recheck-force`；`baseline.yml` 的 chain daily 步驟由「比 dates 最新一天」改為比內容
+  （`tools/noop_guard.py --worktree`）。每班多 3 個 FinMind 全市場單日請求。②新增 `tools/reconcile_daily.py`＋`reconcile.yml`
+  （台北週二~六 07:37、只讀、免 token、不 commit）：以 taiwan-flows 已延後驗證的 `data/daily/*.json` 重算，對帳 `chain_daily/series.json`
+  最近 3 個交易日與 `baseline.json` 的 a5／a20／創高破底，不符開 issue（`v2-reconcile`）；對照檔晚到屬「無法對帳」不判不符。
+  對 2026-10-05～11-17 共 29 個交易日實跑全數相符（11-18 當時對照檔尚未驗證）。**沒有重建任何既有資料、沒有動 `worker/`**。
+  workflow 總數 17 支。細節、門檻依據與已知漏洞見 `CLAUDE.md`「chain_daily 近日重抓＋延後對帳」節。
+  **上線後待驗**：baseline 班 log 的「近日重抓」訊息與 series.json 是否因此有差異、reconcile 第一次排程結果。
+
 - **股市易經每日班主觸發角色 `iching`（2026-09-14）**：CF cron 第 21 條 `30 14,15 * * 2-6`（台北 22:30／23:30 週一～五）
   → `dispatchIching` dispatch `taiwan-stock-iching/daily.yml`（`workflow_dispatch`、inputs 空）。該 repo 只 workflow_dispatch、
   無 GH cron 兜底，故 dispatch 兩次都失敗走 `alertJob`（tag `iching-dispatch-err`）；22:30 撞哨兵窗、23:30 撞晚場班窗，
@@ -73,6 +83,7 @@ commit `ab8c766`；圖卡時序修正走通主路徑（`/jobs?date=20260810` 的
     ①報酬須用 `spread ÷ (close − spread)` 計算，否則**除權息會被當成假跌**；
     ② FinMind TAIEX 有 **12 天壞資料**，改用收盤比值自我對帳攔下。
     已掛 `baseline.yml` 夜間增量（失敗不阻擋既有 commit、紅燈延後發）。
+    （2026-11-18 起每班另重抓最近 3 個交易日、commit 判斷改比內容，見「快速接手」首條。）
   - **第二階段｜軸定義（commit `8219485`，rebase 後為 `60cc897` 內容）**：定案 **B-ew**
     （價格版 × 等權）、n=12、k=10、N=3。
     - 新增**置換虛無判準**（隨機 Jaccard 就有 33%）；候補清單 Jaccard **70.2%**（扣虛無 +35pp）。

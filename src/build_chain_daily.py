@@ -93,7 +93,9 @@
 #   代價：每次更新整檔重寫。以本檔規模（數百 KB）與每日一次的頻率可接受。
 #
 # 增量更新：
-#   - 已在 series.json 的日期不重算、不重抓（單日自足，見上）。
+#   - 已在 series.json 的日期不重算、不重抓（單日自足，見上）——**但最近 RECHECK_DAYS 個
+#     交易日例外**（2026-11-18，docs/chain-daily-recheck.md）：每班重抓重算並覆寫，
+#     見下方「近日重抓」常數段與 `def recheck_reject_reason`。
 #   - 原始日線落地在 backtest/cache/chainday_YYYY-MM-DD.json.gz（已被 .gitignore 擋住），
 #     重跑／--rebuild 時免再打 API。
 #   - **cache 格式 v2 起與 classify 脫鉤**：落檔的是「代號開頭為數字」的全部個股
@@ -123,6 +125,7 @@
 #   python src/build_chain_daily.py --start 2025-06-16 --end 2026-08-11
 #   python src/build_chain_daily.py --rebuild          # 用 cache 重算全部（不重抓）
 #   python src/build_chain_daily.py --rebuild --refetch-stale   # classify 換版後
+#   python src/build_chain_daily.py --recheck-dates 2026-11-17,2026-11-18   # 只重抓指定日
 #   token 走 src/fin.py 的既有機制（環境變數 FINMIND_TOKEN 或 repo 根 .env），
 #   不寫進任何會 commit 的檔案。
 
@@ -156,6 +159,27 @@ MWCOV_DIG = 6                  # mw_amt_coverage 的有效位數（4 位會讓�
 TAIEX = "_TAIEX"
 TOPN = 10                      # 覆蓋率診斷的 N（規格 §5：畫布錨點＝成交額 Top 10）
 CACHE_V = 2                    # cache 格式版本（v2 起與 classify 脫鉤，見檔頭）
+
+# ── 近日重抓（2026-11-18，規格 docs/chain-daily-recheck.md §1）────────────────
+# 起因：全市場單日 TaiwanStockPrice 是「非空即採用」，而已在序列裡的日期原本永不重抓。
+# FinMind 當日資料若在首班時尚未更新完（taiwan-flows 2026-06-26 事故同一資料集：
+# 2,687 檔中 922 檔是暫定值、列數完全正常），錯值會永久留在序列裡。
+# 修法：一般（增量）模式每班把序列**最近 RECHECK_DAYS 個交易日**重抓重算並覆寫。
+#   3 天的理由：baseline 班每個交易日至少跑兩次（Worker 20:05 主觸發＋21:15 備援 cron），
+#   一個交易日因此會在當日晚班、次一、次二、次三個交易日的班次各被重抓一輪（合計 ≥6 次），
+#   足以跨過「當晚未更新完」與連假前後的延遲入庫；再多只是多打 API。
+# 防護（寧可不改也不改壞；被拒絕的一律保留既有值並印 ::warning::、不讓整班失敗）：
+#   - 抓取失敗／回空／聚合後市場總額為 0 → 保留既有值；
+#   - 重抓資料「明顯較差」→ 不覆寫（`def recheck_reject_reason`）：
+#       成員檔數 n < 既有 × RECHECK_MIN_N_RATIO、或市場總額 < 既有 × RECHECK_MIN_AMT_RATIO、
+#       或既有有指數收盤而重抓沒有。
+#     序列裡可比的完整性指標只有 market.n（當日有列的 twse 個股數）與 market.amt，
+#     **不另加欄位**（不改形狀）。限制：「列數正常但數值是舊值」（06-26 型）這兩個指標
+#     看不出來——那由 tools/reconcile_daily.py 的延後對帳負責。
+#   - 手動修復確定要蓋掉時用 --recheck-force 繞過「明顯較差」防護（失敗／回空仍保留）。
+RECHECK_DAYS = 3
+RECHECK_MIN_N_RATIO = 0.98     # classify 月更的成員增減遠小於 2%；少 2% 以上＝資料不完整
+RECHECK_MIN_AMT_RATIO = 0.90   # 更正通常讓金額持平或增加；驟降 10% 以上視為抓到殘缺資料
 
 
 # ------------------------------------------------------------------ 小工具
@@ -472,6 +496,44 @@ def columnar(days: dict[str, dict], chain_names: list[str],
     return dates, market, chains, cov, qual
 
 
+# ------------------------------------------------------------------ 近日重抓（純函式）
+
+def recheck_targets(existing_dates, n: int = RECHECK_DAYS) -> list[str]:
+    """一般模式要重抓的日期：既有序列最近 n 個交易日（舊→新）。n ≤ 0 → 不重抓。"""
+    ds = sorted(existing_dates)
+    return ds[-n:] if n and n > 0 else []
+
+
+def recheck_reject_reason(old: dict, new: dict) -> str | None:
+    """重抓得到的單日聚合是否「明顯不如既有值」。回原因字串＝不得覆寫；None＝可覆寫。
+
+    old/new 都是單日聚合（aggregate_day 的形狀；old 來自 load_existing，金額已還原成元）。
+    判準與門檻見檔頭常數段「近日重抓」。"""
+    om, nm = old.get("market") or {}, new.get("market") or {}
+    o_n, n_n = om.get("n") or 0, nm.get("n") or 0
+    o_a, n_a = om.get("amt") or 0.0, nm.get("amt") or 0.0
+    if o_n and n_n < o_n * RECHECK_MIN_N_RATIO:
+        return (f"成員檔數 {n_n} < 既有 {o_n} × {RECHECK_MIN_N_RATIO}")
+    if o_a and n_a < o_a * RECHECK_MIN_AMT_RATIO:
+        return (f"市場總額 {n_a / 1e8:.1f} 億 < 既有 {o_a / 1e8:.1f} 億 × {RECHECK_MIN_AMT_RATIO}")
+    if om.get("taiex") is not None and nm.get("taiex") is None:
+        return "重抓資料缺加權指數列（既有值有）"
+    return None
+
+
+def day_changed(old: dict, new: dict, chain_names: list[str]) -> bool:
+    """兩份單日聚合寫進 series.json 後是否不同（用與落檔相同的四捨五入比；不看 sp0 診斷欄）。"""
+    def f(day):
+        d = dict(day, qual={})
+        _, m, ch, cov, q = columnar({"x": d}, chain_names)
+        return m, ch, cov, q["mw_cov"], q["tx_spread0"]
+    o = dict(old)
+    # load_existing 還原的既有日把 _mw_cov／_tx_spread0 放在 qual，搬回 market 才可比
+    oq = old.get("qual") or {}
+    o["market"] = dict(old["market"], _mw_cov=oq.get("mw_cov"), _tx_spread0=oq.get("tx_spread0"))
+    return f(o) != f(new)
+
+
 # ------------------------------------------------------------------ I/O
 
 def load_classify() -> dict:
@@ -564,7 +626,8 @@ def load_existing(path: Path) -> tuple[dict[str, dict], set[str], dict]:
 # ------------------------------------------------------------------ 主流程
 
 def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
-          refetch_stale: bool = False) -> int:
+          refetch_stale: bool = False, recheck_days: int | None = None,
+          recheck_dates: list[str] | None = None, recheck_force: bool = False) -> int:
     if not CLASSIFY.exists():
         print(f"::error::找不到 {CLASSIFY}", file=sys.stderr)
         return 1
@@ -589,7 +652,88 @@ def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
     stale_days: list[str] = []
     prev_seen: tuple[str, dict] | None = None       # 上一個實際載入 prices 的日子
 
-    for ds in targets:
+    # ── 近日重抓（見檔頭常數段）：--rebuild（全部重算）與 --offline（不打 API）不適用 ──
+    if rebuild or offline:
+        recheck: set[str] = set()
+    elif recheck_dates:
+        miss = [d for d in recheck_dates if d not in old_days]
+        if miss:
+            print(f"::warning::--recheck-dates 指定的 {'、'.join(miss)} 不在既有序列內"
+                  "（不重抓；若在 --start/--end 範圍內會照一般缺日流程回補）", file=sys.stderr)
+        recheck = {d for d in recheck_dates if d in old_days}
+    else:
+        recheck = set(recheck_targets(old_days, RECHECK_DAYS if recheck_days is None
+                                      else recheck_days))
+    rechecked = changed = kept = 0
+    changed_days: list[str] = []
+
+    def prev_prices(ds: str, allow_fetch: bool) -> dict | None:
+        """ds 前一交易日的原始價（sp0 診斷用）：本輪剛載入的 → cache →（允許時）現抓。"""
+        pd_ = prev_trading_day(ds, nontrading | set(new_nontrading))
+        if not pd_:
+            return None
+        if prev_seen and prev_seen[0] == pd_:
+            return prev_seen[1]
+        pp_ = cache_read(pd_)[0]
+        if pp_ or not allow_fetch:
+            return pp_ or None
+        try:
+            pp_ = fetch_day(pd_)
+            time.sleep(SLEEP)
+        except Exception as e:                      # noqa: BLE001
+            print(f"::warning::{pd_} 前一日原始價抓取失敗（{ds} 的 sp0 診斷欄沿用舊值）：{e}",
+                  file=sys.stderr, flush=True)
+            return None
+        return pp_ or None
+
+    for ds in sorted(set(targets) | recheck):
+        if ds in recheck:
+            # 重抓：永遠打 API（不讀 cache——cache 就是可能有問題的那一份），
+            # 任何不如意都保留既有值（days[ds] 不動），整班照常往下走。
+            rechecked += 1
+            old = old_days[ds]
+            try:
+                prices = fetch_day(ds)
+                fetched += 1
+                time.sleep(SLEEP)
+            except Exception as e:                  # noqa: BLE001
+                print(f"::warning::{ds} 重抓失敗，保留既有值：{e}", file=sys.stderr, flush=True)
+                kept += 1
+                prev_seen = None
+                continue
+            agg = aggregate_day(prices, cmap) if prices else None
+            if not agg or not agg["market"]["amt"]:
+                print(f"::warning::{ds} 重抓回空（或市場總額為 0），保留既有值",
+                      file=sys.stderr, flush=True)
+                kept += 1
+                prev_seen = None
+                continue
+            why = None if recheck_force else recheck_reject_reason(old, agg)
+            if why:
+                print(f"::warning::{ds} 重抓資料明顯不如既有值（{why}），不覆寫",
+                      file=sys.stderr, flush=True)
+                kept += 1
+                prev_seen = None
+                continue
+            cache_write(ds, prices, classify_at)
+            diff = day_changed(old, agg, chain_names)
+            # sp0 診斷欄：既有值是 None（CI 無 cache 的日子）就維持 None——重抓不改變
+            # 診斷欄的涵蓋範圍，資料沒變時輸出才逐位不變；既有有值則用新原始價重算，
+            # 拿不到前一日原始價時，內容有變才多抓一次前一日，否則沿用舊值。
+            oq = old.get("qual") or {}
+            q = {"sp0_up": oq.get("sp0_up"), "sp0_n": oq.get("sp0_n")}
+            if oq.get("sp0_n") is not None:
+                pp = prev_prices(ds, allow_fetch=diff)
+                if pp:
+                    hit, chk = spread_zero_up(prices, pp, cmap)
+                    q = {"sp0_up": hit, "sp0_n": chk}
+            agg["qual"] = q
+            days[ds] = agg
+            prev_seen = (ds, prices)
+            if diff:
+                changed += 1
+                changed_days.append(ds)
+            continue
         if ds in days:
             reused += 1
             continue
@@ -642,6 +786,43 @@ def build(start: str, end: str, out_path: Path, rebuild: bool, offline: bool,
         if fetched and fetched % 20 == 0 and fetched != last_note:
             last_note = fetched
             print(f"  … 已抓 {fetched} 天（最新 {ds}）", flush=True)
+
+    # 重抓日有變動時，緊接其後的交易日若不在本輪重抓／新抓之列，它的 sp0 診斷欄
+    # （拿自己的 spread 對照「前一日收盤」）輸入已變 → 跟著重算（只發生在 --recheck-dates
+    # 指定較舊日期時；一般模式重抓的是最末幾天，後面只有本輪新抓的日子）。
+    # 其餘欄位全是單日自足；taiex_ret 由 columnar() 用整條收盤序列現算，自動一致。
+    all_dates = sorted(days)
+    for ds in changed_days:
+        i = all_dates.index(ds)
+        nxt = all_dates[i + 1] if i + 1 < len(all_dates) else None
+        if not nxt or nxt in recheck or nxt not in old_days:
+            continue
+        if prev_trading_day(nxt, set(nontrading) | set(new_nontrading)) != ds:
+            continue
+        nq = days[nxt].get("qual") or {}
+        if nq.get("sp0_n") is None:
+            continue
+        np_ = cache_read(nxt)[0]
+        if not np_:
+            try:
+                np_ = fetch_day(nxt)
+                fetched += 1
+                time.sleep(SLEEP)
+            except Exception as e:                  # noqa: BLE001
+                print(f"::warning::{nxt} 原始價抓取失敗，sp0 診斷欄沿用舊值：{e}",
+                      file=sys.stderr, flush=True)
+                continue
+        cur = cache_read(ds)[0]
+        if not np_ or not cur:
+            continue
+        hit, chk = spread_zero_up(np_, cur, cmap)
+        days[nxt] = dict(days[nxt], qual=dict(nq, sp0_up=hit, sp0_n=chk))
+
+    if rechecked:
+        print(f"近日重抓 {rechecked} 天（{'、'.join(sorted(recheck))}）："
+              f"內容有變 {changed} 天"
+              + (f"（{'、'.join(changed_days)}）" if changed_days else "")
+              + f"、保留既有值 {kept} 天", flush=True)
 
     if stale_days:
         head = "、".join(stale_days[:6]) + ("…" if len(stale_days) > 6 else "")
@@ -781,9 +962,27 @@ def main() -> int:
                          "單獨下這個旗標對存量日期完全無效，只會影響尚未回補的新日期")
     ap.add_argument("--offline", action="store_true",
                     help="只用 backtest/cache 現有檔，完全不打 API（免 token）")
+    ap.add_argument("--recheck-days", type=int, default=None,
+                    help=f"一般模式每班重抓重算序列最近 N 個交易日（預設 {RECHECK_DAYS}；0＝不重抓）。"
+                         "--rebuild／--offline 時不適用")
+    ap.add_argument("--recheck-dates", default=None,
+                    help="只重抓重算指定日期（逗號分隔 YYYY-MM-DD，須已在序列內），取代自動的"
+                         "最近 N 日；發現單日錯值時手動修復用，例：--recheck-dates 2026-11-17,2026-11-18")
+    ap.add_argument("--recheck-force", action="store_true",
+                    help="重抓資料即使「明顯不如既有值」（檔數／總額驟降）也覆寫；"
+                         "抓取失敗或回空仍保留既有值")
     a = ap.parse_args()
     end = a.end or datetime.now(TPE).date().isoformat()
-    return build(a.start, end, Path(a.out), a.rebuild, a.offline, a.refetch_stale)
+    rd = None
+    if a.recheck_dates:
+        rd = [x.strip() for x in a.recheck_dates.split(",") if x.strip()]
+        for x in rd:
+            try:
+                date.fromisoformat(x)
+            except ValueError:
+                ap.error(f"--recheck-dates 日期格式不合：{x!r}（需 YYYY-MM-DD）")
+    return build(a.start, end, Path(a.out), a.rebuild, a.offline, a.refetch_stale,
+                 recheck_days=a.recheck_days, recheck_dates=rd, recheck_force=a.recheck_force)
 
 
 if __name__ == "__main__":

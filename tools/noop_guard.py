@@ -17,6 +17,13 @@ JSON 解析失敗 → 一律算真變化（寧可多 commit，不可漏 commit�
 exit code：0＝有實質變動（照常 commit）；3＝全部 staged 檔都只有時間戳變動（noop）；
 守門自身出錯（git 不可用等）→ 印 ::warning 後回 0（fail-open：守門壞了不該擋資料落地）。
 無第三方依賴（只用標準函式庫＋git CLI）。
+
+另一種用法（2026-11-18，baseline.yml 的 chain daily 步驟）：比**工作區**的單一檔與 HEAD，
+不必先 git add——
+    rc=0; python tools/noop_guard.py --worktree data/chain_daily/series.json || rc=$?
+    if [ "$rc" = "3" ]; then git checkout -- data/chain_daily/; fi
+exit code 語意相同（0＝有實質變動／3＝只有頂層時間戳不同）；HEAD 沒有該檔、檔案讀不到、
+JSON 壞掉、守門自身出錯 → 一律 0（算真變化，fail-open）。
 """
 from __future__ import annotations
 
@@ -110,7 +117,31 @@ def staged_entries():
     return entries
 
 
+def worktree_same(path: str, read_head=None, read_file=None) -> bool:
+    """工作區的 path 與 HEAD 版本在忽略頂層時間戳鍵後是否相同（任何讀不到 → False）。"""
+    old = (read_head or _read_head)(path)
+    if old is None:
+        return False
+    try:
+        new = read_file(path) if read_file else open(path, encoding="utf-8").read()
+    except OSError:
+        return False
+    return json_same_except_ts(old, new)
+
+
 def main(argv=None) -> int:
+    argv = list(argv or [])
+    if argv[:1] == ["--worktree"]:
+        if len(argv) != 2:
+            print("::warning::noop_guard --worktree 需要恰一個路徑，視為有實質變動")
+            return EXIT_CHANGE
+        try:
+            same = worktree_same(argv[1])
+        except Exception as e:  # noqa: BLE001 — fail-open
+            print(f"::warning::noop_guard 自身失敗（{e!r}），視為有實質變動")
+            return EXIT_CHANGE
+        print(f"noop_guard: {argv[1]} " + ("與 HEAD 只差頂層時間戳 → noop" if same else "內容有異 → 真變化"))
+        return EXIT_NOOP if same else EXIT_CHANGE
     try:
         entries = staged_entries()
         real, report = classify(entries, _read_head, _read_staged)
