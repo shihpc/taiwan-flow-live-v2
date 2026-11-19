@@ -1,0 +1,58 @@
+name: reconcile
+# 延後對帳（2026-11-18，規格 docs/chain-daily-recheck.md §2）：以 taiwan-flows 已經過延後驗證的
+# data/daily/<YYYYMMDD>.json 重算，比對本 repo 的 data/chain_daily/series.json（最近 3 個交易日的
+# 市場總額／市場等權報酬／各鏈日成交額）與 data/baseline.json（a5／a20／創高破底旗標）。
+# - **只讀、免 token、不 commit、不寫任何資料檔、不需要任何 secret**；對照檔走公開的 raw URL。
+# - 不符 → 腳本 exit 1 → 本 job 紅 → notify-failure 開 issue（pipeline: v2-reconcile）；不符的日期、
+#   鏈名、兩邊數值與相對差在本次 run 的 log（::error::）與 job summary。
+# - 「無法對帳」（對照檔 404、taiwan-flows 該日 healthcheck 仍 pending、classify 剛換版、休市日）
+#   只印 ::warning::、照常綠燈——不得因為對照來源晚到就判不符。
+# 時段：23:37 UTC 週一~五＝台北週二~六 07:37。排在 taiwan-flows 延後驗證班（台北 23:40）之後約 8 小時、
+#   本 repo baseline 晚班（Worker 20:05／備援 cron 21:15 台北）之後約 10 小時；家族 GitHub cron 延遲
+#   實測中位數 2h01m、p90 4h44m、最大 12h23m，8 小時涵蓋絕大多數情況。目標日＝台北現在回推 12 小時的
+#   日曆日（腳本 target_day），本班延遲 4 小時 23 分以內都還是「前一日」，不會因跨日而滾動；延遲更久時
+#   目標日變成當日，但每班對的是「序列中 ≤ 目標日的最近 3 個交易日」，前一日仍在其中。對照檔晚到而
+#   當班無法對帳的日子，隔天那班會補對（同一個 3 日窗）。分鐘取 :37 避開整點／半點塞車。
+on:
+  schedule:
+    - cron: '37 23 * * 1-5'   # 週一~五 23:37 UTC = 台北週二~六 07:37
+  workflow_dispatch:
+    inputs:
+      dates:
+        description: '指定對帳日期（逗號分隔 YYYY-MM-DD）；留空＝目標日往前 3 個交易日'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  issues: write   # notify-failure 開 issue
+
+concurrency:
+  group: reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # 腳本本身只用標準函式庫；requests 是它 import 的 src/fin.py（build_chain_daily／build_baseline 的相依）要的
+      - run: pip install requests
+      - name: reconcile
+        # inputs 經 env 傳入，不 ${{ }} 內插進 run 字串（防注入）；日期格式由腳本驗證
+        env:
+          DATES: ${{ inputs.dates }}
+        run: |
+          args=()
+          if [ -n "${DATES:-}" ]; then args+=(--dates "$DATES"); fi
+          python tools/reconcile_daily.py "${args[@]}"
+      - name: Notify failure
+        # cancelled 也要告警（failure() 在 cancelled 時不成立，2026-07-24 postmkt 教訓）
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-failure
+        with:
+          pipeline: v2-reconcile
