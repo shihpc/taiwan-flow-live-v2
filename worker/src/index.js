@@ -4357,6 +4357,16 @@ export function isoTaipei(ms) {
 }
 // 從 JSON 檔頭文字撈 date/generated_at（postmkt.json 逾 1.6MB，只抓 Range 檔頭時用；
 // 兩欄位是該檔前兩個 key，regex 取值即可，不需完整 parse）
+// iching status.json（taiwan-stock-iching scripts/build_status.py，P4-S）→ /status 欄位；形狀不合回 null（呼叫端回退 latest.json）。
+// data_date＝date（須 YYYY-MM-DD）、updated_at＝generated_at（須 +08:00 ISO 秒，否則 null）、note 依 status：ok→""、waiting→等待資料發布、
+// degraded→部分降級（N 項）。只描述，不改判級（level 仍由 gradeMarket 依 data_date＋dueHour 決定）。
+export function ichingStatusFields(j) {
+  if (!j || typeof j !== "object" || j.schema !== 1 || typeof j.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(j.date)) return null;
+  const g = typeof j.generated_at === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/.test(j.generated_at) ? j.generated_at : null;
+  const n = Array.isArray(j.degraded) ? j.degraded.length : 0;
+  const note = j.status === "waiting" ? "等待資料發布" : j.status === "degraded" ? `部分降級（${n} 項）` : "";
+  return { data_date: j.date, updated_at: g, note };
+}
 export function extractHeadFields(text) {
   return {
     date: (String(text).match(/"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"/) || [])[1] || null,
@@ -4445,7 +4455,9 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now(), 
   const BRIEF_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-news/main/daily-brief-card.json";
   const POSTMKT_URL = `${POSTMKT_BASE}/data/postmkt.json`;
   const BACKTEST_URL = "https://raw.githubusercontent.com/shihpc/taiwan-backtest/main/walkforward/ledger.csv";
-  const ICHING_STATUS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-iching/main/data/web/latest.json";
+  // iching（裁定 #76 Q8，2026-11-20）：主路徑讀 status.json（小檔，有 generated_at）；讀不到時回退 latest.json 檔頭（舊路徑，updated_at 為 null）
+  const ICHING_STATUS_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-iching/main/data/web/status.json";
+  const ICHING_LATEST_URL = "https://raw.githubusercontent.com/shihpc/taiwan-stock-iching/main/data/web/latest.json";
   const defs = [
     { id: "live", name: "即時類股動態", grade: "market", due: STATUS_DUE_HOUR.live, run: async () => statusSiteLive(env, tp, (await calP).cal) },
     { id: "flows", name: "盤後法人動態", grade: "market", due: STATUS_DUE_HOUR.flows, run: async () => {
@@ -4484,8 +4496,11 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now(), 
     // 該檔**無 generated_at**（2026-09-26 curl 實查檔頭：calibrated／data_version／date／generated_from／
     // market…），updated_at 固定 null、不拿 generated_from 之類的欄位臆造（同 backtest 立場）。
     { id: "iching", name: "股市易經", grade: "market", due: STATUS_DUE_HOUR.iching, run: async () => {
-      const h = extractHeadFields(await fetchStatusHead(fetchFn, ICHING_STATUS_URL));
-      return { data_date: h.date, updated_at: null, note: "" };
+      let j = null;
+      try { j = ichingStatusFields(await fetchStatusJson(fetchFn, ICHING_STATUS_URL)); } catch (e) { j = null; }
+      if (j) return j;
+      const h = extractHeadFields(await fetchStatusHead(fetchFn, ICHING_LATEST_URL));
+      return { data_date: h.date, updated_at: null, note: "status.json 讀不到，改讀 latest.json" };
     } },
   ];
   const results = await Promise.allSettled(defs.map((d) => d.run()));
