@@ -342,7 +342,7 @@ const SIX_BEFORE_EOD_2300 = '[{"id":"live","name":"即時類股動態","data_dat
   const ic = out.sites[6] || {};
   // 此 fixture 沒有 status.json（404）→ 走 Q8 回退路徑：latest.json 檔頭（2026-11-20 起 note 註明回退）
   chk("iching（回退路徑）：index 6、資料日取檔頭 date、updated_at null、note 註明 status.json 讀不到",
-    ic.id === "iching" && ic.name === "股市易經" && ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "status.json 讀不到，改讀 latest.json",
+    ic.id === "iching" && ic.name === "股市易經" && ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "status.json 讀不到或不可用，改讀 latest.json",
     JSON.stringify(ic));
   chk("iching：data_date 取頂層 date（2026-08-11），不是 generated_from 的 2026-08-10",
     ic.data_date === "2026-08-11" && ic.data_date !== "2026-08-10", JSON.stringify(ic));
@@ -659,7 +659,7 @@ const SIX_BEFORE_EOD_2300 = '[{"id":"live","name":"即時類股動態","data_dat
   for (const [label, f] of [["404", withStatus(null, 404)], ["schema≠1", withStatus(ST({ schema: 2 }))], ["date 形狀錯", withStatus(ST({ date: "11/08" }))],
                             ["壞 JSON", withStatus(() => { throw new SyntaxError("bad"); })], ["schema true", withStatus(ST({ schema: true }))]]) {
     ic = await run(f);
-    chk(`Q8：status.json ${label} → 回退 latest.json 檔頭`, ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "status.json 讀不到，改讀 latest.json", JSON.stringify(ic));
+    chk(`Q8：status.json ${label} → 回退 latest.json 檔頭`, ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "status.json 讀不到或不可用，改讀 latest.json", JSON.stringify(ic));
   }
   const both = async (url, init) => (String(url).includes("/taiwan-stock-iching/") ? { ok: false, status: 503, json: async () => null, text: async () => "" } : okFetch(url, init));
   ic = await run(both);

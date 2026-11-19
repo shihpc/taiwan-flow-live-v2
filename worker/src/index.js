@@ -4355,11 +4355,10 @@ export function gradeBacktest(lastDate, tp, cal = null) {
 export function isoTaipei(ms) {
   return new Date(ms + 8 * 3600e3).toISOString().slice(0, 19) + "+08:00";
 }
-// 從 JSON 檔頭文字撈 date/generated_at（postmkt.json 逾 1.6MB，只抓 Range 檔頭時用；
-// 兩欄位是該檔前兩個 key，regex 取值即可，不需完整 parse）
 // iching status.json（taiwan-stock-iching scripts/build_status.py，P4-S）→ /status 欄位；形狀不合回 null（呼叫端回退 latest.json）。
 // data_date＝date（須 YYYY-MM-DD）、updated_at＝generated_at（須 +08:00 ISO 秒，否則 null）、note 依 status：ok→""、waiting→等待資料發布、
 // degraded→部分降級（N 項）。只描述，不改判級（level 仍由 gradeMarket 依 data_date＋dueHour 決定）。
+// updated_at 語意＝「狀態內容最後一次改變的時刻」：build_status 內容未變時沿用舊 generated_at（該 repo §15 D4），不是每班產出時刻。
 export function ichingStatusFields(j) {
   if (!j || typeof j !== "object" || j.schema !== 1 || typeof j.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(j.date)) return null;
   const g = typeof j.generated_at === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/.test(j.generated_at) ? j.generated_at : null;
@@ -4367,6 +4366,8 @@ export function ichingStatusFields(j) {
   const note = j.status === "waiting" ? "等待資料發布" : j.status === "degraded" ? `部分降級（${n} 項）` : "";
   return { data_date: j.date, updated_at: g, note };
 }
+// 從 JSON 檔頭文字撈 date/generated_at（postmkt.json 逾 1.6MB，只抓 Range 檔頭時用；
+// 兩欄位是該檔前兩個 key，regex 取值即可，不需完整 parse）
 export function extractHeadFields(text) {
   return {
     date: (String(text).match(/"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"/) || [])[1] || null,
@@ -4500,7 +4501,7 @@ export async function buildStatus(env, tp, fetchFn = fetch, nowMs = Date.now(), 
       try { j = ichingStatusFields(await fetchStatusJson(fetchFn, ICHING_STATUS_URL)); } catch (e) { j = null; }
       if (j) return j;
       const h = extractHeadFields(await fetchStatusHead(fetchFn, ICHING_LATEST_URL));
-      return { data_date: h.date, updated_at: null, note: "status.json 讀不到，改讀 latest.json" };
+      return { data_date: h.date, updated_at: null, note: "status.json 讀不到或不可用，改讀 latest.json" };
     } },
   ];
   const results = await Promise.allSettled(defs.map((d) => d.run()));
