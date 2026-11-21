@@ -3,7 +3,7 @@
 import { addDaysISO, lastExpectedTradingDate, lastExpectedDailyDate, dueReached,
   prevExpectedTradingDate, gradeMarket,
   gradeNews, gradeBrief, isoTaipei, extractHeadFields, buildStatus,
-  STATUS_DUE_HOUR, backtestRefClock, gradeBacktest, extractTailDate } from "../src/index.js";
+  STATUS_DUE_HOUR, backtestRefClock, gradeBacktest, extractTailDate, ichingStatusFields } from "../src/index.js";
 
 let pass = 0, fail = 0;
 function chk(name, ok, detail) {
@@ -340,8 +340,9 @@ const SIX_BEFORE_EOD_2300 = '[{"id":"live","name":"即時類股動態","data_dat
     live.data_date === "2026-08-11" && live.updated_at === "2026-08-11T13:30:00+08:00");
   chk("brief 判 date 而非 generated_at", out.sites[3].data_date === "2026-08-11");
   const ic = out.sites[6] || {};
-  chk("iching：index 6、資料日取檔頭 date、updated_at 固定 null、note 空字串",
-    ic.id === "iching" && ic.name === "股市易經" && ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "",
+  // 此 fixture 沒有 status.json（404）→ 走 Q8 回退路徑：latest.json 檔頭（2026-11-20 起 note 註明回退）
+  chk("iching（回退路徑）：index 6、資料日取檔頭 date、updated_at null、note 註明 status.json 讀不到",
+    ic.id === "iching" && ic.name === "股市易經" && ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "status.json 讀不到或不可用，改讀 latest.json",
     JSON.stringify(ic));
   chk("iching：data_date 取頂層 date（2026-08-11），不是 generated_from 的 2026-08-10",
     ic.data_date === "2026-08-11" && ic.data_date !== "2026-08-10", JSON.stringify(ic));
@@ -630,6 +631,43 @@ const SIX_BEFORE_EOD_2300 = '[{"id":"live","name":"即時類股動態","data_dat
   chk("flows 缺料日 → 週六 level yellow（不再假綠）", f5.level === "yellow" && f5.data_date === "2026-09-24", JSON.stringify(f5));
   const f4 = (await buildStatus({ FLOW_KV: kv() }, TUE, withFlows({ status: "error" }), NOW)).sites[1];
   chk("flows 兩個日期欄都缺 → data_date null", f4.data_date === null && f4.note === "健檢 error", JSON.stringify(f4));
+}
+
+// ---- Q8（裁定 #76，2026-11-20）：iching 主路徑讀 status.json ----
+{
+  const ST = (o) => ({ schema: 1, date: "2026-08-11", generated_at: "2026-08-11T23:33:43+08:00", status: "ok", degraded: [], ...o });
+  const withStatus = (body, status = 200) => async (url, init) => {
+    if (String(url).endsWith("/taiwan-stock-iching/main/data/web/status.json")) {
+      if (status !== 200) return { ok: false, status, json: async () => null, text: async () => "" };
+      return { ok: true, status: 200, json: async () => (typeof body === "function" ? body() : body), text: async () => JSON.stringify(body) };
+    }
+    return okFetch(url, init);
+  };
+  const run = async (f) => ichingOf(await buildStatus({ FLOW_KV: fakeKV({ "fi:2026-08-11": ["13:30"] }) }, TUE, f, NOW));
+  let ic = await run(withStatus(ST()));
+  chk("Q8 主路徑：data_date＝status.date、updated_at＝generated_at、note 空、level green",
+    ic.data_date === "2026-08-11" && ic.updated_at === "2026-08-11T23:33:43+08:00" && ic.note === "" && ic.level === "green", JSON.stringify(ic));
+  ic = await run(withStatus(ST({ status: "waiting" })));
+  chk("Q8：status waiting → note「等待資料發布」", ic.note === "等待資料發布", JSON.stringify(ic));
+  ic = await run(withStatus(ST({ status: "degraded", degraded: ["pick_stale", "ind_stale"] })));
+  chk("Q8：status degraded → note「部分降級（2 項）」、level 不因此改變", ic.note === "部分降級（2 項）" && ic.level === "green", JSON.stringify(ic));
+  ic = await run(withStatus(ST({ date: "2026-08-10" })));
+  chk("Q8：判級仍由 data_date＋dueHour 決定（落後一交易日、未到 23:45 → 依 gradeMarket）",
+    ic.data_date === "2026-08-10" && ic.level === gradeMarket("2026-08-10", TUE, STATUS_DUE_HOUR.iching), JSON.stringify(ic));
+  ic = await run(withStatus(ST({ generated_at: "2026-08-11 23:33" })));
+  chk("Q8：generated_at 形狀不合 → updated_at null（其餘照用）", ic.updated_at === null && ic.data_date === "2026-08-11", JSON.stringify(ic));
+  for (const [label, f] of [["404", withStatus(null, 404)], ["schema≠1", withStatus(ST({ schema: 2 }))], ["date 形狀錯", withStatus(ST({ date: "11/08" }))],
+                            ["壞 JSON", withStatus(() => { throw new SyntaxError("bad"); })], ["schema true", withStatus(ST({ schema: true }))]]) {
+    ic = await run(f);
+    chk(`Q8：status.json ${label} → 回退 latest.json 檔頭`, ic.data_date === "2026-08-11" && ic.updated_at === null && ic.note === "status.json 讀不到或不可用，改讀 latest.json", JSON.stringify(ic));
+  }
+  const both = async (url, init) => (String(url).includes("/taiwan-stock-iching/") ? { ok: false, status: 503, json: async () => null, text: async () => "" } : okFetch(url, init));
+  ic = await run(both);
+  chk("Q8：status.json 與 latest.json 都讀不到 → red", ic.level === "red" && ic.data_date === null, JSON.stringify(ic));
+  const out = await buildStatus({ FLOW_KV: fakeKV({ "fi:2026-08-11": ["09:01", "09:02", "13:30"] }) }, TUE, withStatus(ST()), NOW);
+  chk("Q8：前六站輸出與改動前逐位相同（只動 iching 列）", JSON.stringify(out.sites.slice(0, 6)) === SIX_BEFORE_OK, JSON.stringify(out.sites.slice(0, 6)));
+  chk("Q8：ichingStatusFields 純函式", ichingStatusFields(null) === null && ichingStatusFields({ schema: 1, date: "2026-08-11" }).updated_at === null
+    && ichingStatusFields({ schema: 1, date: "2026-08-11", status: "degraded" }).note === "部分降級（0 項）");
 }
 
 console.log(`status.mjs: ${pass} pass, ${fail} fail`);

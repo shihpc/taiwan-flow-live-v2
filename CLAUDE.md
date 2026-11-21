@@ -504,6 +504,12 @@ iching 抓 `taiwan-stock-iching/data/web/latest.json`（`ICHING_STATUS_URL`，�
 1,357,182 bytes），同 postmkt 手法 **Range 只取檔頭**再 `extractHeadFields` 撈 `date`（sort_keys 後在前 70 bytes）；
 **該檔沒有 `generated_at`**（檔頭實查：`calibrated`／`data_version`／`date`／`generated_from`／`market`…），
 故 `updated_at` 固定 `null`——不拿 `generated_from` 之類的欄位臆造（同 backtest 立場）。
+**2026-11-20 起（裁定 #76 Q8，該 repo P4-S 的 `data/web/status.json` 上線後）iching 主路徑改讀 `status.json`**（小檔、`fetchStatusJson`；純函式
+`export function ichingStatusFields`）：`data_date`＝`date`（須 YYYY-MM-DD）、`updated_at`＝`generated_at`（須 `+08:00` ISO 秒，否則 null）、
+`note`：`status` ok→空、waiting→「等待資料發布」、degraded→「部分降級（N 項）」；**判級不變**（仍 `gradeMarket`＋dueHour 23.75＋行事曆）。
+`status.json` 讀不到／壞檔／`schema` 不是整數 1／`date` 形狀錯 → **回退**上述 latest.json 檔頭路徑（`updated_at` null、note「status.json 讀不到或不可用，改讀 latest.json」）；
+兩者皆失敗＝原本的 red。前六站輸出逐位不變（`test/status.mjs` 釘值）。`updated_at` 語意＝**狀態內容最後一次改變的時刻**（該 repo build_status 內容未變時沿用舊 `generated_at`），
+與其他站「最後產出時刻」不同。已知限制：該 repo 每日班 build_status 失敗時 `status.json` 會留在前一版（合法但舊一日），本站會照舊日判級、不回退——那一班該 repo workflow 會轉紅燈告警。
 
 **時間感知判級（2026-09-07）**：舊 `gradeMarket` 不看時間、平日一律期待「今日」資料，但各站
 盤後管線是晚上才跑——**postmkt 每個平日從 00:00 到當晚產出為止都是 yellow（約 21/24 小時）**，
