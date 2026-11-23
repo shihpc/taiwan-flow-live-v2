@@ -1,6 +1,6 @@
 {
  "date": "2026-11-20",
- "generated_at": "2026-11-21T05:46:06+08:00",
+ "generated_at": "2026-11-23T16:09:46+08:00",
  "images": {
   "v2-ov-6": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-ov-6.png?d=2026-11-20",
   "v2-dash-1": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/v2-dash-1.png?d=2026-11-20",
@@ -10,7 +10,7 @@
   "pm-aetf-5": "https://raw.githubusercontent.com/shihpc/taiwan-flow-live-v2/main/data/cards/latest/pm-aetf-5.png?d=2026-11-20"
  },
  "ratios": {
-  "v2-ov-6": "1024:588",
+  "v2-ov-6": "987:1024",
   "v2-dash-1": "808:1024",
   "flows-foreign-1": "861:1024",
   "flows-trust-1": "861:1024",
